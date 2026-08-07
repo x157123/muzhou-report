@@ -1,0 +1,128 @@
+server:
+  port: 8888
+  servlet:
+    encoding:
+      charset: UTF-8
+      force: true
+
+spring:
+  application:
+    name: muzhou-report
+  jackson:
+    default-property-inclusion: non_null
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: GMT+8
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 50MB
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:db/schema-h2.sql
+      # optional: 前缀保证脚本缺失时不影响启动
+      data-locations:
+        - classpath:db/mz_dataset.sql
+        - classpath:db/mz_dataset_field.sql
+        - classpath:db/mz_dataset_param.sql
+        - classpath:db/mz_datasource.sql
+        - classpath:db/mz_report.sql
+        - classpath:db/order_items.sql
+        - classpath:db/order_shipments.sql
+        - classpath:db/orders.sql
+      continue-on-error: true
+  datasource:
+    dynamic:
+      primary: master
+      strict: false
+      hikari:
+        connection-timeout: 30000
+        max-lifetime: 1800000
+        maximum-pool-size: 10
+        minimum-idle: 2
+        connection-test-query: SELECT 1
+      datasource:
+        master:
+          driver-class-name: org.h2.Driver
+          url: jdbc:h2:file:./data/muzhoureport;MODE=MySQL;DATABASE_TO_LOWER=TRUE;AUTO_SERVER=TRUE
+          username: sa
+          password: ''
+
+mybatis-plus:
+  mapper-locations: classpath*:mapper/**/*.xml
+  type-aliases-package: com.muzhou.report.entity
+  configuration:
+    map-underscore-to-camel-case: true
+    default-enum-type-handler: org.apache.ibatis.type.EnumOrdinalTypeHandler
+  global-config:
+    banner: false
+    db-config:
+      id-type: assign_uuid
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+muzhou:
+  report:
+    # 单个数据集最大返回行数，防止 OOM。sql 用 setMaxRows，api/json 解析行数组时截断（都记 warn）
+    max-rows: 20000
+    # api 型数据集单次响应的字节上限，超过报错。行数上限是解析之后才生效的，
+    # 不在读流的时候掐断，一个还几百 MB 的接口就是一次 OOM
+    api-max-bytes: 33554432
+    # 同时进行的导出任务数（Excel/PDF/Word 共用）。导出全程在内存里，max-cells 只拦得住单次规模；
+    # 排队比 OOM 之后整个服务倒下强
+    export-concurrency: 4
+    # 排队等导出名额的最长秒数，等不到就报错让用户重试
+    export-wait-seconds: 60
+    # 数据集预览默认条数
+    preview-rows: 100
+    # SQL 执行超时(秒)
+    query-timeout: 30
+    # 渲染后最大单元格数
+    max-cells: 500000
+    # 父子关联（子接口查询）里主表最多驱动多少行子查询 —— 主表每行都要打一次子表的 SQL/接口
+    max-link-rows: 500
+    # 打开一张不存在的报表时是否当场建一张空白的（为「外部系统拿业务 KEY 直接开设计器」准备）。
+    # 代价是 GET /api/report/{id} 带上了写副作用，不靠这个能力的部署应当关掉。
+    # 只对设计器打开那条路生效，渲染/导出一律不建。
+    auto-create: true
+    # 接口请求/返回日志（调试用），实现见 config/RequestLogFilter
+    log:
+      # 关掉则一条不打
+      enabled: true
+      # 是否带请求体与响应体；关掉只打「方法 路径 状态码 耗时」一行
+      body: true
+      # 请求体/响应体单边最多打多少字符（渲染结果动辄几百 KB，全打控制台就没法看了）
+      max-body: 2000
+      # 只记这些路径
+      include:
+        - /api/**
+      # 这些路径不打响应体（请求体照打）：响应是几 MB 的二进制，缓存下来白占内存也打不出东西
+      exclude:
+        - /api/render/**/export/**
+      # 这些路径请求体与响应体都不打，只留一行摘要：请求体里带着业务库口令
+      mask:
+        - /api/datasource/**
+    # PDF 导出：后端先出 xlsx 再用 OpenPDF 逐格画成 pdf，纯 Java，不依赖 LibreOffice / MS Office
+    pdf:
+      # 正文字体文件，留空则自动探测系统中文字体（Windows 雅黑/宋体、Linux 文泉驿/Noto、macOS 苹方）。
+      # PDF 必须内嵌字体才能显示中文；服务器上一个中文字体都没有时中文会显示不出来，
+      # 此时装个中文字体（如 fonts-wqy-zenhei）或在这里指到具体字体文件。
+      # .ttc 字体集用「路径,序号」指定其中一款，例：C:/Windows/Fonts/msyh.ttc,0
+      font-path: ''
+    # 图片单元格（type=img / base64）导出时取图的配置。
+    # 只影响导出：预览时图片是浏览器自己去拉的，服务端不碰 —— 所以内网地址要**服务器**也能访问
+    image:
+      # 下载一张图片的连接/读取超时(毫秒)
+      timeout: 5000
+      # 相对路径图片（/upload/a.png）所在的站点，例：http://10.0.0.9:8080
+      # 前端拼上当前站点就能显示，服务端没有「当前页面」这个上下文，不配就只能跳过
+      base-url: ''
+      # 单张图片的字节数上限，超过就跳过这一张（导出不中断）。
+      # 图片是随数据行扩展出来的，500 行就是 500 张，不设上限一个指错的地址就能把内存吃光
+      max-bytes: 5242880
+
+logging:
+  level:
+    com.muzhou.report: debug
+    com.baomidou.dynamic: warn

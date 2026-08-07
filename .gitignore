@@ -1,0 +1,30 @@
+# 构建产物
+target/
+dist/
+node_modules/
+.vite/
+
+# H2 数据文件（首次启动自动生成）。
+# 库里有 mz_datasource 全表 = 所有业务库的明文口令，一律不进版本库。
+backend/data/
+backend/data*/
+
+# 外部报表导入工具的配置（含源实例地址与 token），见 util/SpreadsheetImportTool
+muzhou-import*.json
+
+# jqwik（property-based 测试）的本地运行记录
+.jqwik-database
+
+# 临时导出/调试产物
+render*.json
+
+# 日志与临时文件
+*.log
+*.local
+*.xlsx
+
+# IDE
+.idea/
+.vscode/
+*.iml
+.DS_Store

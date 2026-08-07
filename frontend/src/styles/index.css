@@ -1,0 +1,131 @@
+:root {
+  --mz-header-h: 52px;
+  --mz-panel-bg: #fafbfc;
+  --mz-border: #e4e7ed;
+  --mz-primary: #409eff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', Arial, sans-serif;
+  font-size: 14px;
+  color: #303133;
+}
+
+.page-container {
+  padding: 16px;
+}
+
+.page-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.flex-spacer {
+  flex: 1;
+}
+
+.full-height {
+  height: 100%;
+}
+
+/* 设计器面板 */
+.mz-panel {
+  background: var(--mz-panel-bg);
+  border-right: 1px solid var(--mz-border);
+  height: 100%;
+  overflow: auto;
+}
+
+.mz-panel-title {
+  font-weight: 600;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--mz-border);
+  background: #fff;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+/* 可拖拽字段 */
+.field-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  margin: 3px 8px;
+  background: #fff;
+  border: 1px solid var(--mz-border);
+  border-radius: 4px;
+  cursor: grab;
+  font-size: 13px;
+  user-select: none;
+  transition: all 0.15s;
+}
+
+.field-item:hover {
+  border-color: var(--mz-primary);
+  color: var(--mz-primary);
+  box-shadow: 0 1px 4px rgba(64, 158, 255, 0.2);
+}
+
+/* 拖动中的那一条（原生拖放，自己加类；不再有 Sortable 的 sortable-ghost） */
+.field-item.dragging {
+  opacity: 0.4;
+}
+
+.field-item .field-type {
+  margin-left: auto;
+  font-size: 11px;
+  color: #909399;
+}
+
+.drop-active {
+  outline: 2px dashed var(--mz-primary);
+  outline-offset: -2px;
+}
+
+.text-muted {
+  color: #909399;
+  font-size: 12px;
+}
+
+.mono {
+  font-family: 'Cascadia Code', Consolas, Monaco, monospace;
+}
+
+/*
+  图片单元格（utils/cellImage.js 摊出来的浮动图片）：图片等比例装进格子，不拉伸。
+
+  FortuneSheet 给 <img> 写死了 width/height（就是那一格的宽高），照单渲染等于把图片拉成
+  格子的形状 —— 人像被压扁、商品图被拉宽。object-fit: contain 让它在这块区域里按自己的
+  宽高比缩放并居中，与导出的 Excel / PDF / Word 是同一条规则（后端 export/ImageFit）。
+*/
+.luckysheet-modal-dialog-image img {
+  object-fit: contain;
+  object-position: center;
+}
+
+/* 滚动条 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: #c0c4cc;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}

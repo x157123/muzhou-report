@@ -1,0 +1,415 @@
+import { defineStore } from 'pinia'
+import {
+  cellKey,
+  createEmptyContent,
+  defaultCellConfig,
+  defaultFormatPattern,
+  deepClone,
+  normalizeRowColOp,
+  normalizeSheets,
+  pruneEmptyCellConfigs,
+  pruneSheetConfigs,
+  remapCellConfigs,
+  remapPageConfigs,
+  sheetIndexRemap,
+  shiftCellConfigs,
+  toCelldataSheets
+} from '@/utils/sheet'
+import { normalizePageConfig, pageConfigOf, shiftPrintArea } from '@/utils/print'
+
+/**
+ * 撤销一次行/列删除时，要把当时丢掉的单元格配置放回去，所以按后进先出攒着。
+ * 攒的份数有上限，免得长时间设计攒出一大堆（撤销栈本身也不会无限长）。
+ */
+const MAX_DROPPED_STASH = 50
+
+/**
+ * 设计器状态：当前报表、单元格配置、选中单元格、可用数据集。
+ */
+export const useDesignerStore = defineStore('designer', {
+  state: () => ({
+    /** 报表主体（不含 content）；versionConfig 是**报表级**的版本切换规则，见 CONTRACT §4 */
+    report: { id: '', name: '', code: '', remark: '', type: 'sheet', status: 1, versionConfig: '' },
+    /** 报表内容，见 CONTRACT §4。**它是被版本化的那个东西** —— 画布上是哪一版就是哪一版的 content */
+    content: createEmptyContent(),
+    /** 版本列表（不含 content），见 utils/version.js */
+    versions: [],
+    /** 当前正在设计哪一版 */
+    versionId: '',
+    /** 当前激活的 sheet 下标 */
+    sheetIndex: 0,
+    /** 当前选中单元格 { r, c } */
+    activeCell: null,
+    /** 数据集列表（含 fields） */
+    datasets: [],
+    /** 是否有未保存修改 */
+    dirty: false,
+    loading: false,
+    /**
+     * 行/列删除时被丢掉的单元格配置，供撤销那一步放回去，见 applyRowColChange。
+     * 纯粹的编辑期状态，不进 content、不参与保存。
+     */
+    droppedCellConfigs: []
+  }),
+
+  getters: {
+    /** 当前选中单元格的配置（无则返回默认值） */
+    activeConfig(state) {
+      if (!state.activeCell) return null
+      const key = cellKey(state.sheetIndex, state.activeCell.r, state.activeCell.c)
+      return state.content.cellConfigs[key] || defaultCellConfig(state.sheetIndex, state.activeCell.r, state.activeCell.c)
+    },
+    /** 当前 sheet 生效的打印设置（没单独设过则是报表级的那份） */
+    pageConfig(state) {
+      return pageConfigOf(state.content, state.sheetIndex)
+    },
+    /** 当前 sheet 是否有自己的打印设置（用于在 UI 上区分「跟随报表」和「已单独设置」） */
+    hasOwnPageConfig(state) {
+      return !!state.content.pageConfigs?.[String(state.sheetIndex)]
+    },
+    /** 报表中实际用到的数据集 code */
+    usedDatasetCodes(state) {
+      const set = new Set()
+      Object.values(state.content.cellConfigs || {}).forEach((cfg) => {
+        if (cfg.datasetCode) set.add(cfg.datasetCode)
+      })
+      return [...set]
+    },
+    /**
+     * 按 code 找数据集（含 fields）。
+     *
+     * 接口返回的是 DatasetDetailDTO（{dataset, fields, params}），也兼容已经拍平的形态 ——
+     * 两种都认，调用方不必关心 store 里存的是哪一种。
+     */
+    datasetByCode(state) {
+      return (code) => {
+        if (!code) return null
+        for (const item of state.datasets) {
+          const ds = item?.dataset || item
+          if (ds?.code === code) return { ...ds, fields: item?.fields || ds.fields || [] }
+        }
+        return null
+      }
+    }
+  },
+
+  actions: {
+    setReport(report) {
+      this.report = {
+        id: report.id || '',
+        name: report.name || '',
+        code: report.code || '',
+        remark: report.remark || '',
+        type: report.type || 'sheet',
+        status: report.status ?? 1,
+        // 版本切换规则是报表级的（不进 content —— content 本身就是被版本化的那个东西）
+        versionConfig: report.versionConfig || ''
+      }
+      // 后端回填的 versionId 说明这份 content 是哪一版
+      this.versionId = report.versionId || ''
+      let content = createEmptyContent()
+      if (report.content) {
+        try {
+          const parsed = typeof report.content === 'string' ? JSON.parse(report.content) : report.content
+          content = { ...content, ...parsed }
+        } catch (e) {
+          console.warn('[designer] content 解析失败，使用空白模板', e)
+        }
+      }
+      content.sheets = normalizeSheets(content.sheets)
+      content.cellConfigs = content.cellConfigs || {}
+      content.params = content.params || []
+      content.primaryDataset = content.primaryDataset || ''
+      content.splitMode = content.splitMode || 'single'
+      content.sheetNameField = content.sheetNameField || ''
+      content.datasetLinks = Array.isArray(content.datasetLinks) ? content.datasetLinks : []
+      content.pageConfig = normalizePageConfig(content.pageConfig)
+      // 按 sheet 单独设的那些也逐个补全字段，后面各处就可以直接用
+      const perSheet = {}
+      Object.entries(content.pageConfigs || {}).forEach(([idx, cfg]) => {
+        perSheet[String(idx)] = normalizePageConfig(cfg)
+      })
+      content.pageConfigs = perSheet
+      // 老报表里可能留着指向已删 sheet 的孤儿配置，清掉，别让新增的 sheet 继承过去
+      pruneSheetConfigs(content)
+      this.content = content
+      this.sheetIndex = 0
+      this.activeCell = null
+      this.droppedCellConfigs = []
+      this.dirty = false
+    },
+
+    setDatasets(list) {
+      this.datasets = list || []
+    },
+
+    setVersions(list) {
+      this.versions = Array.isArray(list) ? list : []
+    },
+
+    /**
+     * 写版本切换规则（判定依据 / 字段 / 取不到时怎么办）。
+     *
+     * 存的是 `report.versionConfig` 的 JSON 串，**不是 content 的一部分** ——
+     * 规则放进 content 就成了「每个版本各有一套怎么选自己」，逻辑成环。
+     * 和别的报表属性一样，要点「保存」才落库。
+     */
+    setVersionConfig(cfg) {
+      this.report.versionConfig = cfg ? JSON.stringify(cfg) : ''
+      this.dirty = true
+    },
+
+    /** 解析出来的版本切换规则（没配过给一份默认的） */
+    versionConfigOf() {
+      const fallback = { source: 'field', field: '', fallback: 'default' }
+      if (!this.report.versionConfig) return fallback
+      try {
+        return { ...fallback, ...JSON.parse(this.report.versionConfig) }
+      } catch (e) {
+        return fallback
+      }
+    },
+
+    setActiveCell(cell) {
+      this.activeCell = cell
+    },
+
+    /** 工作簿实例给的是运行时结构（二维 data），统一转成 celldata 后再入库 */
+    setSheets(sheets) {
+      if (!Array.isArray(sheets) || !sheets.length) return
+      const next = toCelldataSheets(sheets)
+      // 删掉一张 sheet 会让它后面每张的下标往前挪，而 cellConfigs / pageConfigs 是按下标
+      // 寻址的 —— 必须按 sheet id 把 key 跟着搬过去，否则配置会对到别的 sheet 身上
+      const remap = sheetIndexRemap(this.content.sheets, next)
+      if (remap) {
+        this.content.cellConfigs = remapCellConfigs(this.content.cellConfigs, remap)
+        this.content.pageConfigs = remapPageConfigs(this.content.pageConfigs, remap)
+        const to = remap.get(this.sheetIndex)
+        if (to != null && to !== this.sheetIndex) {
+          // 当前这张被删了（to<0）：先退到第一张，随后的 sheet-activate 会给出真正激活的那张
+          this.sheetIndex = to < 0 ? 0 : to
+          if (to < 0) this.activeCell = null
+        }
+      }
+      this.content.sheets = next
+      // 删掉格子内容不会通知业务层（FortuneSheet 只是把格子置成 {}），绑定只能在这里
+      // 对着最新的 sheets 回收 —— 否则格子空了数据照样渲染出来
+      this.content.cellConfigs = pruneEmptyCellConfigs(this.content.cellConfigs, next)
+      // 单 sheet 时选的「每条数据一个 sheet」，加了第二张模板 sheet 就不成立了（见 setSheetSplit）——
+      // 用户未必会再打开打印设置弹窗，这里跟着降回单 sheet 输出
+      if (this.content.splitMode === 'perRow' && next.length > 1) {
+        this.content.splitMode = 'single'
+        this.content.sheetNameField = ''
+      }
+      this.dirty = true
+    },
+
+    /**
+     * 行/列插入或删除后，把按坐标寻址的配置跟着挪。
+     *
+     * `cellConfigs` 的 key 是 `${sheetIndex}_${r}_${c}`、打印区域是 A1 串，说的都是**模板坐标**。
+     * FortuneSheet 插入/删除行列时只挪它自己那份数据（celldata / merge / rowlen / borderInfo），
+     * 业务层这两处原地不动 —— 删掉顶上一行之后绑定就整体错位一行：占位符文本上移了、配置没动，
+     * 于是那个格子成了「有占位符没配置」，而它下面的空格子凭空多出一条扩展行带。
+     *
+     * `change` 事件只给结果、认不出「哪一行被删了」，所以走 `op` 事件（见 FortuneSheet.vue 的 @op）。
+     * op 在 change 之前发出，因此这里挪完，随后的 `setSheets` 正好对着新坐标回收空绑定。
+     *
+     * 撤销一次删除时 FortuneSheet 会发出一条**恰好相反**的插入 op（`inverseRowColOptions`），
+     * 位置和行数与栈顶那次删除完全对得上，就把当时丢掉的配置放回去 —— 否则「删错了、Ctrl+Z」
+     * 回来的是一片没有绑定的格子。对不上说明用户又做了别的增删，攒着的坐标不再作数，整个清掉。
+     *
+     * @param sheetId 发生增删的工作表 id（op 里带的是 id 不是下标）
+     * @param op      FortuneSheet 的 insertRowCol / deleteRowCol op
+     */
+    applyRowColChange(sheetId, op) {
+      const change = normalizeRowColOp(op)
+      if (!change) return
+      const sheetIndex = this.content.sheets.findIndex((s) => s.id === sheetId)
+      if (sheetIndex < 0) return
+
+      const { cellConfigs, dropped } = shiftCellConfigs(this.content.cellConfigs, sheetIndex, change)
+      this.content.cellConfigs = cellConfigs
+      const target = this.printAreaTarget(sheetIndex)
+      const printArea = target?.printArea ?? null
+      if (target) target.printArea = shiftPrintArea(target.printArea, change)
+
+      if (change.remove) {
+        // 没丢配置也要记一笔，撤销时才对得上号（栈是严格后进先出的）
+        this.droppedCellConfigs.push({ sheetIndex, change, dropped, printArea })
+        if (this.droppedCellConfigs.length > MAX_DROPPED_STASH) this.droppedCellConfigs.shift()
+      } else {
+        const last = this.droppedCellConfigs[this.droppedCellConfigs.length - 1]
+        const undoing =
+          last &&
+          last.sheetIndex === sheetIndex &&
+          last.change.type === change.type &&
+          last.change.at === change.at &&
+          last.change.count === change.count
+        if (undoing) {
+          // 坐标已被上面那一挪还原成删除之前的样子，按原 key 放回去即可
+          this.content.cellConfigs = { ...this.content.cellConfigs, ...last.dropped }
+          // 打印区域被整块删光时挪不回来（已经退成了空串=整表），照原样写回去
+          if (target && last.printArea != null) target.printArea = last.printArea
+          this.droppedCellConfigs.pop()
+        } else {
+          this.droppedCellConfigs = []
+        }
+      }
+      this.dirty = true
+    },
+
+    /**
+     * 该 sheet 的打印区域存在哪份 pageConfig 里。
+     *
+     * 单独设过就是它自己那份；没设过时生效的是报表级那份，但那份被所有 sheet 共用 ——
+     * 多 sheet 报表里跟着某一张的行列增删去挪它，会把别的 sheet 的打印区域一起挪错，
+     * 所以只有单 sheet 报表才动它。
+     */
+    printAreaTarget(sheetIndex) {
+      const own = this.content.pageConfigs?.[String(sheetIndex)]
+      if (own) return own
+      if ((this.content.sheets?.length || 0) === 1) return this.content.pageConfig || null
+      return null
+    },
+
+    /** 写入/合并单元格配置 */
+    setCellConfig(r, c, patch) {
+      const key = cellKey(this.sheetIndex, r, c)
+      const base = this.content.cellConfigs[key] || defaultCellConfig(this.sheetIndex, r, c)
+      this.content.cellConfigs[key] = { ...base, ...patch, sheetIndex: this.sheetIndex, r, c }
+      this.dirty = true
+    },
+
+    removeCellConfig(r, c) {
+      delete this.content.cellConfigs[cellKey(this.sheetIndex, r, c)]
+      this.dirty = true
+    },
+
+    /** 拖拽字段落到单元格时调用：写入配置并返回应显示的占位符文本 */
+    bindField(r, c, datasetCode, field, fieldType = 'string') {
+      const formatType = fieldType === 'number' ? 'number' : fieldType === 'date' ? 'date' : 'text'
+      this.setCellConfig(r, c, {
+        type: 'data',
+        datasetCode,
+        field,
+        expandType: 'down',
+        groupType: 'list',
+        aggregate: 'none',
+        formatType,
+        formatPattern: defaultFormatPattern(formatType)
+      })
+      return `#{${datasetCode}.${field}}`
+    },
+
+    setParams(params) {
+      this.content.params = params || []
+      this.dirty = true
+    },
+
+    /**
+     * 设/取消主接口（驱动分页的那个数据集）。
+     *
+     * 单值存储，「一张报表只能有一个」这条约束是结构本身保证的，不需要额外校验；
+     * 再点一次当前主接口就是取消。
+     */
+    setPrimaryDataset(code) {
+      this.content.primaryDataset = this.content.primaryDataset === code ? '' : code || ''
+      this.dirty = true
+    },
+
+    /**
+     * 写入页面/打印设置。
+     *
+     * @param cfg      设置项
+     * @param scope    'sheet' 只作用于当前 sheet；'all' 作用于整个报表
+     *
+     * scope='all' 会连同已有的按 sheet 覆盖一起清掉 —— 用户选「全部工作表」的意思就是
+     * 「所有 sheet 都按这份出纸」，留着旧的覆盖会让其中几张纹丝不动，看起来像没生效。
+     */
+    setPageConfig(cfg, scope = 'sheet') {
+      const normalized = normalizePageConfig(cfg)
+      if (scope === 'all') {
+        this.content.pageConfig = normalized
+        this.content.pageConfigs = {}
+      } else {
+        this.content.pageConfigs[String(this.sheetIndex)] = normalized
+      }
+      this.dirty = true
+    },
+
+    /**
+     * 新增/覆盖一条父子关联（子接口查询）。
+     *
+     * @param link  { name, master, child, mappings:[{param, field}] }
+     * @param index 要覆盖的下标，< 0 表示新增
+     *
+     * 一个子表只能挂一个主表 —— 挂两个的话「这份子表数据怎么来的」有两种解释，
+     * 后端 `LinkedDataFetcher.indexByChild` 会直接报错，所以这里先拦住。
+     */
+    saveDatasetLink(link, index = -1) {
+      const dup = this.content.datasetLinks.findIndex((l, i) => i !== index && l.child === link.child)
+      if (dup >= 0) {
+        throw new Error(`子表「${link.child}」已经挂在「${this.content.datasetLinks[dup].master}」下了`)
+      }
+      if (index >= 0) {
+        this.content.datasetLinks.splice(index, 1, link)
+      } else {
+        this.content.datasetLinks.push(link)
+      }
+      this.dirty = true
+    },
+
+    removeDatasetLink(index) {
+      this.content.datasetLinks.splice(index, 1)
+      this.dirty = true
+    },
+
+    /**
+     * 输出方式：单 sheet / 主接口每条数据一个 sheet / 每条数据一页（含单据名取哪个字段）。
+     *
+     * 跟打印设置一起在打印设置弹窗里配，但它是**报表级**的 —— 决定的是整个工作簿有几张 sheet，
+     * 不是某一张 sheet 怎么出纸，所以不进 pageConfigs。
+     *
+     * `perRow` 多一条限制：**模板本身是多 sheet 时不许用**（退回 single）。它是把整份模板
+     * （M 张）复制 N 遍，出来 M×N 张 sheet，同一条数据的几张单据被打散在整个工作簿里；
+     * 要一条数据一份得用 `perRowPage`（各模板各拼回一张、按页分开）。
+     */
+    setSheetSplit({ splitMode, sheetNameField }) {
+      const modes = ['perRow', 'perRowPage']
+      let mode = modes.includes(splitMode) ? splitMode : 'single'
+      if (mode === 'perRow' && (this.content.sheets?.length || 0) > 1) mode = 'single'
+      this.content.splitMode = mode
+      // 两种拆法共用这一个字段：perRow 拿它当 sheet 名，perRowPage 拼回一张之后 sheet 名说不了话，
+      // 拿它当页头页尾里 ${sheet} 的值（每张纸印自己那一份的单号）。single 用不上，清掉
+      this.content.sheetNameField = mode === 'single' ? '' : sheetNameField || ''
+      this.dirty = true
+    },
+
+    /** 让当前 sheet 回到「跟随报表级设置」 */
+    clearPageConfig() {
+      delete this.content.pageConfigs[String(this.sheetIndex)]
+      this.dirty = true
+    },
+
+    markClean() {
+      this.dirty = false
+    },
+
+    /** 导出用于保存的 content 字符串 */
+    serializeContent() {
+      return JSON.stringify(deepClone(this.content))
+    },
+
+    reset() {
+      this.report = { id: '', name: '', code: '', remark: '', type: 'sheet', status: 1, versionConfig: '' }
+      this.content = createEmptyContent()
+      this.versions = []
+      this.versionId = ''
+      this.sheetIndex = 0
+      this.activeCell = null
+      this.droppedCellConfigs = []
+      this.dirty = false
+    }
+  }
+})

@@ -1,0 +1,2 @@
+INSERT INTO public.mz_datasource (id,name,code,db_type,driver_class_name,url,username,password,remark,status,deleted,create_time,update_time) VALUES
+	 ('ds_demo_h2','内置演示库(H2)','demo_h2','h2','org.h2.Driver','jdbc:h2:file:./data/muzhoureport;MODE=MySQL;DATABASE_TO_LOWER=TRUE;AUTO_SERVER=TRUE','sa','','系统内置演示数据源，包含 demo_order / demo_order_item / demo_product',1,0,'2026-08-03 09:47:38.88524','2026-08-03 09:47:38.88524');
