@@ -178,9 +178,29 @@ public class WordExporter {
         if (xlsx == null || xlsx.length == 0) {
             throw new BizException("Word 导出失败: 待转换的 Excel 内容为空");
         }
+        try (XSSFWorkbook wb = new XSSFWorkbook(new ByteArrayInputStream(xlsx))) {
+            return convert(wb, xlsx.length + " bytes", pageConfig, docBreaksOf);
+        } catch (BizException e) {
+            throw e;
+        } catch (Exception e) {
+            log.error("Word 导出失败", e);
+            throw new BizException("Word 导出失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * workbook 直通版：{@code ExcelExporter#exportWorkbook} 构建的对象直接转，省掉
+     * 「序列化成 xlsx 字节再解析回来」的往返，其余与字节版走同一段代码。
+     * **wb 由调用方负责关闭**。
+     */
+    public byte[] convert(XSSFWorkbook wb, PageConfigDTO pageConfig, IntFunction<List<Integer>> docBreaksOf) {
+        return convert(wb, "直通", pageConfig, docBreaksOf);
+    }
+
+    private byte[] convert(XSSFWorkbook wb, String src, PageConfigDTO pageConfig,
+                           IntFunction<List<Integer>> docBreaksOf) {
         long start = System.currentTimeMillis();
-        try (XSSFWorkbook wb = new XSSFWorkbook(new ByteArrayInputStream(xlsx));
-             XWPFDocument doc = new XWPFDocument();
+        try (XWPFDocument doc = new XWPFDocument();
              ByteArrayOutputStream out = new ByteArrayOutputStream()) {
 
             DataFormatter formatter = new DataFormatter(Locale.CHINA);
@@ -211,8 +231,8 @@ public class WordExporter {
 
             doc.write(out);
             byte[] bytes = out.toByteArray();
-            log.debug("xlsx({} bytes) -> docx({} bytes) 耗时 {}ms",
-                    xlsx.length, bytes.length, System.currentTimeMillis() - start);
+            log.debug("xlsx({}) -> docx({} bytes) 耗时 {}ms",
+                    src, bytes.length, System.currentTimeMillis() - start);
             return bytes;
         } catch (BizException e) {
             throw e;

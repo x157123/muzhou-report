@@ -122,11 +122,44 @@ public class ExcelExporter {
      */
     public byte[] export(List<Map<String, Object>> sheets, IntFunction<PageConfigDTO> pageConfigOf) {
         long start = System.currentTimeMillis();
-        try (XSSFWorkbook wb = new XSSFWorkbook();
+        long[] segs = new long[4];
+        try (XSSFWorkbook wb = buildWorkbook(sheets, pageConfigOf, segs);
              ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            long writeStart = System.currentTimeMillis();
+            wb.write(out);
+            byte[] bytes = out.toByteArray();
+            log.debug("xlsx({} bytes) 内层耗时: 写格子 {}ms → 边框合并 {}ms → 行高 {}ms → 图片 {}ms → 序列化 {}ms → 合计 {}ms",
+                    bytes.length, segs[0], segs[1], segs[2], segs[3],
+                    System.currentTimeMillis() - writeStart, System.currentTimeMillis() - start);
+            return bytes;
+        } catch (BizException e) {
+            throw e;
+        } catch (Exception e) {
+            log.error("Excel 导出失败", e);
+            throw new BizException("Excel 导出失败: " + e.getMessage());
+        }
+    }
 
-            // 内层分段计时（跨 sheet 累加）：0=写格子 1=边框合并列宽 2=行高 3=图片
-            long[] segs = new long[4];
+    /**
+     * 只构建工作簿、**不序列化**：PDF / Word 那两条路直接吃这个对象接着转，省掉
+     * 「写出成 xlsx 字节再解析回来」的往返。页面设置、页眉页脚、分页符照旧全写在
+     * workbook 里，「PDF/Word 从 ExcelExporter 的产物读回来」的契约不变，只是跳过了
+     * 字节这一站。**调用方负责 close**。
+     */
+    public XSSFWorkbook exportWorkbook(List<Map<String, Object>> sheets, IntFunction<PageConfigDTO> pageConfigOf) {
+        long start = System.currentTimeMillis();
+        long[] segs = new long[4];
+        XSSFWorkbook wb = buildWorkbook(sheets, pageConfigOf, segs);
+        log.debug("xlsx 工作簿构建(不序列化): 写格子 {}ms → 边框合并 {}ms → 行高 {}ms → 图片 {}ms → 合计 {}ms",
+                segs[0], segs[1], segs[2], segs[3], System.currentTimeMillis() - start);
+        return wb;
+    }
+
+    /** @param segs 内层分段计时（跨 sheet 累加）：0=写格子 1=边框合并列宽 2=行高 3=图片 */
+    private XSSFWorkbook buildWorkbook(List<Map<String, Object>> sheets,
+                                       IntFunction<PageConfigDTO> pageConfigOf, long[] segs) {
+        XSSFWorkbook wb = new XSSFWorkbook();
+        try {
             Map<String, CellStyle> styleCache = new HashMap<>();
             // 边框样式指纹与基础样式无关（边框是「叠加」在已有样式之上的），必须单独复用，
             // 否则会退化成直接修改 cell.getCellStyle() 拿到的共享样式对象，导致边框「串」到
@@ -149,14 +182,13 @@ public class ExcelExporter {
                     }
                 }
             }
-            long writeStart = System.currentTimeMillis();
-            wb.write(out);
-            byte[] bytes = out.toByteArray();
-            log.debug("xlsx({} bytes) 内层耗时: 写格子 {}ms → 边框合并 {}ms → 行高 {}ms → 图片 {}ms → 序列化 {}ms → 合计 {}ms",
-                    bytes.length, segs[0], segs[1], segs[2], segs[3],
-                    System.currentTimeMillis() - writeStart, System.currentTimeMillis() - start);
-            return bytes;
+            return wb;
         } catch (Exception e) {
+            try {
+                wb.close();
+            } catch (Exception ignore) {
+                // 构建已经失败了，关不上也只能随它去
+            }
             log.error("Excel 导出失败", e);
             throw new BizException("Excel 导出失败: " + e.getMessage());
         }

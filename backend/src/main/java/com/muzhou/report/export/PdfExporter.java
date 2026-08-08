@@ -199,9 +199,33 @@ public class PdfExporter {
             throw new BizException("PDF 导出失败: 待转换的 Excel 内容为空");
         }
         long start = System.currentTimeMillis();
-        try (XSSFWorkbook wb = new XSSFWorkbook(new ByteArrayInputStream(xlsx));
-             ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+        try (XSSFWorkbook wb = new XSSFWorkbook(new ByteArrayInputStream(xlsx))) {
             long parseMs = System.currentTimeMillis() - start;
+            return convert(wb, xlsx.length + " bytes", parseMs, start, pageConfigOf, docBreaksOf, docNamesOf);
+        } catch (BizException e) {
+            throw e;
+        } catch (Exception e) {
+            log.error("PDF 导出失败", e);
+            throw new BizException("PDF 导出失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * workbook 直通版：{@code ExcelExporter#exportWorkbook} 构建的对象直接转，省掉
+     * 「序列化成 xlsx 字节再解析回来」的往返。页面设置等一切几何仍从 workbook 里读，
+     * 与字节版走同一段代码。**wb 由调用方负责关闭**。
+     */
+    public byte[] convert(XSSFWorkbook wb, IntFunction<PageConfigDTO> pageConfigOf,
+                          IntFunction<List<Integer>> docBreaksOf,
+                          IntFunction<List<String>> docNamesOf) {
+        return convert(wb, "直通", 0, System.currentTimeMillis(), pageConfigOf, docBreaksOf, docNamesOf);
+    }
+
+    private byte[] convert(XSSFWorkbook wb, String src, long parseMs, long start,
+                           IntFunction<PageConfigDTO> pageConfigOf,
+                           IntFunction<List<Integer>> docBreaksOf,
+                           IntFunction<List<String>> docNamesOf) {
+        try (ByteArrayOutputStream out = new ByteArrayOutputStream()) {
 
             long fontStart = System.currentTimeMillis();
             BaseFont font = font();
@@ -264,8 +288,8 @@ public class PdfExporter {
             doc.close();
 
             byte[] pdf = out.toByteArray();
-            log.debug("xlsx({} bytes) -> pdf({} bytes, {} 页): 解析xlsx {}ms → 字体 {}ms → 排版 {}ms → 撑行高 {}ms → 绘制 {}ms → 合计 {}ms",
-                    xlsx.length, pdf.length, pages.size(), parseMs, fontMs, layoutMs, growMs,
+            log.debug("xlsx({}) -> pdf({} bytes, {} 页): 解析xlsx {}ms → 字体 {}ms → 排版 {}ms → 撑行高 {}ms → 绘制 {}ms → 合计 {}ms",
+                    src, pdf.length, pages.size(), parseMs, fontMs, layoutMs, growMs,
                     System.currentTimeMillis() - drawStart, System.currentTimeMillis() - start);
             return pdf;
         } catch (BizException e) {

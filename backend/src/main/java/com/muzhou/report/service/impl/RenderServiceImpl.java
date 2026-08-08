@@ -21,10 +21,12 @@ import com.muzhou.report.service.ReportService;
 import com.muzhou.report.service.ReportVersionService;
 import com.muzhou.report.version.ReportVersionResolver;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
+import java.io.IOException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -142,18 +144,20 @@ public class RenderServiceImpl implements RenderService {
     public byte[] exportExcel(String reportId, Map<String, Object> params, String versionId) {
         return withExportPermit(() -> {
             long start = System.currentTimeMillis();
-            Xlsx xlsx = renderToXlsx(reportId, params, versionId, null);
+            Prepared p = prepareExport(reportId, params, versionId, null);
+            long excelStart = System.currentTimeMillis();
+            byte[] bytes = excelExporter.export(p.sheets(), p.pageConfigOf());
             log.info("导出Excel完成: 请求数据 {}ms → 渲染 {}ms → 转Excel {}ms → 合计 {}ms",
-                    xlsx.result().getFetchElapsed(), xlsx.result().getExpandElapsed(),
-                    xlsx.excelElapsed(), System.currentTimeMillis() - start);
-            return xlsx.bytes();
+                    p.result().getFetchElapsed(), p.result().getExpandElapsed(),
+                    System.currentTimeMillis() - excelStart, System.currentTimeMillis() - start);
+            return bytes;
         });
     }
 
     /**
      * 导出的并发闸：同时最多 {@code muzhou.report.export-concurrency} 份。
      *
-     * <p>导出全程在内存里（PDF 那条路峰值是 xlsx 字节 + POI 对象树 + PDF 字节三份同时占着堆），
+     * <p>导出全程在内存里（PDF 那条路峰值是 POI 对象树 + PDF 字节同时占着堆），
      * 而 {@code maxCells} 只拦得住**单次**规模。不排队的话，十个人同时导一份大报表就能把堆打满，
      * 倒下的是整个服务而不只是那几次导出。
      */
@@ -180,19 +184,25 @@ public class RenderServiceImpl implements RenderService {
     @Override
     public byte[] exportPdf(String reportId, Map<String, Object> params, Integer sheetIndex, String versionId) {
         // PDF 走「先出 xlsx 再转」这一条路：页面设置已经写在 xlsx 里，转换器照着出纸，
-        // 不必在 PDF 侧把 pageConfig 再实现一遍。
+        // 不必在 PDF 侧把 pageConfig 再实现一遍。xlsx 不落成字节 —— workbook 对象直通给转换器，
+        // 省掉「序列化再解析回来」的往返（200 页的报表约 0.5s）。
         // 唯一的例外是**水印** —— xlsx 里没有水印这个概念，存不进去，只能把设置一起递下去。
         return withExportPermit(() -> {
             long start = System.currentTimeMillis();
-            Xlsx xlsx = renderToXlsx(reportId, params, versionId, sheetIndex);
-            long pdfStart = System.currentTimeMillis();
-            byte[] pdf = pdfExporter.convert(xlsx.bytes(), xlsx.pageConfigOf(), xlsx.docBreaksOf(),
-                    xlsx.docNamesOf());
-            log.info("导出PDF完成: 请求数据 {}ms → 渲染 {}ms → 转Excel {}ms → 转PDF {}ms → 合计 {}ms",
-                    xlsx.result().getFetchElapsed(), xlsx.result().getExpandElapsed(),
-                    xlsx.excelElapsed(), System.currentTimeMillis() - pdfStart,
-                    System.currentTimeMillis() - start);
-            return pdf;
+            Prepared p = prepareExport(reportId, params, versionId, sheetIndex);
+            long excelStart = System.currentTimeMillis();
+            try (XSSFWorkbook wb = excelExporter.exportWorkbook(p.sheets(), p.pageConfigOf())) {
+                long excelMs = System.currentTimeMillis() - excelStart;
+                long pdfStart = System.currentTimeMillis();
+                byte[] pdf = pdfExporter.convert(wb, p.pageConfigOf(), p.docBreaksOf(), p.docNamesOf());
+                log.info("导出PDF完成: 请求数据 {}ms → 渲染 {}ms → 转Excel {}ms → 转PDF {}ms → 合计 {}ms",
+                        p.result().getFetchElapsed(), p.result().getExpandElapsed(),
+                        excelMs, System.currentTimeMillis() - pdfStart,
+                        System.currentTimeMillis() - start);
+                return pdf;
+            } catch (IOException e) {
+                throw new BizException("PDF 导出失败: " + e.getMessage());
+            }
         });
     }
 
@@ -200,41 +210,47 @@ public class RenderServiceImpl implements RenderService {
     public byte[] exportWord(String reportId, Map<String, Object> params, String versionId) {
         return withExportPermit(() -> {
             long start = System.currentTimeMillis();
-            Xlsx xlsx = renderToXlsx(reportId, params, versionId, null);
+            Prepared p = prepareExport(reportId, params, versionId, null);
             // 逐格搬成一张真正的 Word 表格（可继续编辑，横向只取到打印区域）。
             // 纸张/方向/页边距按 sheet 各自生效（docx 一节一套，每张 sheet 一节），
             // 但**水印整份文档只有一套**（Word 的水印是页眉里的图形），按第一张 sheet 的取
-            long wordStart = System.currentTimeMillis();
-            byte[] word = wordExporter.convert(xlsx.bytes(), xlsx.pageConfigOf().apply(0),
-                    xlsx.docBreaksOf());
-            log.info("导出Word完成: 请求数据 {}ms → 渲染 {}ms → 转Excel {}ms → 转Word {}ms → 合计 {}ms",
-                    xlsx.result().getFetchElapsed(), xlsx.result().getExpandElapsed(),
-                    xlsx.excelElapsed(), System.currentTimeMillis() - wordStart,
-                    System.currentTimeMillis() - start);
-            return word;
+            long excelStart = System.currentTimeMillis();
+            try (XSSFWorkbook wb = excelExporter.exportWorkbook(p.sheets(), p.pageConfigOf())) {
+                long excelMs = System.currentTimeMillis() - excelStart;
+                long wordStart = System.currentTimeMillis();
+                byte[] word = wordExporter.convert(wb, p.pageConfigOf().apply(0), p.docBreaksOf());
+                log.info("导出Word完成: 请求数据 {}ms → 渲染 {}ms → 转Excel {}ms → 转Word {}ms → 合计 {}ms",
+                        p.result().getFetchElapsed(), p.result().getExpandElapsed(),
+                        excelMs, System.currentTimeMillis() - wordStart,
+                        System.currentTimeMillis() - start);
+                return word;
+            } catch (IOException e) {
+                throw new BizException("Word 导出失败: " + e.getMessage());
+            }
         });
     }
 
     /**
-     * 一次「渲染 -> xlsx」的产物：字节流 + 与**这份字节流**对齐的两个按 sheet 取值的函数。
+     * 一次「选版本 + 渲染」后交给导出器的那套东西：结果 sheet + 与**这份 sheet 序**对齐的
+     * 几个按 sheet 取值的函数。
      *
      * <p>几样必须一起传：下游的 PDF/Word 转换器要照着同一份打印设置分页、画水印，也要知道
      * 页码在哪里重编（{@code mzDocBreaks}，见 {@code engine/ReportRenderEngine#markDocBreaks}）、
      * 每份单据叫什么（{@code mzDocNames}，页头页尾里的 {@code ${sheet}}），
-     * 而只导一张 sheet 时 xlsx 里的下标 0 未必是渲染结果里的下标 0。
+     * 而只导一张 sheet 时导出下标 0 未必是渲染结果里的下标 0。
      */
-    private record Xlsx(byte[] bytes, IntFunction<PageConfigDTO> pageConfigOf,
-                        IntFunction<List<Integer>> docBreaksOf,
-                        IntFunction<List<String>> docNamesOf,
-                        RenderResultDTO result, long excelElapsed) {
+    private record Prepared(List<Map<String, Object>> sheets, IntFunction<PageConfigDTO> pageConfigOf,
+                            IntFunction<List<Integer>> docBreaksOf,
+                            IntFunction<List<String>> docNamesOf,
+                            RenderResultDTO result) {
     }
 
     /** 一次「选版本 + 渲染」的产物：结果，以及**基准**那份 content（取打印设置时兜底要用）。 */
     private record Rendered(RenderResultDTO result, ReportContentDTO content) {
     }
 
-    private Xlsx renderToXlsx(String reportId, Map<String, Object> params, String versionId,
-                              Integer sheetIndex) {
+    private Prepared prepareExport(String reportId, Map<String, Object> params, String versionId,
+                                   Integer sheetIndex) {
         Rendered rendered = renderSaved(reportId, params, versionId);
         RenderResultDTO result = rendered.result();
         List<Map<String, Object>> sheets = result.getSheets();
@@ -254,10 +270,7 @@ public class RenderServiceImpl implements RenderService {
         IntFunction<List<Integer>> docBreaksOf = i -> docBreaksAt(exported, i);
         // 每份单据叫什么同样存不进 xlsx（Excel 的 &A 只有工作表名一个值），一起递下去
         IntFunction<List<String>> docNamesOf = i -> docNamesAt(exported, i);
-        long excelStart = System.currentTimeMillis();
-        byte[] bytes = excelExporter.export(exported, pageConfigOf);
-        return new Xlsx(bytes, pageConfigOf, docBreaksOf, docNamesOf, result,
-                System.currentTimeMillis() - excelStart);
+        return new Prepared(exported, pageConfigOf, docBreaksOf, docNamesOf, result);
     }
 
     /** 第 {@code i} 张导出 sheet 上的 {@code mzDocBreaks}（每份单据的起始行）；普通报表没有这一项。 */
