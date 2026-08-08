@@ -98,8 +98,9 @@ public class SpreadsheetImportTool {
      * 跟着仓库发出去的。token 会过期、地址每个环境都不一样，本来也不该由源码承担。
      */
     public static void main(String[] args) throws Exception {
+        String typePath = "D:\\code\\muzhou-report\\backend\\src\\main\\resources\\muzhou-import\\muzhou-import01.json";
         String path = args.length > 0 && StrUtil.isNotBlank(args[0]) ? args[0]
-                : StrUtil.blankToDefault(System.getProperty(CONFIG_PROP), System.getenv(CONFIG_ENV));
+                : StrUtil.blankToDefault(System.getProperty(CONFIG_PROP), typePath);
         if (StrUtil.isBlank(path)) {
             System.out.println(usage());
             return;

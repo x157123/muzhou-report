@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -168,6 +169,53 @@ class PdfExporterTest {
 
         assertTrue(pageCount(xlsx) > 1,
                 "行按真字体撑高后该放不进一页，仍是一页说明 PDF 用的还是估出来的矮行高");
+    }
+
+    @Test
+    @DisplayName("比一页还高的行横着劈开跨页印：表头那页不会只剩表头，超出的文字也不丢")
+    void oversizedRowIsSlicedAcrossPages() throws Exception {
+        // 备注格里一段长文塞进 100px 宽的列，折出来比一页正文（A4 纵向约 785pt）高好几倍
+        String note = "起" + "一二三四五六七八九十".repeat(60) + "止";
+        byte[] xlsx = excel.export(List.of(noteSheet(note)), new PageConfigDTO());
+
+        PdfReader reader = new PdfReader(pdf.convert(xlsx));
+        int pages = reader.getNumberOfPages();
+        assertTrue(pages > 1, "这一格该占好几页，实际 " + pages + " 页");
+
+        PdfTextExtractor extractor = new PdfTextExtractor(reader);
+        String first = extractor.getTextFromPage(1);
+        assertTrue(first.contains("城市"), "第 1 页该有表头，实际:\n" + first);
+        // 整行挪到第 2 页的老做法在这里就露馅了：第 1 页只剩表头，大片空白
+        assertTrue(first.contains("一二三四"), "备注该从第 1 页表头下面就开始印，实际:\n" + first);
+        assertTrue(first.contains("起"), "备注的开头在第 1 页");
+        assertTrue(!first.contains("止"), "备注的结尾该在后面的页上，第 1 页就有说明整段被重复画了一遍");
+        assertTrue(extractor.getTextFromPage(pages).contains("止"),
+                "最后一页该印到备注的结尾，印不出来说明超高行的文字被裁掉了");
+        reader.close();
+    }
+
+    @Test
+    @DisplayName("超高行只劈自己：装得进一页的行照旧整行挪到下一页")
+    void rowsThatFitAPageAreNeverSliced() {
+        // 一页 100pt：前两行各 40pt，第三行 40pt 放不下 -> 整行挪走，不劈
+        assertEquals(List.of("0-1@0", "2-2@0"),
+                blocks(PdfExporter.Geom.splitRows(new float[]{40, 40, 40}, 100, Set.of())));
+
+        // 第二行 250pt 比一页还高：从第一行下面剩的 60pt 开始劈，一页页接着印，
+        // 最后剩的 90pt 那页还能接着放下第三行
+        assertEquals(List.of("0-1@0", "1-1@60", "1-2@160"),
+                blocks(PdfExporter.Geom.splitRows(new float[]{40, 250, 10}, 100, Set.of())));
+
+        // 手动分页符照旧无条件断开
+        assertEquals(List.of("0-0@0", "1-1@0"),
+                blocks(PdfExporter.Geom.splitRows(new float[]{40, 40}, 100, Set.of(1))));
+    }
+
+    /** 把切页结果压成 "起行-止行@首行已印高度" 的串，好写断言 */
+    private List<String> blocks(List<PdfExporter.RowBlock> blocks) {
+        return blocks.stream()
+                .map(b -> b.start() + "-" + b.end() + "@" + Math.round(b.skip()))
+                .toList();
     }
 
     @Test
@@ -627,6 +675,18 @@ class PdfExporterTest {
         sheet.put("name", "偏右的表");
         sheet.put("celldata", celldata);
         sheet.put("config", Map.of("columnlen", columnlen));
+        return sheet;
+    }
+
+    /** 第 0 行是表头，第 1 行是一格开了自动换行的长备注（列宽 100px，折出来比一页还高） */
+    private Map<String, Object> noteSheet(String note) {
+        Map<String, Object> wrapped = cell(1, 0, note, false);
+        ((Map<String, Object>) wrapped.get("v")).put("tb", "2");
+
+        Map<String, Object> sheet = new LinkedHashMap<>();
+        sheet.put("name", "长备注");
+        sheet.put("celldata", List.of(cell(0, 0, "城市", true), cell(0, 1, "销售额", true), wrapped));
+        sheet.put("config", Map.of("columnlen", Map.of("0", 100, "1", 100)));
         return sheet;
     }
 
