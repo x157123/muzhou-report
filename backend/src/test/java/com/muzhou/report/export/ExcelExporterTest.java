@@ -9,6 +9,7 @@ import org.apache.poi.ss.usermodel.ClientAnchor;
 import org.apache.poi.ss.usermodel.DataFormatter;
 import org.apache.poi.ss.usermodel.PageMargin;
 import org.apache.poi.ss.usermodel.PrintSetup;
+import org.apache.poi.ss.util.CellRangeAddress;
 import org.apache.poi.xssf.usermodel.XSSFCellStyle;
 import org.apache.poi.xssf.usermodel.XSSFColor;
 import org.apache.poi.xssf.usermodel.XSSFOddFooter;
@@ -31,6 +32,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -122,6 +124,72 @@ class ExcelExporterTest {
     }
 
     @Test
+    @DisplayName("顶端标题行写成 xlsx 的 Print_Titles，PDF / Word 从这里读回来")
+    void titleRowsAreWritten() throws Exception {
+        PageConfigDTO cfg = new PageConfigDTO();
+        cfg.setTitleRows("1:3");
+
+        try (XSSFWorkbook wb = read(exporter.export(List.of(rowsSheet(8)), cfg))) {
+            CellRangeAddress rows = wb.getSheetAt(0).getRepeatingRows();
+            assertEquals(0, rows.getFirstRow());
+            assertEquals(2, rows.getLastRow(), "1:3 是 1 起算的闭区间");
+        }
+    }
+
+    @Test
+    @DisplayName("没配顶端标题行、或配了非法值时不写 Print_Titles，也不让导出失败")
+    void badTitleRowsAreIgnored() throws Exception {
+        for (String bad : new String[]{"", "  ", "abc", "3:1", "0:2", "1:2:3"}) {
+            PageConfigDTO cfg = new PageConfigDTO();
+            cfg.setTitleRows(bad);
+            try (XSSFWorkbook wb = read(exporter.export(List.of(rowsSheet(8)), cfg))) {
+                assertNull(wb.getSheetAt(0).getRepeatingRows(), "[" + bad + "] 不该被当成标题行");
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("标题行必须在内容最上面且不盖住全部内容 —— 设计器拦得住，手写 content 得靠这里")
+    void titleRowsMustBeTopmostAndPartial() throws Exception {
+        // 落在内容中间：Excel 本身写得进去（先印上方内容、从出现那页起重复），
+        // 但 PDF 是照行流分页的、只认最上面的 —— 放过去三条路就分叉了
+        PageConfigDTO middle = new PageConfigDTO();
+        middle.setTitleRows("3:4");
+        try (XSSFWorkbook wb = read(exporter.export(List.of(rowsSheet(8)), middle))) {
+            assertNull(wb.getSheetAt(0).getRepeatingRows(), "不在最上面的标题行不该写进 xlsx");
+        }
+
+        PageConfigDTO all = new PageConfigDTO();
+        all.setTitleRows("1:8");
+        try (XSSFWorkbook wb = read(exporter.export(List.of(rowsSheet(8)), all))) {
+            assertNull(wb.getSheetAt(0).getRepeatingRows(), "盖住全部内容的标题行不该写进 xlsx");
+        }
+
+        // 设了打印区域时按区域的第一行起算：A3:A8 的第一行是第 3 行，标题行 3:4 合法
+        PageConfigDTO area = new PageConfigDTO();
+        area.setPrintArea("A3:A8");
+        area.setTitleRows("3:4");
+        try (XSSFWorkbook wb = read(exporter.export(List.of(rowsSheet(8)), area))) {
+            CellRangeAddress rows = wb.getSheetAt(0).getRepeatingRows();
+            assertEquals(2, rows.getFirstRow(), "打印区域内最上面的标题行该写进去");
+            assertEquals(3, rows.getLastRow());
+        }
+    }
+
+    /** n 行 1 列都有内容的表 */
+    private Map<String, Object> rowsSheet(int n) {
+        List<Map<String, Object>> celldata = new ArrayList<>();
+        for (int r = 0; r < n; r++) {
+            celldata.add(cell(r, 0));
+        }
+        Map<String, Object> sheet = new LinkedHashMap<>();
+        sheet.put("name", "Sheet1");
+        sheet.put("celldata", celldata);
+        sheet.put("config", Map.of("columnlen", Map.of("0", 110)));
+        return sheet;
+    }
+
+    @Test
     @DisplayName("默认行高按设计器的 19px（14.25pt）写入")
     void defaultRowHeightMatchesDesigner() throws Exception {
         try (XSSFWorkbook wb = read(exporter.export(List.of(sheetWith(new int[]{110})), new PageConfigDTO()))) {
@@ -206,6 +274,26 @@ class ExcelExporterTest {
             XSSFSheet sheet = wb.getSheetAt(0);
             assertEquals(sheet.getDefaultRowHeightInPoints(), sheet.getRow(0).getHeightInPoints(), 0.01,
                     "不该动这一行的高度");
+        }
+    }
+
+    @Test
+    @DisplayName("行高夹在 Excel 的上限 409.5pt 以内 —— 写超了 Excel 会把文件当损坏")
+    void rowHeightIsCappedAtExcelLimit() throws Exception {
+        // 一段长文落在窄列里，按公式量出来七百多磅
+        Map<String, Object> wrapped = styledCell(0, 0, "说明".repeat(300), Map.of("tb", "2"));
+        Map<String, Object> sheet = new LinkedHashMap<>();
+        sheet.put("name", "长备注");
+        sheet.put("celldata", List.of(wrapped));
+        // 拖出来的行高越界时同样夹住
+        sheet.put("config", Map.of("columnlen", Map.of("0", 100), "rowlen", Map.of("1", 10000)));
+
+        try (XSSFWorkbook wb = read(exporter.export(List.of(sheet), new PageConfigDTO()))) {
+            XSSFSheet s = wb.getSheetAt(0);
+            assertEquals(409.5f, s.getRow(0).getHeightInPoints(), 0.01,
+                    "自动换行撑出来的行高该夹在上限上");
+            assertEquals(409.5f, s.getRow(1).getHeightInPoints(), 0.01,
+                    "拖出来的行高同样夹在上限上");
         }
     }
 

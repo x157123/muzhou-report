@@ -8,6 +8,8 @@ import org.apache.poi.xwpf.usermodel.XWPFParagraph;
 import org.apache.poi.xwpf.usermodel.XWPFPicture;
 import org.apache.poi.xwpf.usermodel.XWPFTable;
 import org.apache.poi.xwpf.usermodel.XWPFTableCell;
+import org.apache.poi.xwpf.usermodel.XWPFTableRow;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTTrPr;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTBorder;
@@ -26,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -53,6 +56,56 @@ class WordExporterTest {
             String text = table.getText();
             assertTrue(text.contains("金额"), "区域内的列该在，实际:\n" + text);
             assertTrue(!text.contains("区域外备注"), "区域外的列不该进 Word，实际:\n" + text);
+        }
+    }
+
+    @Test
+    @DisplayName("顶端标题行标成 w:tblHeader，Word 自己在每页表格上方重画")
+    void titleRowsRepeatAsTableHeader() throws Exception {
+        PageConfigDTO cfg = pageConfig(null);
+        // 第 1 行是标题、第 2 行是表头，两行都跟着翻页走
+        cfg.setTitleRows("1:2");
+
+        try (XWPFDocument doc = new XWPFDocument(new ByteArrayInputStream(
+                word.convert(excel.export(List.of(sheet()), cfg), cfg)))) {
+            XWPFTable table = doc.getTables().get(0);
+            assertTrue(table.getRow(0).isRepeatHeader(), "第 1 行该是重复表头");
+            assertTrue(table.getRow(1).isRepeatHeader(), "第 2 行该是重复表头");
+            assertFalse(table.getRow(2).isRepeatHeader(), "数据行不该标成重复表头");
+        }
+    }
+
+    @Test
+    @DisplayName("比一页还高的行：文字一个不丢，也不禁止跨页断行（禁了就又是「整行挪走、前一页空掉」）")
+    void oversizedRowKeepsAllTextAndMayBreakAcrossPages() throws Exception {
+        String note = "起" + "长备注".repeat(300) + "止";
+        Map<String, Object> wrapped = cell(0, 0, note, Map.of("tb", "2"));
+        Map<String, Object> s = new LinkedHashMap<>();
+        s.put("name", "长备注");
+        s.put("celldata", List.of(wrapped));
+        s.put("config", Map.of("columnlen", Map.of("0", 100)));
+
+        try (XWPFDocument doc = new XWPFDocument(new ByteArrayInputStream(
+                word.convert(excel.export(List.of(s), pageConfig(null)))))) {
+            XWPFTableRow row = doc.getTables().get(0).getRow(0);
+            String text = row.getCell(0).getText();
+            assertTrue(text.startsWith("起") && text.endsWith("止"),
+                    "超高行的文字该整段搬进 Word，实际长度 " + text.length());
+            CTTrPr pr = row.getCtRow().getTrPr();
+            assertTrue(pr == null || pr.sizeOfCantSplitArray() == 0,
+                    "不能设 cantSplit —— Word 会把整行挪到下一页，前一页就空掉了");
+        }
+    }
+
+    @Test
+    @DisplayName("没配顶端标题行时一行都不标，老报表的表现不变")
+    void withoutTitleRowsNoRepeatHeader() throws Exception {
+        try (XWPFDocument doc = new XWPFDocument(new ByteArrayInputStream(
+                word.convert(excel.export(List.of(sheet()), pageConfig(null)))))) {
+            XWPFTable table = doc.getTables().get(0);
+            for (int r = 0; r < table.getRows().size(); r++) {
+                assertFalse(table.getRow(r).isRepeatHeader(), "第 " + r + " 行不该是重复表头");
+            }
         }
     }
 

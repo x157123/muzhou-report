@@ -85,6 +85,19 @@ public class ExcelExporter {
     /** 单元格左右内边距合计（磅）。 */
     private static final float PADDING_X_PT = 3f;
 
+    /**
+     * Excel 的行高上限（磅）—— 这是**文件格式的硬限制**，不是我们的选择。
+     *
+     * <p>写超了 Excel 打开时会当成异常值（轻则悄悄压回去，重则提示「发现不可读取的内容」），
+     * 所以宁可在这里夹住。长备注格按真实文字撑高时很容易越过它
+     * （{@link #applyWrapRowHeights}，一段几百字的说明落在窄列里就有七百多磅）。
+     *
+     * <p><b>PDF 不受这条限制</b>：它虽然是从这份 xlsx 读回行高的，但
+     * {@code PdfExporter#growWrapRows} 会按真字体重新量一遍再撑回去，超高行由它劈开跨页印。
+     * 也就是说「Excel 里那一格看不全」是 Excel 自己的天花板，PDF 那条路仍然是完整的。
+     */
+    private static final float MAX_ROW_HEIGHT_PT = 409.5f;
+
     private final ImageLoader imageLoader;
 
     public ExcelExporter(MzProperties props) {
@@ -455,6 +468,12 @@ public class ExcelExporter {
             if (row == null) {
                 row = sheet.createRow(r);
             }
+            if (height > MAX_ROW_HEIGHT_PT) {
+                log.warn("第 {} 行按文字量出来要 {}pt，超过 Excel 的行高上限 {}pt，已夹住 —— "
+                                + "这一格在 Excel 里会显示不全，要完整出纸请走 PDF",
+                        r + 1, Math.round(height), MAX_ROW_HEIGHT_PT);
+                height = MAX_ROW_HEIGHT_PT;
+            }
             if (row.getHeightInPoints() < height - 0.1f) {
                 row.setHeightInPoints(height);
             }
@@ -560,6 +579,69 @@ public class ExcelExporter {
             } catch (Exception e) {
                 log.warn("打印区域[{}]非法，已忽略", area);
             }
+        }
+
+        applyTitleRows(sheet, cfg);
+    }
+
+    /**
+     * 顶端标题行（跨页重复的表头）-> xlsx 的 {@code _xlnm.Print_Titles}。
+     *
+     * <p><b>只在这一处翻译</b>：PDF（{@code PdfExporter#readTitleRows}）与 Word
+     * （{@code WordExporter#titleRows}）都是从 xlsx 读回来的，与页头页尾同一套路数。
+     * 非法值忽略并记 warn —— 表头不重复只是难看，不该让整份导出失败。
+     *
+     * <p><b>「必须是内容范围最上面的连续若干行」在这里也要把关</b>，不能只靠设计器的弹窗拦：
+     * 手写 content / 直接调接口能绕过前端。Excel 本身支持任意位置的重复行（先印上方内容、
+     * 从出现那页起每页重复），而 PDF 是照行流分页的、只认最上面的 —— 这里放过去的话
+     * 「Excel 里能重复、PDF 里没有」，三条路就分叉了。判定与 {@code PdfExporter#readTitleRows}
+     * 同一套：起点必须盖住内容第一行（设了打印区域按区域第一行，否则按 A1 —— 与
+     * {@code PdfExporter#contentRange} 的「内容从 A1 起算」一致），且不能把内容全吃掉。
+     */
+    private void applyTitleRows(XSSFSheet sheet, PageConfigDTO cfg) {
+        CellRangeAddress rows = parseRowRange(cfg.getTitleRows());
+        if (rows == null) {
+            return;
+        }
+        CellRangeAddress area = null;
+        if (cfg.getPrintArea() != null && !cfg.getPrintArea().isBlank()) {
+            try {
+                area = CellRangeAddress.valueOf(cfg.getPrintArea().trim());
+            } catch (Exception ignored) {
+                // 打印区域非法时上面已经 warn 过、按「整表」出纸，标题行也按整表判
+            }
+        }
+        int first = area == null ? 0 : area.getFirstRow();
+        int last = area == null ? sheet.getLastRowNum() : Math.min(area.getLastRow(), sheet.getLastRowNum());
+        if (rows.getFirstRow() > first || rows.getLastRow() < first) {
+            log.warn("顶端标题行[{}]不在内容范围最上面（内容从第 {} 行起），已忽略", cfg.getTitleRows(), first + 1);
+            return;
+        }
+        if (rows.getLastRow() >= last) {
+            log.warn("顶端标题行[{}]盖住了全部内容，已忽略", cfg.getTitleRows());
+            return;
+        }
+        sheet.setRepeatingRows(rows);
+    }
+
+    /**
+     * {@code "1:3"} / {@code "$1:$3"} -> 0 起算的行区间（列填 -1 = 整行），非法或空返回 null。
+     */
+    static CellRangeAddress parseRowRange(String text) {
+        if (text == null || text.isBlank()) {
+            return null;
+        }
+        String[] parts = text.trim().replace("$", "").split(":");
+        try {
+            int first = Integer.parseInt(parts[0].trim()) - 1;
+            int last = Integer.parseInt(parts[parts.length - 1].trim()) - 1;
+            if (parts.length > 2 || first < 0 || last < first) {
+                throw new NumberFormatException(text);
+            }
+            return new CellRangeAddress(first, last, -1, -1);
+        } catch (RuntimeException e) {
+            log.warn("顶端标题行[{}]非法，已忽略（应形如 1:3）", text);
+            return null;
         }
     }
 
@@ -844,7 +926,8 @@ public class ExcelExporter {
                 if (row == null) {
                     row = sheet.createRow(r);
                 }
-                row.setHeightInPoints(pxToPoints(px));
+                // 拖出来的行高同样受 Excel 的上限约束，见 MAX_ROW_HEIGHT_PT
+                row.setHeightInPoints(Math.min(pxToPoints(px), MAX_ROW_HEIGHT_PT));
             });
         }
 

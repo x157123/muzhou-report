@@ -41,6 +41,18 @@ public class PageConfigDTO implements Serializable {
     /** 打印区域，形如 "A1:F30"；空表示整表 */
     private String printArea = "";
 
+    /**
+     * 顶端标题行（跨页重复的表头），形如 {@code "1:3"}（1 起算、闭区间）；空表示不重复。
+     *
+     * <p>存进 xlsx 的 {@code _xlnm.Print_Titles}（{@code ExcelExporter#applyPageSetup} 一处写），
+     * PDF / Word 两条路从 xlsx 读回来 —— 与页头页尾一样是「一处翻译、下游读回来」。
+     *
+     * <p><b>只支持「内容范围最上面的连续若干行」</b>：标题行落在内容中间时三条路的语义都对不齐
+     * （Excel 会把它插到每页顶上，而 PDF 是照着行流分页的），一律忽略并记 warn。
+     * 设了打印区域时按区域的第一行起算。
+     */
+    private String titleRows = "";
+
     /** 页头（左/中/右三段，画在上页边距里）；三段都空 = 没页头 */
     private HeaderFooterDTO header = new HeaderFooterDTO();
 

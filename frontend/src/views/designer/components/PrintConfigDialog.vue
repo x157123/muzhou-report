@@ -82,6 +82,19 @@
             </div>
           </el-form-item>
 
+          <el-form-item label="顶端标题行">
+            <div class="area-row">
+              <el-input v-model="form.titleRows" :placeholder="`留空=不重复，例如 ${titleRowFirst}:${titleRowFirst + 1}`" />
+              <el-button @click="useSelectionRows">取当前选区行</el-button>
+              <el-button :disabled="!form.titleRows" @click="form.titleRows = ''">清除</el-button>
+            </div>
+            <div class="text-muted" style="width: 100%; margin-top: 4px">
+              这几行会在<b>每一页顶部重复</b>（导出的 Excel / PDF / Word 都生效）；
+              只能是{{ form.printArea ? '打印区域' : '表格' }}最上面的连续若干行，也就是从第
+              {{ titleRowFirst }} 行起。
+            </div>
+          </el-form-item>
+
           <el-divider style="margin: 4px 0 12px" />
 
           <el-form-item label="画布显示">
@@ -390,6 +403,7 @@ import {
   headerFooterReserveMm,
   parseA1Range,
   formatA1Range,
+  parseRowRange,
   widthLimitPx,
   widthOverflowPx,
   totalColumnsWidth
@@ -537,6 +551,18 @@ function useSelection() {
   form.value.printArea = formatA1Range(range)
 }
 
+/** 顶端标题行必须从这一行起：设了打印区域就是区域的第一行，否则是第 1 行 */
+const titleRowFirst = computed(() => (parseA1Range(form.value.printArea)?.r1 ?? 0) + 1)
+
+function useSelectionRows() {
+  const range = props.getSelection?.()
+  if (!range) {
+    ElMessage.warning('请先在表格中框选要重复的那几行')
+    return
+  }
+  form.value.titleRows = `${range.r1 + 1}:${range.r2 + 1}`
+}
+
 /** 撤掉当前 sheet 的单独设置，改回跟随报表级 */
 function followReport() {
   store.clearPageConfig()
@@ -549,6 +575,18 @@ function onConfirm() {
   if (form.value.printArea && !parseA1Range(form.value.printArea)) {
     ElMessage.warning('打印区域格式不合法，应形如 A1:F30')
     return
+  }
+  if (form.value.titleRows) {
+    const rows = parseRowRange(form.value.titleRows)
+    if (!rows) {
+      ElMessage.warning('顶端标题行格式不合法，应形如 1:3')
+      return
+    }
+    // 落在中间的标题行三条导出路都还原不了（后端会忽略），不如在这里就拦住
+    if (rows.r1 + 1 !== titleRowFirst.value) {
+      ElMessage.warning(`顶端标题行只能从第 ${titleRowFirst.value} 行起，例如 ${titleRowFirst.value}:${rows.r2 + 1}`)
+      return
+    }
   }
   store.setPageConfig(form.value, scope.value)
   // 输出方式是报表级的，跟「作用范围」无关，单独写

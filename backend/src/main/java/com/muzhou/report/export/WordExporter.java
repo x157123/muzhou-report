@@ -520,9 +520,15 @@ public class WordExporter {
         layoutTable(table, widths);
         Set<Integer> breaks = rowBreaks(sheet);
 
+        int titleR1 = titleRows(sheet, firstRow, lastRow);
+
         for (int r = firstRow; r <= lastRow; r++) {
             XWPFTableRow row = table.getRow(r - firstRow);
             applyRowHeight(row, sheet.getRow(r));
+            if (r <= titleR1) {
+                // 顶端标题行：Word 自己会在每一页的表格上方重画这几行
+                row.setRepeatHeader(true);
+            }
             if (r > firstRow && breaks.contains(r)) {
                 pageBreakBefore(row);
             }
@@ -536,6 +542,23 @@ public class WordExporter {
             }
         }
         applyMerges(table, sheet, cols, firstRow, lastRow, widths);
+    }
+
+    /**
+     * xlsx 里的顶端标题行（{@code _xlnm.Print_Titles}，由 {@code ExcelExporter#applyTitleRows} 写入）
+     * -> 标题行的末行；没有则返回 {@code firstRow - 1}。
+     *
+     * <p>判定与 {@code PdfExporter#readTitleRows} 同一套：必须是表格最上面的连续若干行，
+     * 而且不能把整张表都吃掉。Word 的 {@code w:tblHeader} 本来就只认表格开头的连续行，
+     * 落在中间的标记根本不生效。
+     */
+    private int titleRows(XSSFSheet sheet, int firstRow, int lastRow) {
+        CellRangeAddress rows = sheet.getRepeatingRows();
+        if (rows == null || rows.getFirstRow() > firstRow || rows.getLastRow() < firstRow
+                || rows.getLastRow() >= lastRow) {
+            return firstRow - 1;
+        }
+        return rows.getLastRow();
     }
 
     /**

@@ -102,6 +102,8 @@ export function defaultPageConfig() {
     limitWidth: true,
     /** 打印区域，形如 "A1:F30"；空串表示整表 */
     printArea: '',
+    /** 顶端标题行（跨页重复的表头），形如 "1:3"（1 起算、闭区间）；空串表示不重复 */
+    titleRows: '',
     /** 页头/页尾：画在页边距里，三段都空 = 没设置 */
     header: defaultHeaderFooter(),
     footer: defaultHeaderFooter(),
@@ -117,6 +119,7 @@ export function normalizePageConfig(cfg) {
   // 老报表的 pageConfig 里没有这一项，缺省即开启
   merged.limitWidth = merged.limitWidth == null ? true : !!merged.limitWidth
   merged.printArea = String(merged.printArea || '').trim().toUpperCase()
+  merged.titleRows = String(merged.titleRows || '').trim().replace(/\$/g, '')
   ;['marginTop', 'marginBottom', 'marginLeft', 'marginRight'].forEach((k) => {
     merged[k] = clamp(numOr(merged[k], 10), 0, 100)
   })
@@ -660,7 +663,9 @@ export function computePageBreaks(sheet, pageConfig) {
   const cols = cfg.fitToWidth
     ? { breaks: [], tail: 0 }
     : scan(range.c1, range.c2, (c) => colWidth(sheet, c), page.width)
-  const rows = scan(range.r1, range.r2, (r) => rowHeight(sheet, r), page.height)
+  // 顶端标题行每页重画一遍：它不参与分页，每页的正文相应少一截（与 PdfExporter.Geom#paginate 一致）
+  const title = titleRowBand(sheet, cfg, range)
+  const rows = scan(title.last + 1, range.r2, (r) => rowHeight(sheet, r), page.height - title.height)
 
   // 页数按实际内容（或打印区域）算，整张空表不该报一堆页
   const content = area || usedRange(sheet)
@@ -680,6 +685,7 @@ export function computePageBreaks(sheet, pageConfig) {
     pages,
     signature: [
       cfg.printArea,
+      cfg.titleRows,
       formatA1Range(range),
       cols.breaks.join(','),
       rows.breaks.join(','),
@@ -687,6 +693,33 @@ export function computePageBreaks(sheet, pageConfig) {
       Math.round(rows.tail)
     ].join('|')
   }
+}
+
+/**
+ * 顶端标题行在这张表上实际占了哪一段。
+ *
+ * 判定与后端两条路（`PdfExporter#readTitleRows` / `WordExporter#titleRows`）保持一致：
+ * **必须是内容范围最上面的连续若干行**，落在中间的、或者把整个范围都吃掉的一律不认。
+ *
+ * @returns {{last: number, height: number}} last = 标题行的末行（没有则是 range.r1 - 1）
+ */
+export function titleRowBand(sheet, pageConfig, range) {
+  const none = { last: range.r1 - 1, height: 0 }
+  const rows = parseRowRange(normalizePageConfig(pageConfig).titleRows)
+  if (!rows || rows.r1 > range.r1 || rows.r2 < range.r1 || rows.r2 >= range.r2) return none
+  let height = 0
+  for (let r = range.r1; r <= rows.r2; r += 1) height += rowHeight(sheet, r)
+  return { last: rows.r2, height }
+}
+
+/** "1:3" / "$1:$3" -> {r1, r2}（0 起算的闭区间）；非法或空返回 null */
+export function parseRowRange(text) {
+  const m = /^\s*\$?(\d+)\s*:\s*\$?(\d+)\s*$/.exec(String(text || ''))
+  if (!m) return null
+  const r1 = Number(m[1]) - 1
+  const r2 = Number(m[2]) - 1
+  if (r1 < 0 || r2 < r1) return null
+  return { r1, r2 }
 }
 
 /**

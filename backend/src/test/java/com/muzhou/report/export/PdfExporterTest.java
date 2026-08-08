@@ -172,6 +172,79 @@ class PdfExporterTest {
     }
 
     @Test
+    @DisplayName("顶端标题行：第 2 页起也带表头，而且表头只画一遍、不占用两次高度")
+    void titleRowsRepeatOnEveryPage() throws Exception {
+        PageConfigDTO cfg = new PageConfigDTO();
+        cfg.setTitleRows("1:1");
+
+        PdfReader reader = new PdfReader(pdf.convert(excel.export(List.of(sheet(200, 3)), cfg)));
+        int pages = reader.getNumberOfPages();
+        assertTrue(pages > 1, "200 行该分成多页");
+
+        PdfTextExtractor extractor = new PdfTextExtractor(reader);
+        for (int p = 1; p <= pages; p++) {
+            String text = extractor.getTextFromPage(p);
+            assertTrue(text.contains("销售额"), "第 " + p + " 页该重复表头，实际:\n" + text);
+        }
+        // 表头每页占掉一行，所以页数只会比不配标题行时多一点点；差太多说明行流没把标题行摘干净
+        int plain = pageCount(excel.export(List.of(sheet(200, 3)), new PageConfigDTO()));
+        assertTrue(pages >= plain && pages <= plain + 1,
+                "重复表头只该多占每页一行，实际 " + pages + " 页 / 不重复时 " + plain + " 页");
+        reader.close();
+    }
+
+    @Test
+    @DisplayName("标题行不在内容最上面（或盖住了全部内容）时忽略，不影响出纸")
+    void titleRowsElsewhereAreIgnored() throws Exception {
+        PageConfigDTO middle = new PageConfigDTO();
+        middle.setTitleRows("3:4");
+        PageConfigDTO all = new PageConfigDTO();
+        all.setTitleRows("1:200");
+
+        int plain = pageCount(excel.export(List.of(sheet(200, 3)), new PageConfigDTO()));
+        assertEquals(plain, pageCount(excel.export(List.of(sheet(200, 3)), middle)));
+        assertEquals(plain, pageCount(excel.export(List.of(sheet(200, 3)), all)));
+    }
+
+    @Test
+    @DisplayName("标题行与按单据取名叠加：首行被标题带占掉后，第一份单据的 ${sheet} 不丢名")
+    void titleRowsKeepFirstDocName() throws Exception {
+        PageConfigDTO cfg = new PageConfigDTO();
+        cfg.setTitleRows("1:1");
+        cfg.getFooter().setRight("单据：${sheet}");
+
+        // perRowPage 拼出来的那张：3 份单据各 3 行，第 1 份的起点(0)落在标题带上
+        Map<String, Object> concat = sheet(9, 3);
+        concat.put("mzRowBreaks", List.of(3, 6));
+
+        PdfReader reader = new PdfReader(pdf.convert(excel.export(List.of(concat), cfg), i -> cfg,
+                i -> List.of(0, 3, 6), i -> List.of("单A", "单B", "单C")));
+        assertEquals(3, reader.getNumberOfPages());
+
+        PdfTextExtractor extractor = new PdfTextExtractor(reader);
+        assertTrue(extractor.getTextFromPage(1).contains("单据：单A"),
+                "第 1 份单据的名字该钉到正文首行上，而不是丢在标题带里退回工作表名");
+        assertTrue(extractor.getTextFromPage(2).contains("单据：单B"));
+        assertTrue(extractor.getTextFromPage(3).contains("单据：单C"));
+        reader.close();
+    }
+
+    @Test
+    @DisplayName("标题行占掉半页以上时不生效 —— 否则正文被挤得没地方放")
+    void hugeTitleRowsAreIgnored() throws Exception {
+        // 第 1 行拖到 700px：xlsx 里夹到 409.5pt，仍超过 A4 正文（约 785pt）的一半
+        Map<String, Object> tall = sheet(200, 3);
+        tall.put("config", Map.of("columnlen", Map.of("0", 110, "1", 110, "2", 110),
+                "rowlen", Map.of("0", 700)));
+        PageConfigDTO cfg = new PageConfigDTO();
+        cfg.setTitleRows("1:1");
+
+        assertEquals(pageCount(excel.export(List.of(tall), new PageConfigDTO())),
+                pageCount(excel.export(List.of(tall), cfg)),
+                "占掉半页以上的标题行该按没配处理，页数不变");
+    }
+
+    @Test
     @DisplayName("比一页还高的行横着劈开跨页印：表头那页不会只剩表头，超出的文字也不丢")
     void oversizedRowIsSlicedAcrossPages() throws Exception {
         // 备注格里一段长文塞进 100px 宽的列，折出来比一页正文（A4 纵向约 785pt）高好几倍
@@ -192,6 +265,38 @@ class PdfExporterTest {
         assertTrue(extractor.getTextFromPage(pages).contains("止"),
                 "最后一页该印到备注的结尾，印不出来说明超高行的文字被裁掉了");
         reader.close();
+    }
+
+    @Test
+    @DisplayName("劈开超高行时切口落在两行文字之间，同一行字不会两页各露半个")
+    void sliceCutsBetweenTextLines() throws Exception {
+        // 每个字都不一样：重复的填充字会让「上下两页各一行」看着像同一行，断言就失灵了
+        StringBuilder note = new StringBuilder();
+        for (int i = 0; i < 600; i++) {
+            note.append((char) ('一' + i));
+        }
+        PdfReader reader = new PdfReader(pdf.convert(
+                excel.export(List.of(noteSheet(note.toString())), new PageConfigDTO())));
+        int pages = reader.getNumberOfPages();
+        assertTrue(pages > 1, "前提：这一格该占好几页");
+
+        PdfTextExtractor extractor = new PdfTextExtractor(reader);
+        for (int p = 1; p < pages; p++) {
+            String last = lastLine(extractor.getTextFromPage(p));
+            String first = firstLine(extractor.getTextFromPage(p + 1));
+            assertTrue(!last.isEmpty() && !last.equals(first),
+                    "第 " + p + " 页末行[" + last + "]和第 " + (p + 1) + " 页首行[" + first
+                            + "]是同一行字 —— 切口切在了这行字的中间");
+        }
+        reader.close();
+    }
+
+    private String firstLine(String text) {
+        return text.lines().map(String::trim).filter(s -> !s.isEmpty()).findFirst().orElse("");
+    }
+
+    private String lastLine(String text) {
+        return text.lines().map(String::trim).filter(s -> !s.isEmpty()).reduce("", (a, b) -> b);
     }
 
     @Test

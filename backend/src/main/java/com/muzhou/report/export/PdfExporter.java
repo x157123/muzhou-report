@@ -46,6 +46,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -312,6 +313,37 @@ public class PdfExporter {
         /** 必须另起一页的行（下标 r-r0），见 {@link #readRowBreaks}；没有手动分页符时为空集 */
         private Set<Integer> rowBreaks = Set.of();
         /**
+         * 顶端标题行的末行（**绝对**行号），标题行恒是 {@code r0..titleR1} 这一段，见
+         * {@link #readTitleRows}。{@code r0 - 1} = 没有标题行。
+         */
+        private int titleR1 = -1;
+        /**
+         * 行下标（r-r0）-> 这一行文字的行网格 {距行顶多少磅是第一行文字, 行距}，
+         * 见 {@link #lineGrid}。只有被撑高过的行才有，劈开超高行时用它对齐切口。
+         */
+        private final Map<Integer, float[]> lineGrid = new HashMap<>();
+
+        /**
+         * 顶端标题行这一页生不生效。除了「配没配」（{@code titleR1}，{@link #readTitleRows}
+         * 已做过静态校验）还要看**撑高后的**高度：{@code readTitleRows} 跑在
+         * {@code growWrapRows} 之前，标题行里有自动换行格被撑高时还能越过它那道
+         * 「不超过半页」的线，占掉大半页的标题行会把正文挤成一行一页。
+         * 分页（{@link #paginate}）与绘制（{@code drawPage}）都以这个判定为准 ——
+         * 两边不一致的话，行流里没摘掉的标题行会再被标题带盖一遍。
+         */
+        private boolean titleEnabled() {
+            return titleR1 >= r0 && titleHeight() <= availHeight() * 0.5f;
+        }
+
+        /** 标题行占的高度（磅）：每页都要为它留出这么多，正文相应少一截 */
+        private float titleHeight() {
+            float h = 0;
+            for (int r = r0; r <= titleR1; r++) {
+                h += rowHeight[r - r0];
+            }
+            return h;
+        }
+        /**
          * 一份新单据的起始行（**绝对**行号）-> 那份单据的名字，见 {@link #docStartRows}；
          * 普通报表为空表。页码从这些行重编；名字给页头页尾里的 {@code ${sheet}} 用，
          * 空串表示没配（仍印工作表名）。
@@ -331,11 +363,27 @@ public class PdfExporter {
          *
          * <p>顺序是「先向下、再向右」——与 Excel 打印的默认页序一致：先出完第一批列的所有行，
          * 再出下一批列。
+         *
+         * <p>配了顶端标题行时**标题行不参与分页**：它从行流里摘掉，每页固定预留它那么高
+         * （由 {@link #drawPage} 画在正文上面）。标题行本来就在内容最上面，所以第一页看着
+         * 和不配标题行时一模一样，区别只在第二页起也带上表头。
          */
         private void paginate(List<Page> out) {
+            int body = titleEnabled() ? titleR1 - r0 + 1 : 0;
+            float[] heights = body == 0 ? rowHeight : Arrays.copyOfRange(rowHeight, body, rowHeight.length);
+            Set<Integer> breaks = body == 0 ? rowBreaks : new HashSet<>();
+            if (body > 0) {
+                rowBreaks.stream().filter(i -> i > body).forEach(i -> breaks.add(i - body));
+            }
+            float avail = availHeight() - (body == 0 ? 0 : titleHeight());
+            float[][] grid = new float[heights.length][];
+            for (int i = 0; i < heights.length; i++) {
+                grid[i] = lineGrid.get(i + body);
+            }
             for (int[] cb : split(colWidth, availWidth())) {
-                for (RowBlock rb : splitRows(rowHeight, availHeight(), rowBreaks)) {
-                    out.add(new Page(this, r0 + rb.start(), r0 + rb.end(), c0 + cb[0], c0 + cb[1], rb.skip()));
+                for (RowBlock rb : splitRows(heights, avail, breaks, grid)) {
+                    out.add(new Page(this, r0 + body + rb.start(), r0 + body + rb.end(),
+                            c0 + cb[0], c0 + cb[1], rb.skip(), rb.height()));
                 }
             }
         }
@@ -372,10 +420,16 @@ public class PdfExporter {
          * 只能画多高，超出的文字被裁掉、再也印不出来。自动换行的备注格动辄比一页还高，
          * 这是唯一还原得了的排法，Word 的表格行（默认「允许跨页断行」）也是这么排的。
          *
-         * <p>切开的位置只按高度算，不去躲文字的行间 —— 这一刀落在某一行字的中间时上下两页
-         * 各露半个字，与 Excel / Word 把超高行切开的表现一致。
+         * <p>切口**躲开文字行**：{@code grid} 给出每一行的文字行网格（{@link #lineGrid}），
+         * 有网格的行把切口往上对到最近的两行文字之间，免得上下两页各露半个字
+         * （Excel / Word 切超高行时是硬切的，这一刀比它们讲究）。只会把切口往**上**挪，
+         * 所以不会把一页撑爆。没有网格（{@code grid} 为 null 或该行没被撑高过）时照旧硬切。
          */
         static List<RowBlock> splitRows(float[] len, float avail, Set<Integer> forced) {
+            return splitRows(len, avail, forced, null);
+        }
+
+        static List<RowBlock> splitRows(float[] len, float avail, Set<Integer> forced, float[][] grid) {
             List<RowBlock> blocks = new ArrayList<>();
             int start = 0;
             // 本页第一行已经在前几页印掉的高度
@@ -390,7 +444,7 @@ public class PdfExporter {
                 // 剩的地方连 1pt 都不到时不值当劈，照旧换页（也保证下面那个 while 一定在往前走）
                 boolean sliceable = avail > 0 && h > avail && avail - used > 1f;
                 if (i > start && (forced.contains(i) || (!fits && !sliceable))) {
-                    blocks.add(new RowBlock(start, i - 1, skip));
+                    blocks.add(new RowBlock(start, i - 1, skip, used));
                     start = i;
                     skip = 0;
                     used = 0;
@@ -399,8 +453,13 @@ public class PdfExporter {
                 // 这一行本页印掉多少，下一页就从多少接着印；一行占好几页时连劈几刀
                 float printed = i == start ? skip : 0;
                 while (avail > 0 && used + h > avail + 0.01f && h > avail) {
-                    blocks.add(new RowBlock(start, i, skip));
-                    float cut = avail - used;
+                    // 切口对到两行文字之间；只往上挪，本页装得下的只会更少
+                    float at = snapToLines(printed + avail - used, grid == null ? null : grid[i]);
+                    float cut = at - printed;
+                    if (cut <= 1f) {
+                        cut = avail - used;
+                    }
+                    blocks.add(new RowBlock(start, i, skip, used + cut));
                     printed += cut;
                     h -= cut;
                     start = i;
@@ -409,26 +468,53 @@ public class PdfExporter {
                 }
                 used += h;
             }
-            blocks.add(new RowBlock(start, len.length - 1, skip));
+            blocks.add(new RowBlock(start, len.length - 1, skip, used));
             return blocks;
+        }
+
+        /**
+         * 把「距行顶 {@code at} 磅」这一刀往上对到最近的两行文字之间。
+         *
+         * @param grid {距行顶多少磅是第一行文字, 行距}，null = 这一行没有可对齐的文字
+         */
+        private static float snapToLines(float at, float[] grid) {
+            if (grid == null || grid[1] <= 0 || at <= grid[0] + grid[1]) {
+                // 没网格，或者这一刀落在第一行文字之内 —— 往上对就把这一页切空了
+                return at;
+            }
+            int lines = (int) Math.floor((at - grid[0]) / grid[1]);
+            return grid[0] + lines * grid[1];
         }
     }
 
     /**
      * 一页所占的行区间。
      *
-     * @param skip 第 {@code start} 行已经在前一页印掉的高度（磅）；0 表示这一行从头印起。
-     *             超高行被横着劈开时才不为 0，见 {@link Geom#splitRows}
+     * @param skip   第 {@code start} 行已经在前一页印掉的高度（磅）；0 表示这一行从头印起。
+     *               超高行被横着劈开时才不为 0，见 {@link Geom#splitRows}
+     * @param height 这一段实际印掉的高度（磅）。超高行的切口会为了躲开文字往上挪，
+     *               挪出来的那一条**不能**留给下一行的文字露脸，所以画的时候要照它裁
      */
-    record RowBlock(int start, int end, float skip) {
+    record RowBlock(int start, int end, float skip, float height) {
     }
 
     /**
      * 一页：某张 sheet 的一个行列区间。
      *
-     * @param skip 第 {@code r0} 行已经在前一页印掉的高度（磅），见 {@link RowBlock#skip}
+     * @param skip   第 {@code r0} 行已经在前一页印掉的高度（磅），见 {@link RowBlock#skip}
+     * @param height 正文段实际印掉的高度（磅），见 {@link RowBlock#height}
      */
-    private record Page(Geom geom, int r0, int r1, int c0, int c1, float skip) {
+    private record Page(Geom geom, int r0, int r1, int c0, int c1, float skip, float height) {
+    }
+
+    /**
+     * 一页里连续画的一段行：{@code r0..r1}，上下边界落在 {@code top} / {@code bottom}。
+     *
+     * <p>一页最多两段：顶端标题行一段、正文一段。{@code bottom} 是这一段**真正印到哪儿**
+     * （不是页边距），画的时候照它裁 —— 超高行的切口躲开文字往上挪之后，页底会空出一条，
+     * 那条里不能露出下一行文字。
+     */
+    private record Band(int r0, int r1, float top, float bottom) {
     }
 
     /**
@@ -436,13 +522,18 @@ public class PdfExporter {
      * 顺带带上每份单据的名字（{@code mzDocNames}，与起始行一一对应；没有就是空串）。
      *
      * <p>内容范围可能被打印区域裁过，所以落在范围外的丢掉；范围**之前**有起点就说明这张 sheet
-     * 打头的就是一份新单据，记成 {@code r0}（内容的第一行）。裁到 {@code r0} 上的可能不止一份，
+     * 打头的就是一份新单据，记成**正文的第一行**。裁到第一行上的可能不止一份，
      * 此时**后来的覆盖先前的** —— 真正盖住第一行的是最后那一份。
+     *
+     * <p>「正文的第一行」而不是 {@code r0}：配了顶端标题行时标题带不参与分页，各页的
+     * {@code Page#r0} 都从标题带**下面**数起（{@link Geom#paginate}）—— 起点仍钉在 {@code r0}
+     * 的话第一份单据永远对不上号，页码与 {@code ${sheet}} 都会错。
      */
     private Map<Integer, String> docStartRows(List<Integer> breaks, List<String> names, Geom g) {
         if (breaks == null || breaks.isEmpty()) {
             return Map.of();
         }
+        int bodyStart = g.titleEnabled() ? g.titleR1 + 1 : g.r0;
         Map<Integer, String> out = new HashMap<>();
         for (int i = 0; i < breaks.size(); i++) {
             Integer b = breaks.get(i);
@@ -450,7 +541,7 @@ public class PdfExporter {
                 continue;
             }
             String name = names == null || i >= names.size() || names.get(i) == null ? "" : names.get(i);
-            out.put(Math.max(b, g.r0), name);
+            out.put(Math.max(b, bodyStart), name);
         }
         return out;
     }
@@ -599,7 +690,47 @@ public class PdfExporter {
         g.merges = sheet.getMergedRegions();
         g.images = readImages(sheet);
         g.rowBreaks = readRowBreaks(sheet, g.r0, g.r1);
+        g.titleR1 = readTitleRows(sheet, g);
         return g;
+    }
+
+    /**
+     * 读 xlsx 里的顶端标题行（{@code _xlnm.Print_Titles}，由
+     * {@code ExcelExporter#applyTitleRows} 写入），返回标题行的**末行**（绝对行号）；
+     * 没有则返回 {@code r0 - 1}（= 没有标题行）。
+     *
+     * <p>标题行是从 {@code r0} 起的连续若干行 —— 落在内容中间的一律不认（见
+     * {@code PageConfigDTO#titleRows}）。**也不能把内容全吃掉**：整个内容范围都是标题行的话
+     * 正文一行不剩，每页画的都是同一份表头，只会无限出纸。
+     */
+    private int readTitleRows(XSSFSheet sheet, Geom g) {
+        CellRangeAddress rows = sheet.getRepeatingRows();
+        if (rows == null) {
+            return g.r0 - 1;
+        }
+        if (rows.getFirstRow() > g.r0 || rows.getLastRow() < g.r0) {
+            log.warn("顶端标题行[{}:{}]不在内容范围[{}:{}]的最上面，PDF 里不重复表头",
+                    rows.getFirstRow() + 1, rows.getLastRow() + 1, g.r0 + 1, g.r1 + 1);
+            return g.r0 - 1;
+        }
+        if (rows.getLastRow() >= g.r1) {
+            log.warn("顶端标题行[{}:{}]盖住了全部内容，PDF 里不重复表头",
+                    rows.getFirstRow() + 1, rows.getLastRow() + 1);
+            return g.r0 - 1;
+        }
+        // 标题行几乎占满一页时正文没地方放，每页只挤得下一两行，出纸退化成「一行一页」——
+        // 这种配置只能是失误，按没配处理（行高此时已乘过缩放，量出来就是印出来的高度）
+        float height = 0;
+        for (int r = g.r0; r <= rows.getLastRow(); r++) {
+            height += g.rowHeight[r - g.r0];
+        }
+        if (height > g.availHeight() * 0.5f) {
+            log.warn("顶端标题行[{}:{}]占掉一页的一半以上（{}pt / 每页正文 {}pt），PDF 里不重复表头",
+                    rows.getFirstRow() + 1, rows.getLastRow() + 1,
+                    Math.round(height), Math.round(g.availHeight()));
+            return g.r0 - 1;
+        }
+        return rows.getLastRow();
     }
 
     /**
@@ -684,6 +815,9 @@ public class PdfExporter {
      * 早先这里按一页封顶，于是长备注格恒好一页高 —— 前面那页装不下它、只能整行挪到下一页，
      * 「第一页只剩表头、大片空白」，而且封顶砍掉的文字再也印不出来。只留一道防跑飞的上限
      * （{@link #MAX_WRAP_PAGES} 页），免得一格脏数据撑出成百上千页。
+     *
+     * <p>顺手把撑高那一格的**文字行网格**记进 {@link Geom#lineGrid}，供劈开时对齐用 ——
+     * 这里是唯一同时知道「行有多高」和「文字怎么折」的地方。
      */
     private void growWrapRows(Geom g, BaseFont font, DataFormatter formatter, FormulaEvaluator evaluator) {
         float limit = g.availHeight() * MAX_WRAP_PAGES;
@@ -693,6 +827,9 @@ public class PdfExporter {
                 continue;
             }
             float needed = 0;
+            // 撑得最高那一格的 {文字块高, 行距, 垂直对齐}，最后换算成行网格
+            float[] tallest = null;
+            VerticalAlignment tallestAlign = VerticalAlignment.CENTER;
             for (int c = g.c0; c <= g.c1; c++) {
                 Cell cell = row.getCell(c);
                 if (cell == null) {
@@ -725,15 +862,37 @@ public class PdfExporter {
                     continue;
                 }
                 // 与 drawText 里的 blockHeight 同一个式子，再留出上下内边距
-                float h = LINE_SPACING * size * (lines.size() - 1)
-                        + font.getAscentPoint(text, size) - font.getDescentPoint(text, size)
-                        + 2 * PADDING;
-                needed = Math.max(needed, h);
+                float block = LINE_SPACING * size * (lines.size() - 1)
+                        + font.getAscentPoint(text, size) - font.getDescentPoint(text, size);
+                float h = block + 2 * PADDING;
+                if (h > needed) {
+                    needed = h;
+                    tallest = new float[]{block, LINE_SPACING * size};
+                    tallestAlign = verticalAlign(style);
+                }
             }
             if (needed > 0) {
-                g.rowHeight[r - g.r0] = Math.max(g.rowHeight[r - g.r0], Math.min(needed, limit));
+                float height = Math.max(g.rowHeight[r - g.r0], Math.min(needed, limit));
+                g.rowHeight[r - g.r0] = height;
+                g.lineGrid.put(r - g.r0, lineGrid(height, tallest[0], tallest[1], tallestAlign));
             }
         }
+    }
+
+    /**
+     * 一行文字的「行网格」：{距行顶多少磅是第一行文字的顶边, 行距}。
+     *
+     * <p>只给 {@link Geom#splitRows} 用 —— 超高行劈开时把切口对到两行文字**之间**，
+     * 免得上下两页各露半个字。位置必须与 {@link #drawText} 摆文字块的算法同源：
+     * 文字块在格子里怎么放（上/中/下对齐）决定了第一行在哪，往下每 {@code lineHeight} 一行。
+     */
+    private float[] lineGrid(float rowHeight, float blockHeight, float lineHeight, VerticalAlignment va) {
+        float top = switch (va) {
+            case TOP -> PADDING;
+            case BOTTOM -> rowHeight - PADDING - blockHeight;
+            default -> (rowHeight - blockHeight) / 2;
+        };
+        return new float[]{Math.max(top, 0), lineHeight};
     }
 
     /** (r,c) 所属的合并区域，未合并返回 null。 */
@@ -879,11 +1038,40 @@ public class PdfExporter {
 
     /* ---------------------------------- 绘制 ---------------------------------- */
 
+    /**
+     * 画一页：（可选的）顶端标题行 + 正文。
+     *
+     * <p>标题行是**每页重画一遍**的那几行（{@code _xlnm.Print_Titles}），它已经从分页的行流里
+     * 摘掉了（见 {@link Geom#paginate}），所以两段各画各的、行区间不会重叠。
+     */
     private void drawPage(PdfContentByte cb, Page page, BaseFont font,
                           DataFormatter formatter, FormulaEvaluator evaluator) {
         Geom g = page.geom();
+        float top = g.paper.getHeight() - g.marginTop;
+
+        if (g.titleEnabled()) {
+            float titleHeight = g.titleHeight();
+            drawBand(cb, page, new Band(g.r0, g.titleR1, top, top - titleHeight),
+                    font, formatter, evaluator);
+            top -= titleHeight;
+        }
+        // 接着上一页往下印的超高行：把它的**上边界**抬到正文区外面去，露出来的正好是还没印的那一截。
+        // 格子照旧按整行的几何画（文字的行距、垂直居中都算在整行上），越界的部分由裁剪挡掉
+        drawBand(cb, page, new Band(page.r0(), page.r1(), top + page.skip(), top - page.height()),
+                font, formatter, evaluator);
+    }
+
+    /**
+     * 画一段连续的行。
+     *
+     * <p>列范围恒是本页那一批列。一页由「标题行」和「正文」两段拼起来，两段用的是同一套画法，
+     * 区别只在从哪一行起、上下边界在哪。
+     */
+    private void drawBand(PdfContentByte cb, Page page, Band band, BaseFont font,
+                          DataFormatter formatter, FormulaEvaluator evaluator) {
+        Geom g = page.geom();
         int cols = page.c1() - page.c0() + 1;
-        int rows = page.r1() - page.r0() + 1;
+        int rows = band.r1() - band.r0() + 1;
 
         // 列的左边界 / 行的上边界（PDF 的 y 向上，所以行是递减的）
         float[] xs = new float[cols + 1];
@@ -892,53 +1080,54 @@ public class PdfExporter {
             xs[i + 1] = xs[i] + g.colWidth[page.c0() - g.c0 + i];
         }
         float[] ys = new float[rows + 1];
-        // 接着上一页往下印的超高行：把它的**上边界**抬到正文区外面去，露出来的正好是还没印的那一截。
-        // 格子照旧按整行的几何画（文字的行距、垂直居中都算在整行上），越界的部分由下面的裁剪挡掉
-        ys[0] = g.paper.getHeight() - g.marginTop + page.skip();
+        ys[0] = band.top();
         for (int i = 0; i < rows; i++) {
-            ys[i + 1] = ys[i] - g.rowHeight[page.r0() - g.r0 + i];
+            ys[i + 1] = ys[i] - g.rowHeight[band.r0() - g.r0 + i];
         }
 
-        // 正文一律裁在页边距里：超高行是跨页画的，不裁的话前一页的下半截会一直画到纸边上去，
-        // 还会盖住页尾。放宽半个线宽，免得贴着边界的那条边框被裁成半条
+        // 裁在这一段真正印到的范围里：超高行是跨页画的，不裁的话前一页的下半截会一直画到纸边上去、
+        // 还会盖住页尾；切口为躲开文字往上挪之后页底空出的那一条里，也不能露出下一行文字。
+        // 放宽半个线宽，免得贴着边界的那条边框被裁成半条
         cb.saveState();
-        cb.rectangle(0, g.marginBottom - BORDER_WIDTH, g.paper.getWidth(),
-                g.paper.getHeight() - g.marginTop - g.marginBottom + 2 * BORDER_WIDTH);
+        cb.rectangle(0, band.bottom() - BORDER_WIDTH, g.paper.getWidth(),
+                band.top() - band.bottom() + 2 * BORDER_WIDTH);
         cb.clip();
         cb.newPath();
 
         boolean[][] taken = new boolean[rows][cols];
 
-        // 合并区整块画一次。锚点可能落在本页之外（合并区被分页切开），照样按锚点取值和样式，
-        // 画的矩形裁到本页范围内 —— 与 Excel 打印时把合并区切开的表现一致。
+        // 合并区整块画一次。锚点可能落在本段之外（合并区被分页切开），照样按锚点取值和样式，
+        // 画的矩形裁到本段范围内 —— 与 Excel 打印时把合并区切开的表现一致。
         for (CellRangeAddress m : g.merges) {
-            if (m.getLastRow() < page.r0() || m.getFirstRow() > page.r1()
+            if (m.getLastRow() < band.r0() || m.getFirstRow() > band.r1()
                     || m.getLastColumn() < page.c0() || m.getFirstColumn() > page.c1()) {
                 continue;
             }
-            for (int r = Math.max(m.getFirstRow(), page.r0()); r <= Math.min(m.getLastRow(), page.r1()); r++) {
+            for (int r = Math.max(m.getFirstRow(), band.r0()); r <= Math.min(m.getLastRow(), band.r1()); r++) {
                 for (int c = Math.max(m.getFirstColumn(), page.c0()); c <= Math.min(m.getLastColumn(), page.c1()); c++) {
-                    taken[r - page.r0()][c - page.c0()] = true;
+                    taken[r - band.r0()][c - page.c0()] = true;
                 }
             }
-            float[] rect = rect(page, xs, ys, m.getFirstRow(), m.getLastRow(), m.getFirstColumn(), m.getLastColumn());
-            drawCell(cb, page, m.getFirstRow(), m.getFirstColumn(), rect, font, formatter, evaluator, false);
+            float[] rect = rect(page, xs, ys, band, m.getFirstRow(), m.getLastRow(),
+                    m.getFirstColumn(), m.getLastColumn());
+            drawCell(cb, page, band, m.getFirstRow(), m.getFirstColumn(), rect,
+                    font, formatter, evaluator, false);
         }
 
-        for (int r = page.r0(); r <= page.r1(); r++) {
+        for (int r = band.r0(); r <= band.r1(); r++) {
             if (g.sheet.getRow(r) == null) {
                 continue;
             }
             for (int c = page.c0(); c <= page.c1(); c++) {
-                if (taken[r - page.r0()][c - page.c0()]) {
+                if (taken[r - band.r0()][c - page.c0()]) {
                     continue;
                 }
-                float[] rect = rect(page, xs, ys, r, r, c, c);
-                drawCell(cb, page, r, c, rect, font, formatter, evaluator, true);
+                float[] rect = rect(page, xs, ys, band, r, r, c, c);
+                drawCell(cb, page, band, r, c, rect, font, formatter, evaluator, true);
             }
         }
 
-        drawImages(cb, page, xs, ys);
+        drawImages(cb, page, band, xs, ys);
         cb.restoreState();
     }
 
@@ -951,20 +1140,20 @@ public class PdfExporter {
      * <p>图片整个落在一个格子里，所以只在**起点那一格所在的页**上画一次：按页裁一半的图片
      * 两页各出半张，比整张挪到下一页更难看，而 Excel 打印时也是不切图片的。
      */
-    private void drawImages(PdfContentByte cb, Page page, float[] xs, float[] ys) {
+    private void drawImages(PdfContentByte cb, Page page, Band band, float[] xs, float[] ys) {
         Geom g = page.geom();
         if (g.images == null || g.images.isEmpty()) {
             return;
         }
         for (CellImage ci : g.images) {
-            if (ci.r1() < page.r0() || ci.r1() > page.r1() || ci.c1() < page.c0() || ci.c1() > page.c1()) {
+            if (ci.r1() < band.r0() || ci.r1() > band.r1() || ci.c1() < page.c0() || ci.c1() > page.c1()) {
                 continue;
             }
             // 锚点偏移是像素，跟着行高列宽一起乘缩放（colWidth/rowHeight 已经乘过了）
             float left = xs[ci.c1() - page.c0()] + pt(ci.dx1()) * g.scale;
             float right = colX(page, xs, ci.c2()) + pt(ci.dx2()) * g.scale;
-            float top = ys[ci.r1() - page.r0()] - pt(ci.dy1()) * g.scale;
-            float bottom = rowY(page, ys, ci.r2()) - pt(ci.dy2()) * g.scale;
+            float top = ys[ci.r1() - band.r0()] - pt(ci.dy1()) * g.scale;
+            float bottom = rowY(band, ys, ci.r2()) - pt(ci.dy2()) * g.scale;
             if (right - left <= 0 || top - bottom <= 0) {
                 continue;
             }
@@ -990,9 +1179,9 @@ public class PdfExporter {
         return xs[Math.min(Math.max(c - page.c0(), 0), xs.length - 1)];
     }
 
-    /** 第 r 行上边界的页面坐标。 */
-    private float rowY(Page page, float[] ys, int r) {
-        return ys[Math.min(Math.max(r - page.r0(), 0), ys.length - 1)];
+    /** 第 r 行上边界的页面坐标（越过本段范围时钉在边界上）。 */
+    private float rowY(Band band, float[] ys, int r) {
+        return ys[Math.min(Math.max(r - band.r0(), 0), ys.length - 1)];
     }
 
     /**
@@ -1088,12 +1277,12 @@ public class PdfExporter {
         cb.restoreState();
     }
 
-    /** 行列区间 -> 页面坐标 {left, bottom, right, top}，裁剪到本页范围内。 */
-    private float[] rect(Page page, float[] xs, float[] ys, int rA, int rB, int cA, int cB) {
+    /** 行列区间 -> 页面坐标 {left, bottom, right, top}，裁剪到本段（{@code bandR0..bandR1}）范围内。 */
+    private float[] rect(Page page, float[] xs, float[] ys, Band band, int rA, int rB, int cA, int cB) {
         float left = xs[Math.max(cA, page.c0()) - page.c0()];
         float right = xs[Math.min(cB, page.c1()) - page.c0() + 1];
-        float top = ys[Math.max(rA, page.r0()) - page.r0()];
-        float bottom = ys[Math.min(rB, page.r1()) - page.r0() + 1];
+        float top = ys[Math.max(rA, band.r0()) - band.r0()];
+        float bottom = ys[Math.min(rB, band.r1()) - band.r0() + 1];
         return new float[]{left, bottom, right, top};
     }
 
@@ -1102,7 +1291,7 @@ public class PdfExporter {
      *
      * @param overflow 文字超出格宽时是否允许压到相邻空格上（Excel 的默认表现）；合并区不需要
      */
-    private void drawCell(PdfContentByte cb, Page page, int r, int c, float[] rect, BaseFont font,
+    private void drawCell(PdfContentByte cb, Page page, Band band, int r, int c, float[] rect, BaseFont font,
                           DataFormatter formatter, FormulaEvaluator evaluator, boolean overflow) {
         Row row = page.geom().sheet.getRow(r);
         Cell cell = row == null ? null : row.getCell(c);
@@ -1130,7 +1319,7 @@ public class PdfExporter {
 
         String text = textOf(cell, formatter, evaluator);
         if (!text.isEmpty()) {
-            drawText(cb, page, r, c, text, style, font, left, bottom, right, top, overflow);
+            drawText(cb, page, band, r, c, text, style, font, left, bottom, right, top, overflow);
         }
     }
 
@@ -1160,7 +1349,7 @@ public class PdfExporter {
      * <p>字体统一用探测到的那一款，不还原 Excel 里各格设置的字体名 —— 逐格加载字体会让 PDF
      * 体积和导出耗时都失控，而报表里字体名的差异远没有字号/粗细/颜色重要。
      */
-    private void drawText(PdfContentByte cb, Page page, int r, int c, String text, XSSFCellStyle style,
+    private void drawText(PdfContentByte cb, Page page, Band band, int r, int c, String text, XSSFCellStyle style,
                           BaseFont font, float left, float bottom, float right, float top, boolean overflow) {
         XSSFFont f = style == null ? null : style.getFont();
         float size = (f == null || f.getFontHeightInPoints() <= 0 ? 11 : f.getFontHeightInPoints())
@@ -1221,11 +1410,15 @@ public class PdfExporter {
             cb.setColorStroke(color);
             cb.setLineWidth(size * BOLD_STROKE);
         }
-        // 正文区的上下边界：超高行是跨页画的，落在本页外面的那些行整行跳过。裁剪只是让它们
-        // 看不见，字仍然写在这一页的内容流里 —— PDF 里选中/搜索/复制得到的是整段文字，
+        // 本段真正印到的上下边界：超高行是跨页画的，落在本段外面的那些行整行跳过。裁剪只是让
+        // 它们看不见，字仍然写在这一页的内容流里 —— PDF 里选中/搜索/复制得到的是整段文字，
         // 每一页都带一份，体积也白白翻倍
-        float bodyTop = page.geom().paper.getHeight() - page.geom().marginTop;
-        float bodyBottom = page.geom().marginBottom;
+        float bodyTop = band.top();
+        float bodyBottom = band.bottom();
+        // 这一行的切口对齐过文字行（Geom#snapToLines）：那就让一行文字只属于一页 —— 相邻两行的
+        // 字面高度比行距略大、边角本来就叠着，露不到一半的那点边角是隔壁页那一行的，别跟着画。
+        // 没对齐过的（硬切）照旧两页各画半个字，不然那半个字就彻底没了
+        boolean snapped = page.geom().lineGrid.containsKey(r - page.geom().r0);
 
         cb.beginText();
         cb.setFontAndSize(font, size);
@@ -1235,8 +1428,10 @@ public class PdfExporter {
                 continue;
             }
             float lineY = baseline - i * lineHeight;
-            // 整行都在正文区外面才跳过：压在边界上的那一行照旧要画，由裁剪切成半个字
-            if (lineY + descent > bodyTop || lineY + ascent < bodyBottom) {
+            float inkTop = lineY + ascent;
+            float inkBottom = lineY + descent;
+            float visible = Math.min(inkTop, bodyTop) - Math.max(inkBottom, bodyBottom);
+            if (visible < (snapped ? (inkTop - inkBottom) / 2 : 0.05f)) {
                 continue;
             }
             float w = font.getWidthPoint(s, size);

@@ -341,6 +341,10 @@ status / is_default）—— 漏了后者，副本会是一张没有版式的报
                                 //      避免 px→Excel 列宽的量化误差把最后一列挤到第二页。
                                 //      缺省视为 true
     "printArea": "",            // 打印区域 "A1:F30"，空=有内容的区域
+    "titleRows": "",            // 顶端标题行（跨页重复的表头）"1:3"，1 起算的闭区间，空=不重复。
+                                //      **只能是内容范围最上面的连续若干行**（设了打印区域就从区域
+                                //      的第一行起算）；落在中间的三条导出路语义对不齐，一律忽略。
+                                //      存进 xlsx 的 _xlnm.Print_Titles，PDF / Word 从那里读回来
     // 页头 / 页尾：左中右三段，三段都空 = 没设置。缺省视为「没设置」（老报表没有这两项）。
     // 文字里可以写占位符，见下方「页头页尾占位符」。
     "header": {
@@ -418,13 +422,13 @@ sheet 的下标只打那一张。打出来与「导出 PDF」的文件逐页一�
 
 **各输出通道支持的范围**（不是所有通道都做得到）：
 
-| | 页头页尾 | 水印 | 行分页符（`mzRowBreaks`） | 按单据编页码（`mzDocBreaks`） | 按单据取名（`mzDocNames`） | 跳过不印页码的 sheet |
-|---|---|---|---|---|---|---|
-| Excel (.xlsx) | ✅ 写进 sheet 的页眉页脚 | ❌ Excel 没有水印这个概念 | ✅ 手动行分页符 | ⚠️ 只到 sheet 级：起始页号钉成 1；`&N` 恒是整个打印任务的页数 | ⚠️ 只到 sheet 级：`&A` 就是工作表名，`perRowPage` 拼成一张后整张同名 | ⚠️ 起始页号钉在**每份单据里第一张印页码**的 sheet 上（`&P` 对了，见 `pagePins`）；`&N` 仍是整本页数 |
-| PDF（OpenPDF） | ✅ | ✅ 压在内容之上 | ✅ 读 xlsx 里那份 | ✅ 逐页自己画，页码/总页数都按本单据 | ✅ 逐页换名 | ✅ 整张跳过，两个数都对 |
-| Word（POI） | ✅ 页码是 `PAGE` 域 | ✅ 页眉里的 VML 艺术字，**在正文下面** | ✅ 落成行首格的 `pageBreakBefore` | ⚠️ 只到节级：`w:pgNumType` 重编 + `SECTIONPAGES`；`perRowPage` 做不到 | ⚠️ 只到节级（一张 sheet 一节）：`perRowPage` 全在同一节里，做不到 | ❌ 页眉页脚整份只有一套、跟**第一张** sheet，封面没设就等于整份都没有 |
-| 预览页（默认 PDF 视图 / 「打印」按钮） | ✅ 看的打的都是后端 PDF | ✅ 同 PDF | ✅ 同 PDF | ✅ 同 PDF | ✅ 同 PDF | ✅ 同 PDF |
-| 预览页浏览器直接打印（Ctrl+P，只在表格视图下） | ❌ 见下 | ✅ `position:fixed` 每页重画 | ❌ FortuneSheet 是一整张 canvas | ❌ 连页码都给不出来 | ❌ 同左 | ❌ 同左 |
+| | 页头页尾 | 水印 | 顶端标题行（`titleRows`） | 行分页符（`mzRowBreaks`） | 按单据编页码（`mzDocBreaks`） | 按单据取名（`mzDocNames`） | 跳过不印页码的 sheet |
+|---|---|---|---|---|---|---|---|
+| Excel (.xlsx) | ✅ 写进 sheet 的页眉页脚 | ❌ Excel 没有水印这个概念 | ✅ `_xlnm.Print_Titles`（**只此一处写**） | ✅ 手动行分页符 | ⚠️ 只到 sheet 级：起始页号钉成 1；`&N` 恒是整个打印任务的页数 | ⚠️ 只到 sheet 级：`&A` 就是工作表名，`perRowPage` 拼成一张后整张同名 | ⚠️ 起始页号钉在**每份单据里第一张印页码**的 sheet 上（`&P` 对了，见 `pagePins`）；`&N` 仍是整本页数 |
+| PDF（OpenPDF） | ✅ | ✅ 压在内容之上 | ✅ 标题行不参与分页，每页顶部重画一遍 | ✅ 读 xlsx 里那份 | ✅ 逐页自己画，页码/总页数都按本单据 | ✅ 逐页换名 | ✅ 整张跳过，两个数都对 |
+| Word（POI） | ✅ 页码是 `PAGE` 域 | ✅ 页眉里的 VML 艺术字，**在正文下面** | ✅ `w:tblHeader`，Word 自己重画 | ✅ 落成行首格的 `pageBreakBefore` | ⚠️ 只到节级：`w:pgNumType` 重编 + `SECTIONPAGES`；`perRowPage` 做不到 | ⚠️ 只到节级（一张 sheet 一节）：`perRowPage` 全在同一节里，做不到 | ❌ 页眉页脚整份只有一套、跟**第一张** sheet，封面没设就等于整份都没有 |
+| 预览页（默认 PDF 视图 / 「打印」按钮） | ✅ 看的打的都是后端 PDF | ✅ 同 PDF | ✅ 同 PDF | ✅ 同 PDF | ✅ 同 PDF | ✅ 同 PDF | ✅ 同 PDF |
+| 预览页浏览器直接打印（Ctrl+P，只在表格视图下） | ❌ 见下 | ✅ `position:fixed` 每页重画 | ❌ FortuneSheet 是一整张 canvas | ❌ FortuneSheet 是一整张 canvas | ❌ 连页码都给不出来 | ❌ 同左 | ❌ 同左 |
 
 页头页尾**在浏览器打印里做不到**：要每页出现只能用 `position:fixed`，而它定位的是页边距**以内**
 的区域，画不进页边距；画在里面就会压住表格（表格是一整张 canvas，没法像 `<thead>` 那样每页留白），
