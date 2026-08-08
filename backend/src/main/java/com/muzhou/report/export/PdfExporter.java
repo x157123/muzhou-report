@@ -201,17 +201,24 @@ public class PdfExporter {
         long start = System.currentTimeMillis();
         try (XSSFWorkbook wb = new XSSFWorkbook(new ByteArrayInputStream(xlsx));
              ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            long parseMs = System.currentTimeMillis() - start;
 
+            long fontStart = System.currentTimeMillis();
             BaseFont font = font();
+            long fontMs = System.currentTimeMillis() - fontStart;
             DataFormatter formatter = new DataFormatter(Locale.CHINA);
             FormulaEvaluator evaluator = wb.getCreationHelper().createFormulaEvaluator();
 
+            long layoutStart = System.currentTimeMillis();
+            long growMs = 0;
             List<Page> pages = new ArrayList<>();
             for (int i = 0; i < wb.getNumberOfSheets(); i++) {
                 Geom geom = layout(wb, wb.getSheetAt(i), i);
                 if (geom != null) {
                     // 撑高要放在分页之前：行高一变，能塞进一页的行数就跟着变
+                    long t = System.currentTimeMillis();
                     growWrapRows(geom, font, formatter, evaluator);
+                    growMs += System.currentTimeMillis() - t;
                     PageConfigDTO cfg = pageConfigOf == null ? null : pageConfigOf.apply(i);
                     geom.watermark = cfg == null ? null : cfg.getWatermark();
                     geom.docStarts = docStartRows(docBreaksOf == null ? null : docBreaksOf.apply(i),
@@ -219,7 +226,9 @@ public class PdfExporter {
                     geom.paginate(pages);
                 }
             }
+            long layoutMs = System.currentTimeMillis() - layoutStart - growMs;
 
+            long drawStart = System.currentTimeMillis();
             // 页面大小逐页可变（不同 sheet 可以不同纸张），首页的必须在构造 Document 时就定下来
             Document doc = new Document(pages.isEmpty() ? PageSize.A4 : pages.get(0).geom.paper, 0, 0, 0, 0);
             PdfWriter writer = PdfWriter.getInstance(doc, out);
@@ -255,8 +264,9 @@ public class PdfExporter {
             doc.close();
 
             byte[] pdf = out.toByteArray();
-            log.debug("xlsx({} bytes) -> pdf({} bytes, {} 页) 耗时 {}ms",
-                    xlsx.length, pdf.length, pages.size(), System.currentTimeMillis() - start);
+            log.debug("xlsx({} bytes) -> pdf({} bytes, {} 页): 解析xlsx {}ms → 字体 {}ms → 排版 {}ms → 撑行高 {}ms → 绘制 {}ms → 合计 {}ms",
+                    xlsx.length, pdf.length, pages.size(), parseMs, fontMs, layoutMs, growMs,
+                    System.currentTimeMillis() - drawStart, System.currentTimeMillis() - start);
             return pdf;
         } catch (BizException e) {
             throw e;

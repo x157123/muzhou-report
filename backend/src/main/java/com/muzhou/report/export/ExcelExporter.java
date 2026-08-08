@@ -121,9 +121,12 @@ public class ExcelExporter {
      *                     可以各用各的纸张方向。返回 null 表示该 sheet 用 POI 默认值。
      */
     public byte[] export(List<Map<String, Object>> sheets, IntFunction<PageConfigDTO> pageConfigOf) {
+        long start = System.currentTimeMillis();
         try (XSSFWorkbook wb = new XSSFWorkbook();
              ByteArrayOutputStream out = new ByteArrayOutputStream()) {
 
+            // 内层分段计时（跨 sheet 累加）：0=写格子 1=边框合并列宽 2=行高 3=图片
+            long[] segs = new long[4];
             Map<String, CellStyle> styleCache = new HashMap<>();
             // 边框样式指纹与基础样式无关（边框是「叠加」在已有样式之上的），必须单独复用，
             // 否则会退化成直接修改 cell.getCellStyle() 拿到的共享样式对象，导致边框「串」到
@@ -139,15 +142,20 @@ public class ExcelExporter {
                 // 哪几张要把起始页号钉成 1（单据、封面都在这里一起算）
                 boolean[] pins = pagePins(sheets, pageConfigOf);
                 for (int i = 0; i < sheets.size(); i++) {
-                    XSSFSheet sheet = writeSheet(wb, sheets.get(i), i, styleCache, borderCache, pictureCache);
+                    XSSFSheet sheet = writeSheet(wb, sheets.get(i), i, styleCache, borderCache, pictureCache, segs);
                     applyPageSetup(wb, sheet, i, pageConfigOf.apply(i));
                     if (pins[i]) {
                         pinPageStart(sheet);
                     }
                 }
             }
+            long writeStart = System.currentTimeMillis();
             wb.write(out);
-            return out.toByteArray();
+            byte[] bytes = out.toByteArray();
+            log.debug("xlsx({} bytes) 内层耗时: 写格子 {}ms → 边框合并 {}ms → 行高 {}ms → 图片 {}ms → 序列化 {}ms → 合计 {}ms",
+                    bytes.length, segs[0], segs[1], segs[2], segs[3],
+                    System.currentTimeMillis() - writeStart, System.currentTimeMillis() - start);
+            return bytes;
         } catch (Exception e) {
             log.error("Excel 导出失败", e);
             throw new BizException("Excel 导出失败: " + e.getMessage());
@@ -157,11 +165,12 @@ public class ExcelExporter {
     @SuppressWarnings("unchecked")
     private XSSFSheet writeSheet(XSSFWorkbook wb, Map<String, Object> sheetData, int index,
                                  Map<String, CellStyle> styleCache, Map<String, XSSFCellStyle> borderCache,
-                                 Map<String, Integer> pictureCache) {
+                                 Map<String, Integer> pictureCache, long[] segs) {
         String name = sheetData.get("name") == null ? ("Sheet" + (index + 1))
                 : String.valueOf(sheetData.get("name"));
         XSSFSheet sheet = wb.createSheet(safeSheetName(wb, name, index));
 
+        long t = System.currentTimeMillis();
         List<WrapCell> wrapCells = new ArrayList<>();
         List<ImageCell> imageCells = new ArrayList<>();
         Object cdObj = sheetData.get("celldata");
@@ -190,16 +199,24 @@ public class ExcelExporter {
             }
         }
 
+        segs[0] += System.currentTimeMillis() - t;
+
         Map<String, Object> config = sheetData.get("config") instanceof Map
                 ? (Map<String, Object>) sheetData.get("config") : Map.of();
         sheet.setDefaultRowHeightInPoints(pxToPoints(DEFAULT_ROW_HEIGHT_PX));
+        t = System.currentTimeMillis();
         applyConfig(wb, sheet, config, borderCache);
         // 列宽放在最后：applyBorders 会为边框区域补出单元格，最大列号到这一步才定下来
         applyColumnWidths(sheet, config.get("columnlen"));
+        segs[1] += System.currentTimeMillis() - t;
         // 行高再放到列宽之后：自动换行折几行取决于列宽
+        t = System.currentTimeMillis();
         applyWrapRowHeights(sheet, wrapCells);
+        segs[2] += System.currentTimeMillis() - t;
         // 图片放到最后：它锚在单元格上，行高列宽定下来了才知道要画多大
+        t = System.currentTimeMillis();
         applyImages(wb, sheet, imageCells, pictureCache);
+        segs[3] += System.currentTimeMillis() - t;
         applyRowBreaks(sheet, sheetData.get("mzRowBreaks"));
         // 起始页号（mzDocBreaks）不在这里管：钉在哪一张要看整本的情况，见 pagePins
         return sheet;
