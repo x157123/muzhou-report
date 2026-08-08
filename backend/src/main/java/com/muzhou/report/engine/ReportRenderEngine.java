@@ -22,6 +22,14 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 
@@ -47,6 +55,9 @@ public class ReportRenderEngine {
     private final TemplateParser templateParser;
     private final ExpandProcessor expandProcessor;
     private final MzProperties props;
+
+    /** 并行取数共用的线程池，懒建（见 {@link #fetchPool()}）。 */
+    private volatile ExecutorService fetchPool;
 
     /**
      * 渲染。
@@ -92,8 +103,10 @@ public class ReportRenderEngine {
 
         // 父子关联只是给取数函数套一层（子表 -> 先查主表，主表每行查一次子表再拼起来），
         // 下面的扩展/公式/格式化一步不知道有这回事
+        long fetchStart = System.currentTimeMillis();
         Map<String, List<Map<String, Object>>> datasets = fetchDatasets(templates, params,
                 LinkedDataFetcher.wrap(content.getDatasetLinks(), dataFetcher, props.getMaxLinkRows()));
+        long fetched = System.currentTimeMillis();
 
         RenderResultDTO result = new RenderResultDTO();
         List<Map<String, Object>> outSheets = new ArrayList<>();
@@ -106,6 +119,9 @@ public class ReportRenderEngine {
         result.setSheets(outSheets);
         result.setSheetPageConfigs(pageConfigs);
         result.setElapsed(System.currentTimeMillis() - start);
+        // 分段计时：慢在取数（IO，看并行度/数据集本身）还是扩展（CPU，看数据量），一眼分得开
+        log.info("渲染完成: 取数 {}ms（{} 个数据集）, 扩展 {}ms（{} 张 sheet）",
+                fetched - fetchStart, datasets.size(), System.currentTimeMillis() - fetched, templates.size());
         if (datasets.values().stream().allMatch(List::isEmpty) && !datasets.isEmpty()) {
             result.setMessage("数据集未返回任何数据");
         }
@@ -141,8 +157,10 @@ public class ReportRenderEngine {
         String primary = content.getPrimaryDataset();
         List<DatasetLinkDTO> links = content.getDatasetLinks();
         // 主接口自己也可能是别人的子表，所以顶层这次取数照样走带父子关联的那份
+        long fetchStart = System.currentTimeMillis();
         List<Map<String, Object>> rows = fetchOne(primary, params,
                 LinkedDataFetcher.wrap(links, dataFetcher, props.getMaxLinkRows()));
+        long primaryFetched = System.currentTimeMillis();
 
         // 主接口一条数据都没有：退回普通渲染出一份空模板，比给个没有 sheet 的工作簿友好
         if (rows.isEmpty()) {
@@ -171,8 +189,9 @@ public class ReportRenderEngine {
                     + primary + "]返回了 " + rows.size() + " 条，请先用报表参数把数据筛小");
         }
 
-        // 非主接口的数据集每份 sheet 都一样，取一次就够
-        Map<String, List<Map<String, Object>>> shared = new LinkedHashMap<>();
+        // 非主接口的数据集每份 sheet 都一样，取一次就够。并行取数会从多个线程同时进来，
+        // 所以要用并发容器 + computeIfAbsent（同一个 code 只真取一次）
+        Map<String, List<Map<String, Object>>> shared = new ConcurrentHashMap<>();
         // 但子表不行：它是被主表这一行的字段值查出来的，每份 sheet 各不相同，缓存下来就全串了
         Set<String> childCodes = LinkedDataFetcher.childCodes(links);
         List<Map<String, Object>> outSheets = new ArrayList<>();
@@ -207,10 +226,7 @@ public class ReportRenderEngine {
                 if (childCodes.contains(code)) {
                     return fetchOne(code, p, dataFetcher);
                 }
-                if (!shared.containsKey(code)) {
-                    shared.put(code, fetchOne(code, p, dataFetcher));
-                }
-                return shared.get(code);
+                return shared.computeIfAbsent(code, c -> fetchOne(c, p, dataFetcher));
             };
             // 关联套在 perRowFetcher **外面**：子表向里问主表要数据时，拿到的是当前这一行，
             // 于是「这张单据的明细」自然就只查这一行的
@@ -238,6 +254,10 @@ public class ReportRenderEngine {
         RenderResultDTO result = new RenderResultDTO();
         concatIfNeeded(content, result, outSheets, sheetTemplates, pageConfigs, docIndexes, docNames);
         result.setElapsed(System.currentTimeMillis() - start);
+        // 分段计时：主接口那一口 vs 逐条渲染那一段（含每条自己的其它取数与扩展）
+        log.info("按条拆分渲染完成: 主接口取数 {}ms, {} 条数据逐条渲染 {}ms（共 {} 张 sheet）",
+                primaryFetched - fetchStart, rows.size(),
+                System.currentTimeMillis() - primaryFetched, outSheets.size());
         return result;
     }
 
@@ -405,7 +425,14 @@ public class ReportRenderEngine {
         return v == null || (v instanceof CharSequence cs && cs.toString().isBlank());
     }
 
-    /** 收集模板中用到的数据集并逐个取数（同一 code 只取一次）。 */
+    /**
+     * 收集模板中用到的数据集并逐个取数（同一 code 只取一次）。
+     *
+     * <p>多个数据集的 SQL / 接口互相独立，逐个取是纯串行的 IO 等待，所以多于一个时**并行取**
+     * （{@code muzhou.report.fetch-parallelism}，<=1 退回串行）。配了父子关联时不并行：
+     * {@link LinkedDataFetcher} 的关联取数有先后依赖（先主后子、主表逐行查子表）、整个在锁里，
+     * 提交到线程池也只是排队，白占线程。
+     */
     private Map<String, List<Map<String, Object>>> fetchDatasets(
             List<SheetTemplate> templates, Map<String, Object> params,
             BiFunction<String, Map<String, Object>, List<Map<String, Object>>> dataFetcher) {
@@ -420,6 +447,15 @@ public class ReportRenderEngine {
             }));
         }
 
+        boolean parallel = codes.size() > 1 && props.getFetchParallelism() > 1
+                && !(dataFetcher instanceof LinkedDataFetcher);
+        return parallel ? fetchParallel(codes, params, dataFetcher)
+                : fetchSequential(codes, params, dataFetcher);
+    }
+
+    private Map<String, List<Map<String, Object>>> fetchSequential(
+            Set<String> codes, Map<String, Object> params,
+            BiFunction<String, Map<String, Object>, List<Map<String, Object>>> dataFetcher) {
         Map<String, List<Map<String, Object>>> data = new LinkedHashMap<>();
         for (String code : codes) {
             try {
@@ -433,6 +469,73 @@ public class ReportRenderEngine {
             }
         }
         return data;
+    }
+
+    /**
+     * 并行取数。结果仍按 {@code codes} 的声明顺序装回，与串行**一字不差**（谁先取完不影响顺序）；
+     * 任一数据集失败整体报错，报的是声明顺序里**最靠前**的那个失败（确定性，不看谁先炸），
+     * 其余任务顺手取消。
+     */
+    private Map<String, List<Map<String, Object>>> fetchParallel(
+            Set<String> codes, Map<String, Object> params,
+            BiFunction<String, Map<String, Object>, List<Map<String, Object>>> dataFetcher) {
+        Map<String, Future<List<Map<String, Object>>>> futures = new LinkedHashMap<>();
+        for (String code : codes) {
+            futures.put(code, fetchPool().submit(() -> dataFetcher.apply(code, params)));
+        }
+        Map<String, List<Map<String, Object>>> data = new LinkedHashMap<>();
+        try {
+            for (Map.Entry<String, Future<List<Map<String, Object>>>> e : futures.entrySet()) {
+                try {
+                    List<Map<String, Object>> rows = e.getValue().get();
+                    data.put(e.getKey(), rows == null ? List.of() : rows);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new BizException("数据集取数被中断");
+                } catch (ExecutionException ee) {
+                    Throwable cause = ee.getCause() == null ? ee : ee.getCause();
+                    if (cause instanceof BizException biz) {
+                        throw biz;
+                    }
+                    log.error("数据集取数失败: {}", e.getKey(), cause);
+                    throw new BizException("数据集[" + e.getKey() + "]取数失败: " + cause.getMessage());
+                }
+            }
+        } finally {
+            // 有一个失败就不等剩下的了；正常走完时对已完成的任务 cancel 是空操作
+            futures.values().forEach(f -> f.cancel(true));
+        }
+        return data;
+    }
+
+    /**
+     * 并行取数共用的线程池：整个引擎（= 整个应用，引擎是单例）一个，有界、守护线程、
+     * 空闲 60 秒即回收。
+     *
+     * <p>懒建在引擎自己手里而不是注入 Spring bean：引擎的约定是脱离 Spring 可用（纯 POJO 测试
+     * 直接 new），守护线程 + 空闲回收让它不需要谁来管生命周期。**必须全局共用** ——
+     * 渲染请求本身就是并发的，一次渲染建一个池的话线程数 = 请求数 × 并行度，没有上界。
+     */
+    private ExecutorService fetchPool() {
+        ExecutorService pool = fetchPool;
+        if (pool != null) {
+            return pool;
+        }
+        synchronized (this) {
+            if (fetchPool == null) {
+                int n = Math.max(2, props.getFetchParallelism());
+                AtomicInteger seq = new AtomicInteger();
+                ThreadPoolExecutor tpe = new ThreadPoolExecutor(n, n, 60, TimeUnit.SECONDS,
+                        new LinkedBlockingQueue<>(), r -> {
+                            Thread t = new Thread(r, "mz-fetch-" + seq.incrementAndGet());
+                            t.setDaemon(true);
+                            return t;
+                        });
+                tpe.allowCoreThreadTimeOut(true);
+                fetchPool = tpe;
+            }
+            return fetchPool;
+        }
     }
 
     /** 把渲染网格组装回 FortuneSheet 的 Sheet 结构。 */

@@ -51,6 +51,17 @@ public class MzProperties {
     private int maxLinkRows = 500;
 
     /**
+     * 一次渲染里并行取数的并发度，<=1 为串行。
+     *
+     * <p>模板用到多个数据集时，各自的 SQL / 接口互相独立，逐个取是纯串行的 IO 等待，
+     * 并行取省的就是这段等待。线程池整个应用共用一个、有界、空闲即回收
+     * （见 {@code ReportRenderEngine#fetchPool}）；并发压力落在业务库连接池与下游接口上，
+     * 调大之前先确认它们扛得住。配了父子关联的报表不受此项影响 ——
+     * 关联取数有先后依赖（先主后子、主表逐行查子表），并行不了。
+     */
+    private int fetchParallelism = 4;
+
+    /**
      * 打开一张不存在的报表时，是否当场建一张空白的（{@code ReportServiceImpl#autoCreate}）。
      *
      * <p>这是为**嵌入**准备的：外部系统拿自己的业务 KEY 直接开设计器，不必先来一次

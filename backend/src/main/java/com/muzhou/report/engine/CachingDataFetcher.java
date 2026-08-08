@@ -4,6 +4,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiFunction;
 
 /**
@@ -26,8 +27,10 @@ import java.util.function.BiFunction;
  * 全记的结果只是把主表 N 行拉出来的 N 份子表数据全部**留在内存里直到渲染结束**，白涨一倍内存，
  * 一次命中都换不来。
  *
- * <p>只活一次渲染，非线程安全（渲染本来就在单线程里跑完）。{@link LinkedDataFetcher} /
- * {@code perRowFetcher} 照旧包在它**外面**，行为不变。
+ * <p>只活一次渲染，但**线程安全**：并行取数（{@code ReportRenderEngine#fetchDatasets}）会从
+ * 多个线程同时进来。缓存是 {@link ConcurrentHashMap}，极端竞态下同一个 key 可能真取两次
+ * （get 与 putIfAbsent 之间撞上），代价只是多一次查询、结果一致 —— 比为它上锁便宜。
+ * {@link LinkedDataFetcher} / {@code perRowFetcher} 照旧包在它**外面**，行为不变。
  */
 public final class CachingDataFetcher
         implements BiFunction<String, Map<String, Object>, List<Map<String, Object>>> {
@@ -37,7 +40,7 @@ public final class CachingDataFetcher
     /** 只记这个 code 的取数结果；null = 全记（通用形态，测试与将来别的场景用） */
     private final String onlyCode;
 
-    private final Map<Key, List<Map<String, Object>>> cache = new HashMap<>();
+    private final Map<Key, List<Map<String, Object>>> cache = new ConcurrentHashMap<>();
 
     private CachingDataFetcher(BiFunction<String, Map<String, Object>, List<Map<String, Object>>> inner,
                                String onlyCode) {
@@ -70,13 +73,16 @@ public final class CachingDataFetcher
             return inner.apply(code, params);
         }
         Key key = new Key(code, snapshot(params));
-        // containsKey 而不是 get()!=null：取回空集合也是一次有效结果，不该被反复重取
-        if (cache.containsKey(key)) {
-            return cache.get(key);
+        List<Map<String, Object>> cached = cache.get(key);
+        if (cached != null) {
+            return cached;
         }
+        // null 归一成空集合再缓存：ConcurrentHashMap 存不了 null，而空集合本身就是一次有效结果，
+        // 照样要缓存（不该被反复重取）
         List<Map<String, Object>> rows = inner.apply(code, params);
-        cache.put(key, rows);
-        return rows;
+        List<Map<String, Object>> value = rows == null ? List.of() : rows;
+        List<Map<String, Object>> prev = cache.putIfAbsent(key, value);
+        return prev != null ? prev : value;
     }
 
     /** HashMap 而不是 Map.copyOf：参数值允许为 null（没给值的报表参数），copyOf 会直接 NPE。 */

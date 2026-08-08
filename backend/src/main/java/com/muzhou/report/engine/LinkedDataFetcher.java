@@ -34,6 +34,11 @@ import java.util.function.BiFunction;
  * {@code splitMode=perRow}：那边主表每次只有一行，这里自然也就只查那一行的子表。
  *
  * <p>纯 POJO，不依赖 Spring：引擎的取数抽象是可测的，这一层也要保持可测。
+ *
+ * <p>{@link #apply} 整个加锁：实例里有缓存与环检测两份可变状态，而并行取数
+ * （{@code ReportRenderEngine#fetchDatasets}）可能从多个线程进来。关联取数本来就有
+ * 先后依赖（先主后子、主表逐行查子表），并行不了 —— 引擎那头见到配了关联就直接走串行，
+ * 这把锁只是保证误用时也不会把缓存写坏。
  */
 public class LinkedDataFetcher implements BiFunction<String, Map<String, Object>, List<Map<String, Object>>> {
 
@@ -109,7 +114,7 @@ public class LinkedDataFetcher implements BiFunction<String, Map<String, Object>
     }
 
     @Override
-    public List<Map<String, Object>> apply(String code, Map<String, Object> params) {
+    public synchronized List<Map<String, Object>> apply(String code, Map<String, Object> params) {
         List<Map<String, Object>> cached = cache.get(code);
         if (cached != null) {
             return cached;

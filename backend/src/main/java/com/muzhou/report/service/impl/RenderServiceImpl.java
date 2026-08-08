@@ -28,6 +28,7 @@ import org.springframework.util.StringUtils;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiFunction;
@@ -114,7 +115,8 @@ public class RenderServiceImpl implements RenderService {
         }
         // 免保存预览渲染的就是请求里这份 content —— 设计器画布上是哪一版，预览出来就是哪一版，
         // 不走版本选择（走了反而会拿库里存着的那一版把用户没保存的改动盖掉）
-        Map<String, Long> totals = new HashMap<>();
+        // 引擎并行取数时会从多个线程同时写，用并发容器（下同）
+        Map<String, Long> totals = new ConcurrentHashMap<>();
         // 免保存预览不选版本，也就没有那次探测取数要复用 —— 不必包记忆层
         RenderResultDTO result = renderEngine.render(content, params, dataFetcher(reportId, totals));
         fillTotal(result, content, totals);
@@ -282,7 +284,7 @@ public class RenderServiceImpl implements RenderService {
         VersionConfigDTO config = parseVersionConfig(report.getVersionConfig());
         List<ReportVersionResolver.Candidate> candidates = versionService.candidates(reportId);
 
-        Map<String, Long> totals = new HashMap<>();
+        Map<String, Long> totals = new ConcurrentHashMap<>();
         // 探测用它、引擎也用它：同一个 (code, params) 第二次直接命中缓存，主接口只被打一次。
         // **只记主接口这一个数据集** —— 别的数据集上游本来就去过重，而父子关联的子表每行参数都不同、
         // 永远命中不了第二次，全记只会把它们留在内存里到渲染结束（见 CachingDataFetcher 的类注释）
@@ -391,8 +393,9 @@ public class RenderServiceImpl implements RenderService {
             String reportId, Map<String, Long> totals) {
         // 数据集定义与它的参数定义在一次渲染里恒定不变，解析一遍就够 ——
         // 不记的话每取一行数据都要再打 2~3 条元数据查询（getByCode 最多 2 条 + listParams 1 条），
-        // perRow 200 条数据 × 3 个数据集就是一千多条。只活这一次渲染，跟着闭包一起回收
-        Map<String, DatasetService.ResolvedDataset> defs = new HashMap<>();
+        // perRow 200 条数据 × 3 个数据集就是一千多条。只活这一次渲染，跟着闭包一起回收；
+        // 引擎并行取数时多个线程同时进来，所以是并发容器
+        Map<String, DatasetService.ResolvedDataset> defs = new ConcurrentHashMap<>();
         return (code, params) -> {
             DatasetService.ResolvedDataset resolved =
                     defs.computeIfAbsent(code, c -> datasetService.resolve(reportId, c));
