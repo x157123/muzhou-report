@@ -104,7 +104,11 @@ public class RenderServiceImpl implements RenderService {
 
     @Override
     public RenderResultDTO renderReport(String reportId, Map<String, Object> params, String versionId) {
-        return renderSaved(reportId, params, versionId).result();
+        long start = System.currentTimeMillis();
+        RenderResultDTO result = renderSaved(reportId, params, versionId).result();
+        log.info("渲染完成: 请求数据 {}ms → 渲染 {}ms → 合计 {}ms", result.getFetchElapsed(),
+                result.getExpandElapsed(), System.currentTimeMillis() - start);
+        return result;
     }
 
     @Override
@@ -118,9 +122,12 @@ public class RenderServiceImpl implements RenderService {
         // 引擎并行取数时会从多个线程同时写，用并发容器（下同）
         Map<String, Long> totals = new ConcurrentHashMap<>();
         // 免保存预览不选版本，也就没有那次探测取数要复用 —— 不必包记忆层
+        long start = System.currentTimeMillis();
         RenderResultDTO result = renderEngine.render(content, params, dataFetcher(reportId, totals));
         fillTotal(result, content, totals);
         result.setVersionId(versionId);
+        log.info("预览渲染完成: 请求数据 {}ms → 渲染 {}ms → 合计 {}ms", result.getFetchElapsed(),
+                result.getExpandElapsed(), System.currentTimeMillis() - start);
         return result;
     }
 
@@ -133,7 +140,14 @@ public class RenderServiceImpl implements RenderService {
 
     @Override
     public byte[] exportExcel(String reportId, Map<String, Object> params, String versionId) {
-        return withExportPermit(() -> renderToXlsx(reportId, params, versionId, null).bytes());
+        return withExportPermit(() -> {
+            long start = System.currentTimeMillis();
+            Xlsx xlsx = renderToXlsx(reportId, params, versionId, null);
+            log.info("导出Excel完成: 请求数据 {}ms → 渲染 {}ms → 转Excel {}ms → 合计 {}ms",
+                    xlsx.result().getFetchElapsed(), xlsx.result().getExpandElapsed(),
+                    xlsx.excelElapsed(), System.currentTimeMillis() - start);
+            return xlsx.bytes();
+        });
     }
 
     /**
@@ -169,20 +183,35 @@ public class RenderServiceImpl implements RenderService {
         // 不必在 PDF 侧把 pageConfig 再实现一遍。
         // 唯一的例外是**水印** —— xlsx 里没有水印这个概念，存不进去，只能把设置一起递下去。
         return withExportPermit(() -> {
+            long start = System.currentTimeMillis();
             Xlsx xlsx = renderToXlsx(reportId, params, versionId, sheetIndex);
-            return pdfExporter.convert(xlsx.bytes(), xlsx.pageConfigOf(), xlsx.docBreaksOf(),
+            long pdfStart = System.currentTimeMillis();
+            byte[] pdf = pdfExporter.convert(xlsx.bytes(), xlsx.pageConfigOf(), xlsx.docBreaksOf(),
                     xlsx.docNamesOf());
+            log.info("导出PDF完成: 请求数据 {}ms → 渲染 {}ms → 转Excel {}ms → 转PDF {}ms → 合计 {}ms",
+                    xlsx.result().getFetchElapsed(), xlsx.result().getExpandElapsed(),
+                    xlsx.excelElapsed(), System.currentTimeMillis() - pdfStart,
+                    System.currentTimeMillis() - start);
+            return pdf;
         });
     }
 
     @Override
     public byte[] exportWord(String reportId, Map<String, Object> params, String versionId) {
         return withExportPermit(() -> {
+            long start = System.currentTimeMillis();
             Xlsx xlsx = renderToXlsx(reportId, params, versionId, null);
             // 逐格搬成一张真正的 Word 表格（可继续编辑，横向只取到打印区域）。
             // 纸张/方向/页边距按 sheet 各自生效（docx 一节一套，每张 sheet 一节），
             // 但**水印整份文档只有一套**（Word 的水印是页眉里的图形），按第一张 sheet 的取
-            return wordExporter.convert(xlsx.bytes(), xlsx.pageConfigOf().apply(0), xlsx.docBreaksOf());
+            long wordStart = System.currentTimeMillis();
+            byte[] word = wordExporter.convert(xlsx.bytes(), xlsx.pageConfigOf().apply(0),
+                    xlsx.docBreaksOf());
+            log.info("导出Word完成: 请求数据 {}ms → 渲染 {}ms → 转Excel {}ms → 转Word {}ms → 合计 {}ms",
+                    xlsx.result().getFetchElapsed(), xlsx.result().getExpandElapsed(),
+                    xlsx.excelElapsed(), System.currentTimeMillis() - wordStart,
+                    System.currentTimeMillis() - start);
+            return word;
         });
     }
 
@@ -196,7 +225,8 @@ public class RenderServiceImpl implements RenderService {
      */
     private record Xlsx(byte[] bytes, IntFunction<PageConfigDTO> pageConfigOf,
                         IntFunction<List<Integer>> docBreaksOf,
-                        IntFunction<List<String>> docNamesOf) {
+                        IntFunction<List<String>> docNamesOf,
+                        RenderResultDTO result, long excelElapsed) {
     }
 
     /** 一次「选版本 + 渲染」的产物：结果，以及**基准**那份 content（取打印设置时兜底要用）。 */
@@ -224,7 +254,10 @@ public class RenderServiceImpl implements RenderService {
         IntFunction<List<Integer>> docBreaksOf = i -> docBreaksAt(exported, i);
         // 每份单据叫什么同样存不进 xlsx（Excel 的 &A 只有工作表名一个值），一起递下去
         IntFunction<List<String>> docNamesOf = i -> docNamesAt(exported, i);
-        return new Xlsx(excelExporter.export(exported, pageConfigOf), pageConfigOf, docBreaksOf, docNamesOf);
+        long excelStart = System.currentTimeMillis();
+        byte[] bytes = excelExporter.export(exported, pageConfigOf);
+        return new Xlsx(bytes, pageConfigOf, docBreaksOf, docNamesOf, result,
+                System.currentTimeMillis() - excelStart);
     }
 
     /** 第 {@code i} 张导出 sheet 上的 {@code mzDocBreaks}（每份单据的起始行）；普通报表没有这一项。 */

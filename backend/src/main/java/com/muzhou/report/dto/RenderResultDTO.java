@@ -1,5 +1,6 @@
 package com.muzhou.report.dto;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import lombok.Data;
 
 import java.io.Serializable;
@@ -16,6 +17,21 @@ public class RenderResultDTO implements Serializable {
 
     /** 渲染耗时（毫秒） */
     private long elapsed;
+
+    /**
+     * 请求数据（取数）耗时（毫秒）。{@code @JsonIgnore}：它只是服务端耗时链日志的原料
+     * （{@code RenderServiceImpl} 里「请求数据 → 渲染 → 转Excel → 转PDF → 合计」那一行），
+     * 不出参 —— 出了参就成了契约（CONTRACT §4）的一部分。
+     */
+    @JsonIgnore
+    private long fetchElapsed;
+
+    /**
+     * 渲染（扩展）耗时（毫秒），同上不出参。{@code perRow} / {@code perRowPage} 时是
+     * 「逐条渲染」那一整段（含每条自己的非主接口取数）。
+     */
+    @JsonIgnore
+    private long expandElapsed;
 
     /** 附加提示（如数据为空） */
     private String message;

@@ -119,9 +119,10 @@ public class ReportRenderEngine {
         result.setSheets(outSheets);
         result.setSheetPageConfigs(pageConfigs);
         result.setElapsed(System.currentTimeMillis() - start);
-        // 分段计时：慢在取数（IO，看并行度/数据集本身）还是扩展（CPU，看数据量），一眼分得开
-        log.info("渲染完成: 取数 {}ms（{} 个数据集）, 扩展 {}ms（{} 张 sheet）",
-                fetched - fetchStart, datasets.size(), System.currentTimeMillis() - fetched, templates.size());
+        // 分段计时：慢在取数（IO，看并行度/数据集本身）还是扩展（CPU，看数据量），一眼分得开。
+        // 不在这里打日志 —— RenderServiceImpl 把它和转 Excel/PDF/Word 连成一条耗时链一起打
+        result.setFetchElapsed(fetched - fetchStart);
+        result.setExpandElapsed(System.currentTimeMillis() - fetched);
         if (datasets.values().stream().allMatch(List::isEmpty) && !datasets.isEmpty()) {
             result.setMessage("数据集未返回任何数据");
         }
@@ -181,6 +182,8 @@ public class ReportRenderEngine {
             // 每个模板正好一份，拼接是恒等变换，不必为这条早返回路径写特例
             concatIfNeeded(content, result, outSheets, sheetTemplates, pageConfigs, docIndexes, null);
             result.setElapsed(System.currentTimeMillis() - start);
+            result.setFetchElapsed(primaryFetched - fetchStart);
+            result.setExpandElapsed(System.currentTimeMillis() - primaryFetched);
             result.setMessage("主接口[" + primary + "]未返回数据，只输出了一份空模板");
             return result;
         }
@@ -254,10 +257,10 @@ public class ReportRenderEngine {
         RenderResultDTO result = new RenderResultDTO();
         concatIfNeeded(content, result, outSheets, sheetTemplates, pageConfigs, docIndexes, docNames);
         result.setElapsed(System.currentTimeMillis() - start);
-        // 分段计时：主接口那一口 vs 逐条渲染那一段（含每条自己的其它取数与扩展）
-        log.info("按条拆分渲染完成: 主接口取数 {}ms, {} 条数据逐条渲染 {}ms（共 {} 张 sheet）",
-                primaryFetched - fetchStart, rows.size(),
-                System.currentTimeMillis() - primaryFetched, outSheets.size());
+        // 分段计时：主接口那一口 vs 逐条渲染那一段（含每条自己的其它取数与扩展）。
+        // 日志由 RenderServiceImpl 连成一条耗时链统一打
+        result.setFetchElapsed(primaryFetched - fetchStart);
+        result.setExpandElapsed(System.currentTimeMillis() - primaryFetched);
         return result;
     }
 

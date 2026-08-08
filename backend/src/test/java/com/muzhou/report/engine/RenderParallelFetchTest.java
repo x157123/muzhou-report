@@ -127,6 +127,8 @@ class RenderParallelFetchTest {
         RenderResultDTO seq = engine(1).render(content(), Map.of(), fetcher(null, "a"));
         RenderResultDTO par = engine(4).render(content(), Map.of(), fetcher(null, "a"));
         assertEquals(seq.getSheets(), par.getSheets());
+        // 分段耗时随结果带出（服务层拿它拼「请求数据 → 渲染 → 转… → 合计」那条链）
+        assertTrue(seq.getFetchElapsed() >= 50, "取数耗时该被记下: " + seq.getFetchElapsed());
     }
 
     @Test
