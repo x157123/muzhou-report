@@ -138,6 +138,84 @@ public final class HeaderFooterText {
     }
 
     /**
+     * xlsx 的页眉串 -> 页头/页尾（{@link #toExcelCode} 的逆）。
+     *
+     * <p>与 {@link #parse} 的区别是**占位符原样还回去**（{@code &P} -> {@code ${page}}）而不是
+     * 展开成当时的页码/日期 —— 那边是要把字画到纸上，这边是把版式读回设计器，展开了就成了死值。
+     *
+     * <p>字号取三段里第一个写着的（同 {@code PdfExporter#sizeOf}），没写就保持缺省。
+     * {@code margin} 这里给不出来（它存在 sheet 的页眉页脚边距上，不在串里），由调用方补。
+     */
+    public static HeaderFooterDTO fromExcelCode(String raw) {
+        HeaderFooterDTO hf = new HeaderFooterDTO();
+        if (raw == null || raw.isEmpty()) {
+            return hf;
+        }
+        String[] sections = split(raw);
+        Section left = decode(sections[LEFT]);
+        Section center = decode(sections[CENTER]);
+        Section right = decode(sections[RIGHT]);
+        hf.setLeft(left.text());
+        hf.setCenter(center.text());
+        hf.setRight(right.text());
+        for (Section s : new Section[]{left, center, right}) {
+            if (s.fontSize() != null && s.fontSize() > 0) {
+                hf.setFontSize(s.fontSize());
+                break;
+            }
+        }
+        return hf;
+    }
+
+    /**
+     * 解一段：格式码丢掉、{@code &&} 还原成 {@code &}、{@code &P} 之类**还原成占位符**。
+     *
+     * <p>逐字对着 {@link #encode} 与 {@link #append} 反过来写，两边必须同时改。
+     */
+    private static Section decode(String section) {
+        StringBuilder out = new StringBuilder();
+        Integer fontSize = null;
+        int i = 0;
+        while (i < section.length()) {
+            char ch = section.charAt(i);
+            if (ch != '&') {
+                out.append(ch);
+                i++;
+                continue;
+            }
+            if (i + 1 >= section.length()) {
+                break;      // 末尾孤零零一个 &，丢掉
+            }
+            char code = section.charAt(i + 1);
+            i += 2;
+            switch (code) {
+                case '&' -> out.append('&');
+                case 'P' -> out.append("${page}");
+                case 'N' -> out.append("${pages}");
+                case 'D' -> out.append("${date}");
+                case 'T' -> out.append("${time}");
+                case 'A' -> out.append("${sheet}");
+                case '"' -> i = skipQuoted(section, i);
+                case 'K' -> i = Math.min(i + 6, section.length());
+                default -> {
+                    if (Character.isDigit(code)) {
+                        // 与 append 配对：字号最多吃两位，多吃一位就会把「&09」后面的「2026」卷进来
+                        int start = i - 1;
+                        if (i < section.length() && Character.isDigit(section.charAt(i))) {
+                            i++;
+                        }
+                        int size = Integer.parseInt(section.substring(start, i));
+                        if (fontSize == null && size > 0) {
+                            fontSize = size;
+                        }
+                    }
+                }
+            }
+        }
+        return new Section(out.toString(), fontSize);
+    }
+
+    /**
      * 这几段页头/页尾里有没有页码占位符（{@code &P} / {@code &N}）。
      *
      * <p>用来判断一张 sheet **参不参与页码统计**：封面、总结这类没写页码的 sheet 不该占页数，

@@ -215,6 +215,35 @@ Word 那条路是 `export/WordExporter.java`，用 POI **转结构**而不是渲
 ② 同一行有多个合并时**从右往左**处理，删格子只影响右边的下标，反过来做会串位；
 ③ 表格必须写 `<w:tblGrid>`（POI 建表时不写），固定布局下 Word 是按它定列的，缺了列宽不作数。
 
+### Excel 导入（`export/ExcelImporter.java`）是导出的逆映射
+
+把一张现成的 xlsx 读成设计器能打开的版式（`ReportContentDTO`），省掉照着它重画表头、边框、
+合并、列宽的功夫。**只做静态版式**：产出的 `cellConfigs` 恒为空，占位符与取数由用户导入之后
+在设计器里手工配 —— 猜绑定猜错了让人逐格去拆，比自己画还慢。纯 POJO、不依赖 Spring，
+静态入口 `ExcelImporter.parse(bytes)`。只收 `.xlsx`。
+
+**它和 `ExcelExporter` 必须对着改**：值/样式/合并/行高列宽/边框/页面设置，每一项都能在正向
+那边找到对应的一处（`resolveStyle` / `applyConfig` / `applyBorders` / `applyPageSetup`），
+`ExcelImporterTest` 用「content → 导出 xlsx → 导回来 → 逐项比对」的往返用例锁着。
+页头页尾走 `HeaderFooterText#fromExcelCode`（`toExcelCode` 的逆，**占位符原样还回去**
+而不是像 `parse` 那样展开成当时的页码 —— 展开了就成了死值）。
+
+**数值和日期一律落成文字**（`DataFormatter` 取「Excel 里显示的那串」）：渲染时每个格子的 `ct`
+都会被 `CellFormatter` 重建（没配过格式的格子拿到的是 `General`），模板里带的 `ct.fa` 活不到
+出纸那一步 —— 老实照搬「值 + 格式串」的话 `1,234.00` 出成 `1234`、日期出成序列号 `45878`
+（`CellFormatter#toDateTime` 不认序列号）。代价是这些格子在导出的 xlsx 里是文本、不能在 Excel
+端继续算；原本是数值的格子补一个 `ct={fa:"@",t:"s"}`，免得前端或二次导出又识别回数字。
+
+几条容易写反的：**边框逐格照搬成 `rangeType=cell`，不必去重** —— xlsx 里相邻两格虽然共用一条
+线，但写回去时 `applyCellBorderEntry` 也只管自己那一格；线型和颜色照搬（白边框那个坑）。
+**行高列宽逐行逐列全写** —— Excel 默认 ≈17.6px / 64px，设计器是 19px / 73px，缺一项整表就偏、
+分页位置跟着错。**没显式写过纸张的按 A4 收** —— OOXML 里 `paperSize` 的缺省是 1（Letter），
+国内的表多半是 A4 只是没落这个属性。内容范围**不裁空行空列**：`cellConfigs` 按 `sheetIndex_r_c`
+寻址，挪了坐标用户回头绑定就对不上号了。**`fitToWidth` 是不可逆的一项**（正向 `limitWidth`
+兜底也写成 `fitToPage`，反读分不清是谁写的），与上面那条数值变文本一样，各有一个用例说明，
+别当 bug 去「修」。带不过来的（水印/条件格式/数据有效性/图片/图表/隐藏 sheet…）逐条记
+warning 返回给用户 —— 不说清楚就是「导进来不对」的报障。
+
 ### 自动换行的行高要自己算
 
 FortuneSheet **只在改字号(fs)时重算行高**，改自动换行(tb)时不算（core 的 `updateFormatCell`）；
