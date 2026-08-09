@@ -1,13 +1,20 @@
 package com.muzhou.report.controller;
 
+import com.muzhou.report.common.BizException;
 import com.muzhou.report.common.PageResult;
 import com.muzhou.report.common.Result;
+import com.muzhou.report.dto.ReportImportResultDTO;
 import com.muzhou.report.dto.ReportVersionSaveDTO;
 import com.muzhou.report.entity.MzReport;
 import com.muzhou.report.entity.MzReportVersion;
+import com.muzhou.report.service.ReportPackageService;
 import com.muzhou.report.service.ReportService;
 import com.muzhou.report.service.ReportVersionService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -16,8 +23,15 @@ import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
 
+import java.io.IOException;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 
 /**
@@ -29,9 +43,16 @@ import java.util.List;
 @RequiredArgsConstructor
 public class ReportController {
 
+    /** 导出包的扩展名。仍以 {@code .json} 结尾 —— 它就是一份 JSON，随手能看能改。 */
+    private static final String FILE_EXT = ".mzreport.json";
+
+    private static final DateTimeFormatter TS_FORMAT = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
+
     private final ReportService reportService;
 
     private final ReportVersionService versionService;
+
+    private final ReportPackageService packageService;
 
     /** 分页查询报表（不含 content）。 */
     @GetMapping("/page")
@@ -74,6 +95,53 @@ public class ReportController {
     @PostMapping("/{id}/copy")
     public Result<String> copy(@PathVariable String id) {
         return Result.ok(reportService.copy(id));
+    }
+
+    /* ------------------------------ 导入导出 ------------------------------ */
+
+    /**
+     * 导出若干张报表为一个 JSON 包（测试环境调好，整包带进正式环境）。
+     *
+     * <p>走 POST 而不是 GET：批量导出时 id 是一串，挂在 query 上迟早撞地址长度上限。
+     * 返回的是**文件字节流**，失败时同导出 Excel 那几个接口 —— 仍是 200 + Result(JSON)，
+     * 前端按 blob 收流时要认出这种情况（见 CONTRACT §3.4 的说明）。
+     *
+     * <p>内容是 JSON，但 Content-Type 报的是 {@code octet-stream}：前端那道「200 里装着错误结构」
+     * 的识别只把 {@code json} 类型的 blob 读成文本（{@code api/request.js#readErrorMsg}），
+     * 报成 json 的话每导出一次就要把整个包解码一遍。
+     */
+    @PostMapping("/export")
+    public ResponseEntity<byte[]> export(@RequestBody List<String> ids) {
+        byte[] bytes = packageService.exportPackage(ids);
+        String name = ids.size() == 1 ? exportName(ids.get(0)) : "报表导出_" + LocalDateTime.now().format(TS_FORMAT);
+        String encoded = URLEncoder.encode(name + FILE_EXT, StandardCharsets.UTF_8).replace("+", "%20");
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_OCTET_STREAM);
+        headers.set(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename*=UTF-8''" + encoded);
+        return ResponseEntity.ok().headers(headers).body(bytes);
+    }
+
+    /**
+     * 导入报表包。
+     *
+     * @param mode 目标环境已有同编码报表时怎么办：{@code skip} 跳过 / {@code overwrite} 覆盖 /
+     *             {@code copy} 另建一张（编码加后缀）
+     * @return 每张报表一条明细 —— 一张失败不影响别的（一张报表一个事务）
+     */
+    @PostMapping("/import")
+    public Result<ReportImportResultDTO> importPackage(@RequestPart("file") MultipartFile file,
+                                                       @RequestParam(defaultValue = "skip") String mode)
+            throws IOException {
+        if (file == null || file.isEmpty()) {
+            throw new BizException("请选择要导入的文件");
+        }
+        return Result.ok(packageService.importPackage(file.getBytes(), mode));
+    }
+
+    /** 单张导出时用报表名当文件名，报表没了就退回 id（导出那头会抛，这里只是取个名字）。 */
+    private String exportName(String id) {
+        MzReport report = reportService.getById(id);
+        return report == null || !StringUtils.hasText(report.getName()) ? id : report.getName();
     }
 
     /* ------------------------------ 版本 ------------------------------ */

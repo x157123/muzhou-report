@@ -19,6 +19,28 @@ public interface ReportService extends IService<MzReport> {
     PageResult<MzReport> page(long pageNo, long pageSize, String name);
 
     /**
+     * 按编码查报表（**不含 content**，这一列已废弃）。
+     *
+     * <p>编码是报表跨环境的身份证：导入报表包时按它认「目标环境是不是已经有这一张」，
+     * 主键 UUID 两个环境必定对不上。查不到返回 null。
+     */
+    MzReport getByCode(String code);
+
+    /**
+     * 整份覆盖报表的元信息（name / type / versionConfig / remark / status），**空值也照写**。
+     *
+     * <p>给导入报表包用：包里没有备注、没有版本切换规则时，目标环境那份得被清掉，否则导进来的
+     * 报表会按一条谁也不知道的老规则去选版本。普通的 {@link #update} 做不到 ——
+     * MyBatis-Plus 默认跳过 null 字段。
+     *
+     * <p>只改这五项：{@code code} 是身份证不动，content 在版本行里、由
+     * {@link ReportVersionService#replaceVersions} 管。
+     *
+     * @param report 必须带 {@code id}
+     */
+    boolean overwriteMeta(MzReport report);
+
+    /**
      * 查询报表详情（content 取**默认版本**的那一份）。
      */
     MzReport getDetail(String id);

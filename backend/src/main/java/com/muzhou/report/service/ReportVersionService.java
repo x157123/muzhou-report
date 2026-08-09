@@ -29,6 +29,14 @@ public interface ReportVersionService extends IService<MzReportVersion> {
     List<MzReportVersion> list(String reportId);
 
     /**
+     * 版本列表**含 content**，按 versionNo 升序 —— 导出报表包时用。
+     *
+     * <p>与 {@link #list} 分成两个方法而不是加个 boolean 参数：不带 content 是常态
+     * （列表页、候选版本、体检都只要元信息），把大字段捞出来是极少数场景，得在调用处一眼看得出来。
+     */
+    List<MzReportVersion> listWithContent(String reportId);
+
+    /**
      * 取某一版（**含 content**）。
      *
      * @param versionId 为空 = 默认版本
@@ -64,6 +72,18 @@ public interface ReportVersionService extends IService<MzReportVersion> {
 
     /** 报表被复制时，**所有版本行一起复制**（新 id，保留 versionNo / effectiveFrom / status / isDefault）。 */
     void copyToReport(String fromReportId, String toReportId);
+
+    /**
+     * 用这一批版式**整体替换**某报表现有的版本（导入报表包时调用）。
+     *
+     * <p>按 {@code versionNo} 对齐：号相同的原地更新，包里多出来的新建，目标报表里多出来的删掉。
+     * 发号仍守着 {@code uk_version_report_no} 那条规矩（**含已逻辑删除的行**）—— 包里的
+     * v2 在目标环境是个删掉的号时，它会被安排到 max+1 上去，而不是撞死在唯一索引上。
+     *
+     * <p>这里刻意绕过 {@link #removeVersion} 的「默认版本 / 最后一个启用版本不许删」两道拦截：
+     * 那是防手滑删版本的，而导入是「整份换成包里这份」，换完由本方法保证仍恰好一条默认版本。
+     */
+    void replaceVersions(String reportId, List<MzReportVersion> versions);
 
     /**
      * 体检某一版：数据集不随版本走（跨版本共用），所以改 SQL 会同时影响所有版本，

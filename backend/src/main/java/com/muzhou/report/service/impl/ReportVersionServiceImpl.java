@@ -27,6 +27,7 @@ import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -94,6 +95,11 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
         w.select(MzReportVersion.class, info -> !"content".equals(info.getColumn()));
         w.orderByAsc(MzReportVersion::getVersionNo);
         return list(w);
+    }
+
+    @Override
+    public List<MzReportVersion> listWithContent(String reportId) {
+        return list(byReport(reportId).orderByAsc(MzReportVersion::getVersionNo));
     }
 
     @Override
@@ -255,6 +261,80 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
             copy.setCreateBy(s.getCreateBy());
             save(copy);
         }
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void replaceVersions(String reportId, List<MzReportVersion> incoming) {
+        if (incoming == null || incoming.isEmpty()) {
+            throw new BizException("导入的报表没有任何版式");
+        }
+        Map<Integer, MzReportVersion> exist = new LinkedHashMap<>();
+        for (MzReportVersion v : list(reportId)) {
+            exist.put(v.getVersionNo(), v);
+        }
+        // 发号的水位线：含已逻辑删除的行（唯一索引管着全部行，同 nextVersionNo）
+        int max = baseMapper.maxVersionNo(reportId);
+        Set<String> keep = new LinkedHashSet<>();
+        List<MzReportVersion> sorted = new ArrayList<>(incoming);
+        sorted.sort(Comparator.comparing(v -> v.getVersionNo() == null ? Integer.MAX_VALUE : v.getVersionNo()));
+        for (MzReportVersion src : sorted) {
+            MzReportVersion old = src.getVersionNo() == null ? null : exist.get(src.getVersionNo());
+            if (old != null) {
+                // 原地更新。走 set() 而不是 updateById：effectiveFrom 为空表示「最早的那一版」，
+                // 得能被清空（同 updateMeta，连带 update_time 自己写）
+                update(new LambdaUpdateWrapper<MzReportVersion>()
+                        .eq(MzReportVersion::getId, old.getId())
+                        .set(MzReportVersion::getName, src.getName())
+                        .set(MzReportVersion::getContent, src.getContent())
+                        .set(MzReportVersion::getEffectiveFrom, src.getEffectiveFrom())
+                        .set(MzReportVersion::getIsDefault, src.getIsDefault() == null ? 0 : src.getIsDefault())
+                        .set(MzReportVersion::getStatus, src.getStatus() == null ? 1 : src.getStatus())
+                        .set(MzReportVersion::getRemark, src.getRemark())
+                        .set(MzReportVersion::getUpdateTime, LocalDateTime.now()));
+                keep.add(old.getId());
+                continue;
+            }
+            MzReportVersion row = new MzReportVersion();
+            row.setReportId(reportId);
+            // 包里的号在目标环境已经被用掉过（哪怕那一行是删掉的）就重新发一个
+            int no = src.getVersionNo() != null && src.getVersionNo() > max ? src.getVersionNo() : max + 1;
+            max = Math.max(max, no);
+            row.setVersionNo(no);
+            row.setName(src.getName());
+            row.setContent(src.getContent());
+            row.setEffectiveFrom(src.getEffectiveFrom());
+            row.setIsDefault(src.getIsDefault() == null ? 0 : src.getIsDefault());
+            row.setStatus(src.getStatus() == null ? 1 : src.getStatus());
+            row.setRemark(src.getRemark());
+            save(row);
+            keep.add(row.getId());
+        }
+        // 包里没有的版本删掉：导入是「整份换成包里这份」，留着的话目标环境会多出几段
+        // 谁也不认识的生效区间
+        for (MzReportVersion old : exist.values()) {
+            if (!keep.contains(old.getId())) {
+                removeById(old.getId());
+            }
+        }
+        normalizeDefault(reportId);
+    }
+
+    /**
+     * 兜底：默认版本恰好一条。
+     *
+     * <p>包里那份标记本该刚好一条，但手工改过的包、或者被删掉的恰好是唯一那条默认版本时就不是了 ——
+     * 一条都没有会让 {@link #detail} 走进「退回 versionNo 最小的那一版」的兜底路，多条则每次
+     * 取到哪一条要看数据库心情。
+     */
+    private void normalizeDefault(String reportId) {
+        List<MzReportVersion> all = list(reportId);
+        List<MzReportVersion> defaults = all.stream().filter(this::isDefault).toList();
+        if (defaults.size() == 1) {
+            return;
+        }
+        MzReportVersion chosen = defaults.isEmpty() ? all.get(0) : defaults.get(0);
+        setDefault(reportId, chosen.getId());
     }
 
     @Override

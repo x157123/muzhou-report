@@ -100,6 +100,14 @@ public interface DatasetService extends IService<MzDataset> {
     PageResult<MzDataset> page(long pageNo, long pageSize, String name);
 
     /**
+     * 某报表的全部**内部**数据集（不含 fields/params，也不含公共数据集）。
+     *
+     * <p>与 {@link #listForReport} 的区别：那个是「这张报表能用哪些数据集」（公共 + 内部，
+     * 给设计器左侧树用），这个是「哪些数据集属于这张报表」—— 报表被复制/导出时跟着走的就是它们。
+     */
+    List<MzDataset> listByReport(String reportId);
+
+    /**
      * 查询某报表可用的全部启用数据集（含 fields/params），用于设计器左侧树。
      *
      * @param reportId 报表 id，为空则只返回公共数据集
@@ -138,6 +146,19 @@ public interface DatasetService extends IService<MzDataset> {
      * code 保持不变（不同报表之间本来就允许同名）。
      */
     void copyToReport(String fromReportId, String toReportId);
+
+    /**
+     * 用这一批数据集**整体替换**某报表的内部数据集（导入报表包时调用）。
+     *
+     * <p>按 {@code code} 对齐：目标报表里已有同 code 的就原地更新（id 不变，含 fields/params
+     * 先删后插），没有的新建，包里没有的删掉 —— 「覆盖」这个词就是这个意思。
+     *
+     * <p>不走 {@link #create}：导入进来的数据集在源环境本来就存在，不该因为
+     * 「编码已被公共数据集占用」这类界面级校验让整张报表导不进来（同 {@link #copyToReport}）。
+     *
+     * @param datasets 每项的 {@code reportId} 会被强制改成 {@code reportId}，调用方不必填
+     */
+    void replaceReportDatasets(String reportId, List<DatasetSaveDTO> datasets);
 
     /**
      * 解析 SQL/接口/JSON，自动发现字段与参数，供设计器编辑数据集时使用。

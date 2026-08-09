@@ -456,6 +456,35 @@ sheet 的打印设置**，导出与预览一律优先认它（`RenderServiceImpl
 `utils/print.js#pageConfigOfResult`），认不到才退回老的推算。`SheetConcat` 也因此不再按
 「第 i 份出自第 i%m 张模板」推算，改成由调用方把每一份的模板与打印设置一路传进来。
 
+### 报表导入导出：包里只有 code，没有主键
+
+报表列表页勾几张 → `POST /api/report/export` 出一个 JSON 包（`.mzreport.json`），
+到另一个环境 `POST /api/report/import` 导进去（`service/ReportPackageService` + `dto/ReportPackageDTO`）。
+包里装的是**报表定义 + 全部版式 + 内部数据集 + 内容里引用到的公共数据集**。四条规矩：
+
+- **一律按 code 引用，不带任何主键** —— 主键是 UUID，两个环境必定对不上。报表认 `code`、
+  数据集认 `code`、数据源认 `datasourceCode`。
+- **数据源不进包**：它带着业务库地址与口令（口令还是 `WRITE_ONLY` 的，压根导不出来），
+  两个环境的连接信息本来就该不一样。目标环境没有这个 code 时**不拦**，导入照常、只报一条 warning
+  —— 版式和数据集都是对的，只差一个连接，卡住整张报表没有意义。
+- **公共数据集也一起打包**（`shared=true`），不带的话报表进了目标环境就是一张取不到数的空表；
+  引用要从**三处**扫全（单元格绑定、`primaryDataset`、`datasetLinks` 的主表/子表，
+  `referencedCodes` 一处），漏一处就是「某个数据集没跟来」。但导入时**公共数据集只新建不覆盖**
+  —— 它被多张报表共用，为了导一张报表改掉别人的取数是灾难。
+- **一张报表一个事务**（`TransactionTemplate`，不是 `@Transactional` —— 循环里自调用不走代理，
+  注解压根不生效，整包会退化成「一张失败全部回滚」），失败的那条单独列在结果里。
+
+`overwrite` 时**报表 id 不变**（外部系统拿 id 甚至业务 KEY 开设计器，换 id 那些链接全断），
+换掉的是元信息（走 `ReportService#overwriteMeta`，**空值也照写** —— 包里没写版本切换规则时
+目标环境那份得清掉，否则导进来的报表按一条谁也不知道的老规则选版本）、版式与内部数据集。
+
+**替换这两样都得躲开「唯一索引管着已逻辑删除的行」这个坑**，各自封在自己的服务里：
+`ReportVersionService#replaceVersions` 按 `versionNo` 对齐，包里的号在目标环境被用过（哪怕那行是
+删掉的）就改发 `maxVersionNo+1`，换完由 `normalizeDefault` 保证仍恰好一条默认版本；
+`DatasetService#replaceReportDatasets` 按 `code` 对齐（同 code 原地更新、id 不变），
+并且**先把该报表下已逻辑删除的内部数据集物理删掉**（`MzDatasetMapper#purgeDeletedByReport`）——
+`uk_dataset_code_scope` 不带 deleted 条件，上一次导入删掉的那条会挡住这一次同 code 的重建。
+
 ### 前后端对应关系
 
 `frontend/src/api/{datasource,dataset,report,render}.js` 与 CONTRACT §3 的接口一一对应；

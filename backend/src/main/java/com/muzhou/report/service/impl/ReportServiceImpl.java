@@ -1,6 +1,7 @@
 package com.muzhou.report.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.muzhou.report.common.BizException;
@@ -73,6 +74,31 @@ public class ReportServiceImpl extends ServiceImpl<MzReportMapper, MzReport> imp
         Page<MzReport> pageParam = new Page<>(pageNo, pageSize);
         Page<MzReport> result = page(pageParam, wrapper);
         return PageResult.of(result);
+    }
+
+    @Override
+    public MzReport getByCode(String code) {
+        return StringUtils.hasText(code) ? loadLiteByCode(code) : null;
+    }
+
+    @Override
+    public boolean overwriteMeta(MzReport report) {
+        if (report == null || !StringUtils.hasText(report.getId())) {
+            throw new BizException("报表 id 不能为空");
+        }
+        if (!StringUtils.hasText(report.getName())) {
+            throw new BizException("报表名称不能为空");
+        }
+        // 走 set() 而不是 updateById：备注、版本切换规则要能被清空，而 updateById 默认跳过
+        // null 字段（代价是不走自动填充，update_time 自己写，同 ReportVersionServiceImpl#updateMeta）
+        return update(new LambdaUpdateWrapper<MzReport>()
+                .eq(MzReport::getId, report.getId())
+                .set(MzReport::getName, report.getName())
+                .set(MzReport::getType, StringUtils.hasText(report.getType()) ? report.getType() : "sheet")
+                .set(MzReport::getVersionConfig, report.getVersionConfig())
+                .set(MzReport::getRemark, report.getRemark())
+                .set(MzReport::getStatus, report.getStatus() == null ? 1 : report.getStatus())
+                .set(MzReport::getUpdateTime, LocalDateTime.now()));
     }
 
     @Override

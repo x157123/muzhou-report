@@ -194,6 +194,51 @@ status / is_default）—— 漏了后者，副本会是一张没有版式的报
 | PUT | `` | MzReport → `Boolean`（body 带 `versionId` 时 `content` 写进该版本，省略 = 默认版本；**不回写 `mz_report.content`**） |
 | DELETE | `/{id}` | `Boolean`（版本行、内部数据集一并删） |
 | POST | `/{id}/copy` | `String newId`（版本行、内部数据集整套复制） |
+| POST | `/export` | `["报表id", ...]` → 字节流（一个报表包，一张或多张，见下）。内容是 JSON，但 `Content-Type` 报 `application/octet-stream` —— 前端那道「200 里装着错误结构」的识别只把 json 类型的 blob 读成文本，报成 json 就是每次导出白解码一遍整个包 |
+| POST | `/import` | multipart：`file` = 报表包，`mode` = `skip`\|`overwrite`\|`copy` → `ReportImportResultDTO` |
+
+**报表包（导入导出）** —— 测试环境调好，整包带进正式环境。文件是一份 JSON
+（下载名 `xxx.mzreport.json`），结构见 `dto/ReportPackageDTO`：
+
+```jsonc
+{
+  "fileType": "muzhou-report-package",   // 导入时认这个标识
+  "formatVersion": 1,
+  "exportTime": "2026-08-09 12:00:00",
+  "reports": [{
+    "name": "销售单", "code": "sales",    // 报表定义（不含 id）
+    "type": "sheet", "versionConfig": "...", "remark": "", "status": 1,
+    "versions": [                          // 全部版式，按 versionNo 升序
+      { "versionNo": 1, "name": null, "content": "{...}",
+        "effectiveFrom": null, "isDefault": 1, "status": 1, "remark": null }
+    ],
+    "datasets": [                          // 内部数据集 + 内容里引用到的公共数据集
+      { "name": "明细", "code": "items", "shared": false,
+        "datasourceCode": "biz",           // 数据源按 **code** 引用，见下
+        "type": "sql", "sqlText": "...", "fields": [...], "params": [...] }
+    ]
+  }]
+}
+```
+
+四条规矩，改这块之前先看：
+
+1. **包里一律按 code 引用，不带任何主键** —— 主键是 UUID，两个环境必定对不上。报表认 `code`、
+   数据集认 `code`、数据源认 `datasourceCode`。
+2. **数据源本身不进包**：它带着业务库地址与口令（口令还是 `WRITE_ONLY` 的，压根导不出来），
+   两个环境的连接信息本来就该不一样。目标环境没有这个 code 时**不拦**，导入照常进行、
+   在结果里报一条 warning 让人去补 —— 版式和数据集都是对的，只差一个连接。
+3. **内容里引用到的公共数据集也一起打包**（`shared: true`）：不带的话报表进了目标环境就是一张
+   取不到数的空表。引用要从**三处**扫全（单元格绑定、`primaryDataset`、`datasetLinks` 的主表/子表），
+   漏一处就是「某个数据集没跟来」。但导入时**公共数据集只新建、不覆盖** ——
+   它被多张报表共用，为了导一张报表改掉别人的取数是灾难。
+4. **一张报表一个事务**：批量导入时某一张失败不该把已经导好的那几张一起回滚掉，
+   失败的那条在 `ReportImportResultDTO.items` 里单独列出来（`action` =
+   `created`/`updated`/`skipped`/`failed`，`warnings` 是不影响导入但要人去补的事）。
+
+`mode`（目标环境已有**同编码**报表时怎么办）：`skip` 跳过 / `overwrite` 覆盖
+（**报表 id 不变** —— 外部系统拿 id 开设计器的链接不能断；版式与内部数据集整套替换，
+包里没有的删掉）/ `copy` 一律新建（编码加 `_import_时间戳` 后缀）。
 
 版本（见 §2 `mz_report_version`）：
 

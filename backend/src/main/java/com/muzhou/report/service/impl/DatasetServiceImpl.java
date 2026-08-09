@@ -688,8 +688,43 @@ public class DatasetServiceImpl extends ServiceImpl<MzDatasetMapper, MzDataset> 
         }
     }
 
-    /** 某报表的全部内部数据集。 */
-    private List<MzDataset> listByReport(String reportId) {
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void replaceReportDatasets(String reportId, List<DatasetSaveDTO> datasets) {
+        if (!StringUtils.hasText(reportId)) {
+            throw new BizException("缺少报表 id");
+        }
+        List<DatasetSaveDTO> incoming = datasets == null ? List.of() : datasets;
+        Map<String, MzDataset> exist = new LinkedHashMap<>();
+        for (MzDataset ds : listByReport(reportId)) {
+            exist.put(ds.getCode(), ds);
+        }
+        Set<String> codes = incoming.stream().map(DatasetSaveDTO::getCode).collect(Collectors.toSet());
+        // 包里没有的那些：这张报表已经不用它们了，跟着删
+        for (MzDataset ds : exist.values()) {
+            if (!codes.contains(ds.getCode())) {
+                remove(ds.getId());
+            }
+        }
+        // 逻辑删除的行仍占着 uk_dataset_code_scope，不清掉的话同 code 的新行插不进来
+        baseMapper.purgeDeletedByReport(reportId);
+        for (DatasetSaveDTO dto : incoming) {
+            dto.setReportId(reportId);
+            MzDataset old = exist.get(dto.getCode());
+            if (old == null) {
+                insert(dto);
+                continue;
+            }
+            // 原地更新：id 保持不变。模板里的绑定认的是 code 不是 id，但内部数据集的 id
+            // 还挂在别处（数据集管理面板的选中态等），换一个没有好处
+            dto.setId(old.getId());
+            updateById(toEntity(dto));
+            saveChildren(old.getId(), dto);
+        }
+    }
+
+    @Override
+    public List<MzDataset> listByReport(String reportId) {
         return lambdaQuery().eq(MzDataset::getReportId, reportId).list();
     }
 

@@ -13,13 +13,31 @@
       </el-input>
       <el-button type="primary" @click="handleSearch">搜索</el-button>
       <div class="flex-spacer" />
+      <el-button :loading="exporting" :disabled="!selectedIds.length" @click="handleExportSelected">
+        <el-icon><Download /></el-icon>
+        导出{{ selectedIds.length ? `(${selectedIds.length})` : '' }}
+      </el-button>
+      <el-button @click="importVisible = true">
+        <el-icon><Upload /></el-icon>
+        导入
+      </el-button>
       <el-button type="primary" @click="openCreate">
         <el-icon><Plus /></el-icon>
         新建报表
       </el-button>
     </div>
 
-    <el-table v-if="tableData.length || loading" v-loading="loading" :data="tableData" border stripe>
+    <el-table
+      v-if="tableData.length || loading"
+      v-loading="loading"
+      :data="tableData"
+      border
+      stripe
+      row-key="id"
+      @selection-change="onSelectionChange"
+    >
+      <!-- reserve-selection：翻页之后勾选还在，批量导出常常要跨页挑 -->
+      <el-table-column type="selection" width="46" reserve-selection />
       <el-table-column prop="name" label="名称" min-width="160" />
       <el-table-column label="编码" width="140">
         <template #default="{ row }"><span class="mono">{{ row.code }}</span></template>
@@ -32,11 +50,12 @@
       </el-table-column>
       <el-table-column prop="createTime" label="创建时间" width="160" />
       <el-table-column prop="updateTime" label="更新时间" width="160" />
-      <el-table-column label="操作" width="280" fixed="right">
+      <el-table-column label="操作" width="330" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" @click="goDesign(row)">设计</el-button>
           <el-button link type="primary" @click="goPreview(row)">预览</el-button>
           <el-button link type="primary" @click="handleCopy(row)">复制</el-button>
+          <el-button link type="primary" @click="handleExportRow(row)">导出</el-button>
           <el-button link type="primary" @click="openEdit(row)">编辑信息</el-button>
           <el-button link type="danger" @click="handleDelete(row)">删除</el-button>
         </template>
@@ -60,6 +79,7 @@
     />
 
     <ReportEditDialog v-model="dialogVisible" :report-id="editingId" @saved="loadData" />
+    <ReportImportDialog v-model="importVisible" @imported="loadData" />
   </div>
 </template>
 
@@ -68,8 +88,10 @@
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { pageReport, deleteReport, copyReport } from '@/api/report'
+import { pageReport, deleteReport, copyReport, exportReports } from '@/api/report'
+import { downloadBlob } from '@/utils/sheet'
 import ReportEditDialog from './ReportEditDialog.vue'
+import ReportImportDialog from './ReportImportDialog.vue'
 
 const router = useRouter()
 
@@ -82,6 +104,10 @@ const searchName = ref('')
 
 const dialogVisible = ref(false)
 const editingId = ref('')
+
+const importVisible = ref(false)
+const exporting = ref(false)
+const selectedIds = ref([])
 
 async function loadData() {
   loading.value = true
@@ -127,6 +153,43 @@ async function handleCopy(row) {
   } catch (e) {
     // 已由拦截器提示
   }
+}
+
+function onSelectionChange(rows) {
+  selectedIds.value = rows.map((r) => r.id)
+}
+
+/** 单张导出：不动勾选状态，文件名用报表名 */
+function handleExportRow(row) {
+  doExport([row.id], row.name || 'report')
+}
+
+/** 批量导出：勾选的那几张打成一个包 */
+function handleExportSelected() {
+  if (!selectedIds.value.length) {
+    ElMessage.warning('请先勾选要导出的报表')
+    return
+  }
+  doExport(selectedIds.value, `报表导出_${timestamp()}`)
+}
+
+async function doExport(ids, fileName) {
+  exporting.value = true
+  try {
+    const res = await exportReports(ids)
+    downloadBlob(res.data, `${fileName}.mzreport.json`)
+    ElMessage.success(`已导出 ${ids.length} 张报表`)
+  } catch (e) {
+    // 已由拦截器提示
+  } finally {
+    exporting.value = false
+  }
+}
+
+function timestamp() {
+  const d = new Date()
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
 }
 
 function handleDelete(row) {
