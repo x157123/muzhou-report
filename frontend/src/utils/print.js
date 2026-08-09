@@ -226,6 +226,7 @@ export function pageConfigOf(content, sheetIndex) {
  *
  * 没有这个标记时（老结果）退回按下标推算：perRow 拆出来的结果是模板的 N 倍，取模映射回去；
  * perRowPage 拼过之后这个推算不成立，所以这里判的是 perRow 而不是「拆没拆」。
+ * （perRow 已从设计器下线，这条推算只剩老报表 + 老结果会走到。）
  *
  * @param sheet 渲染结果里的那张 sheet，可不传
  */

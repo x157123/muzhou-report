@@ -195,11 +195,11 @@ export const useDesignerStore = defineStore('designer', {
       // 删掉格子内容不会通知业务层（FortuneSheet 只是把格子置成 {}），绑定只能在这里
       // 对着最新的 sheets 回收 —— 否则格子空了数据照样渲染出来
       this.content.cellConfigs = pruneEmptyCellConfigs(this.content.cellConfigs, next)
-      // 单 sheet 时选的「每条数据一个 sheet」，加了第二张模板 sheet 就不成立了（见 setSheetSplit）——
-      // 用户未必会再打开打印设置弹窗，这里跟着降回单 sheet 输出
-      if (this.content.splitMode === 'perRow' && next.length > 1) {
-        this.content.splitMode = 'single'
-        this.content.sheetNameField = ''
+      // 老报表存着的 perRow（「每条数据一个 sheet」，已下线）在设计器里一律迁成 perRowPage：
+      // 拆分方式本来就是同一套，只是出口从「N 张 sheet」换成「拼回一张、按页分开」。
+      // 尤其是多 sheet 模板 —— perRow 会出 M×N 张、同一条数据的几张单据被打散，正是下线的原因
+      if (this.content.splitMode === 'perRow') {
+        this.content.splitMode = 'perRowPage'
       }
       this.dirty = true
     },
@@ -366,22 +366,22 @@ export const useDesignerStore = defineStore('designer', {
     },
 
     /**
-     * 输出方式：单 sheet / 主接口每条数据一个 sheet / 每条数据一页（含单据名取哪个字段）。
+     * 输出方式：单 sheet 输出 / 多 sheet 输出（`perRowPage`：按主接口每条数据拆一份、一份一页，
+     * 含单据名取哪个字段）。
      *
      * 跟打印设置一起在打印设置弹窗里配，但它是**报表级**的 —— 决定的是整个工作簿有几张 sheet，
      * 不是某一张 sheet 怎么出纸，所以不进 pageConfigs。
      *
-     * `perRow` 多一条限制：**模板本身是多 sheet 时不许用**（退回 single）。它是把整份模板
-     * （M 张）复制 N 遍，出来 M×N 张 sheet，同一条数据的几张单据被打散在整个工作簿里；
-     * 要一条数据一份得用 `perRowPage`（各模板各拼回一张、按页分开）。
+     * **`perRow`（「每条数据一个 sheet」）已下线**，设计器里选不到了：它与 `perRowPage` 是
+     * 同一套拆分的两个出口，功能重叠，而它出的 M×N 张 sheet 会把同一条数据的几张单据打散在
+     * 整个工作簿里。传进来的 `perRow`（老报表 / 手写 content）在这里迁成 `perRowPage`。
+     * 引擎那边仍认得 `perRow`，没在设计器里存过盘的老报表照旧按老样子渲染。
      */
     setSheetSplit({ splitMode, sheetNameField }) {
-      const modes = ['perRow', 'perRowPage']
-      let mode = modes.includes(splitMode) ? splitMode : 'single'
-      if (mode === 'perRow' && (this.content.sheets?.length || 0) > 1) mode = 'single'
+      const mode = ['perRow', 'perRowPage'].includes(splitMode) ? 'perRowPage' : 'single'
       this.content.splitMode = mode
-      // 两种拆法共用这一个字段：perRow 拿它当 sheet 名，perRowPage 拼回一张之后 sheet 名说不了话，
-      // 拿它当页头页尾里 ${sheet} 的值（每张纸印自己那一份的单号）。single 用不上，清掉
+      // 拼回一张之后 sheet 名说不了话（整张只有一个名字），这个字段拿来当页头页尾里 ${sheet}
+      // 的值（每张纸印自己那一份的单号）。single 用不上，清掉
       this.content.sheetNameField = mode === 'single' ? '' : sheetNameField || ''
       this.dirty = true
     },

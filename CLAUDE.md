@@ -321,8 +321,12 @@ Excel / Word 不需要这一刀 —— 它们按自己的字体折行，与估�
 分页条只在「主接口是分页型」时出现，翻页 = 带着 `pageNo`/`pageSize`（**保留参数名**）
 重新渲染整张报表。
 
-主接口还管第二件事：`content.splitMode=perRow`（打印设置弹窗的「输出」页签）时
-**按主接口的每一行拆 sheet**，一条数据一张单据。实现在 `ReportRenderEngine#renderPerRow`：
+主接口还管第二件事：`content.splitMode`（打印设置弹窗的「输出」页签）非 `single` 时
+**按主接口的每一行拆**，一条数据一张单据。`perRow`（拆成 N 张 sheet）**已从设计器下线**
+——它和下面的 `perRowPage` 是同一套拆分的两个出口，功能重叠，而 M×N 张 sheet 会把同一条数据的
+几张单据打散在整个工作簿里；`stores/designer.js#setSheetSplit` 把它一律迁成 `perRowPage`。
+**引擎这一份实现要留着**（老报表照旧渲染），下面讲的也仍是它。
+实现在 `ReportRenderEngine#renderPerRow`：
 不是改扩展逻辑，而是**换掉取数函数** —— 第 i 遍渲染时主接口只返回第 i 行，其它数据集返回全量
 且缓存复用（否则 N 条数据会把从表接口打 N 遍）。拆出来的 sheet 必须重编 `id`/`order`/`status`，
 名字取 `sheetNameField` 字段值（重名挂 `(2)`，多模板补模板名）。**`sheetNameField` 两种拆法共用**：
@@ -331,7 +335,9 @@ Excel / Word 不需要这一刀 —— 它们按自己的字体折行，与估�
 所以导出和预览取打印设置一律走 `pageConfigOfRendered`（`renderedIndex % 模板张数`），
 后端 `ReportContentDTO` 与前端 `utils/print.js` 各一份，改一处要改另一处。
 
-`splitMode` 还有第三个值 `perRowPage`（**每条数据一页**）：拆分**完全复用上面那段代码**
+`splitMode` 的另一个值 `perRowPage`（每条数据一页，**设计器界面上叫「多 sheet 输出」**，
+现在只有它和 `single`）：
+拆分**完全复用上面那段代码**
 （`splitByRow()` 两种模式共用），只在 `renderPerRow` 的**出口**多一道拼接
 （`engine/SheetConcat`）—— 渲染出来的那一摞**按原顺序**首尾相接摞成一张，Excel 里是一张
 连续的表，打印时靠行分页符保证一份一页。要偏移的有五样：`celldata[].r`、`v.mc.r`、`v.f` 里的

@@ -221,8 +221,7 @@
           <el-form-item label="输出方式">
             <el-radio-group v-model="split.splitMode" :disabled="!canSplit">
               <el-radio-button value="single">单 sheet 输出</el-radio-button>
-              <el-radio-button value="perRow" :disabled="!canPerRow">每条数据一个 sheet</el-radio-button>
-              <el-radio-button value="perRowPage">每条数据一页</el-radio-button>
+              <el-radio-button value="perRowPage">多 sheet 输出</el-radio-button>
             </el-radio-group>
           </el-form-item>
 
@@ -231,7 +230,7 @@
             <span v-else class="text-muted">未设置 —— 在左侧数据集面板点 ☆ 指定一个</span>
           </el-form-item>
 
-          <el-form-item v-if="split.splitMode !== 'single'" :label="split.splitMode === 'perRow' ? 'sheet 名' : '单据名'">
+          <el-form-item v-if="split.splitMode !== 'single'" label="单据名">
             <el-select v-model="split.sheetNameField" placeholder="取主接口的哪个字段" clearable style="width: 260px">
               <el-option
                 v-for="f in primaryFields"
@@ -244,9 +243,8 @@
           </el-form-item>
           <div v-if="split.splitMode === 'perRowPage'" class="tips" style="margin-top: -8px">
             <p>
-              「每条数据一页」拼回同一张 sheet，工作表名对每一份都一样 —— 这里配的名字给
+              「多 sheet 输出」把 N 份拼回同一张 sheet，工作表名对每一份都一样 —— 这里配的名字给
               <b>页头页尾里的 <code>${sheet}</code></b> 用，每张纸印自己那一份的单号。
-              配的是同一个字段：换成「每条数据一个 sheet」时它就是 sheet 名。
               <b>只有 PDF（含预览页的打印）逐份换名</b>，Excel / Word 里 <code>${sheet}</code> 恒是工作表名。
             </p>
           </div>
@@ -260,19 +258,14 @@
               要拆请把它的「返回结果」改成集合。
             </p>
             <p v-else>
-              两种拆法都是把当前这份模板整份复制 N 遍（N = 主接口的行数），第 i 份只喂第 i 行数据，
+              拆分是把当前这份模板整份复制 N 遍（N = 主接口的行数），第 i 份只喂第 i 行数据，
               <b>其它数据集每份都拿全量</b>。一条数据一张单据的报表就是这么出的。
             </p>
-            <p v-if="canSplit && multiSheet">
-              <b>模板本身就有 {{ sheetCount }} 张 sheet，「每条数据一个 sheet」不可选</b>：
-              它会把整份模板复制 N 遍，出来 {{ sheetCount }}×N 张 sheet，
-              一条数据的几张单据被打散在整个工作簿里，翻起来根本对不上号。
-              要一条数据一份就选「每条数据一页」（各模板各拼成一张、按页分开）。
-            </p>
             <p v-if="split.splitMode === 'perRowPage'">
-              <b>「每条数据一页」</b>= 复制出来的 N 份<b>首尾相接拼回同一张 sheet</b>，
+              <b>「多 sheet 输出」</b>= 复制出来的 N 份<b>首尾相接拼回同一张 sheet</b>，
               并在每份的开头打一个分页符。Excel 里是一张连续的表（能整体滚动、筛选），
               打印/导出 PDF 时<b>一条数据占一页</b>，不会两条挤在同一张纸上。
+              打印设置不同的相邻份会断成几张 sheet，「多 sheet」由此而来。
             </p>
             <p>
               打印设置按模板的 sheet 走：模板第 2 张设成横向，拆出来每一份的第 2 张都是横向。
@@ -433,7 +426,8 @@ const form = ref(normalizePageConfig(null))
 /** 'sheet' 仅当前工作表 | 'all' 全部工作表 */
 const scope = ref('sheet')
 /**
- * 输出方式（报表级，不按 sheet 分）：单 sheet / 主接口每条数据一个 sheet。
+ * 输出方式（报表级，不按 sheet 分）：单 sheet / 多 sheet 输出（`perRowPage`，按主接口每条数据
+ * 拆一份、一份一页）。
  * 和打印设置一样，编辑的是副本，点确定才写回 store。
  */
 const split = ref({ splitMode: 'single', sheetNameField: '' })
@@ -461,11 +455,12 @@ watch(visible, (v) => {
   if (!v) return
   // 深拷 header / footer / watermark：浅拷会让弹窗里的输入直接改到 store 上，取消也撤不回来
   form.value = normalizePageConfig(JSON.parse(JSON.stringify(store.pageConfig)))
-  const mode = ['perRow', 'perRowPage'].includes(store.content.splitMode) ? store.content.splitMode : 'single'
+  // 「每条数据一个 sheet」（perRow）已下线 —— 与「多 sheet 输出」是同一套拆分、两个出口，
+  // 功能重叠。老报表里存着的 perRow 在这里迁成 perRowPage（拆分行为不变，只是出口拼回一张），
+  // 点确定就写成新值；不迁的话单选框对不上存的值
+  const stored = store.content.splitMode
   split.value = {
-    // 多 sheet 模板不许按行拆 sheet（见下方 canPerRow）：老报表里存着的 perRow 在这里退回单 sheet，
-    // 否则单选框上会亮着一个禁用项，点确定又原样写回去
-    splitMode: mode === 'perRow' && multiSheet.value ? 'single' : mode,
+    splitMode: ['perRow', 'perRowPage'].includes(stored) ? 'perRowPage' : 'single',
     sheetNameField: store.content.sheetNameField || ''
   }
   version.value = store.versionConfigOf()
@@ -482,13 +477,6 @@ const primaryFields = computed(() => primary.value?.fields || [])
  * 只有「主接口是集合型」才拆得动：分页型自己就在按页取数，再按行拆 sheet 是两套分页打架。
  */
 const canSplit = computed(() => !!primary.value && primary.value.resultType !== 'page')
-/**
- * 「每条数据一个 sheet」还多一条限制：**模板本身是多 sheet 时不许选**。
- * 它是把整份模板（M 张）复制 N 遍，出来 M×N 张 sheet，同一条数据的几张单据被打散在
- * 整个工作簿里；要一条数据一份得选 perRowPage（各模板各拼回一张，按页分开）。
- * 这条在 `stores/designer.js#setSheetSplit` 上也拦了一道，那边才是最终生效的地方。
- */
-const canPerRow = computed(() => canSplit.value && !multiSheet.value)
 
 /* ------------------------------ 版本 ------------------------------ */
 

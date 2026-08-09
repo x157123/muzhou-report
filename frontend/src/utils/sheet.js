@@ -59,11 +59,12 @@ export function createEmptyContent() {
     /** 主接口：驱动本报表分页/拆分的数据集 code，一张报表只有一个，空 = 不分页不拆分 */
     primaryDataset: '',
     /**
-     * 输出方式：single 单 sheet / perRow 主接口每条数据一个 sheet /
-     * perRowPage 每条数据一页、拼在同一张 sheet 里
+     * 输出方式：single 单 sheet 输出 / perRowPage「多 sheet 输出」（界面上的名字）——
+     * 按主接口每条数据拆一份、首尾相接拼在同一张 sheet 里，一份一页。
+     * （还有个 perRow「每条数据一个 sheet」已从设计器下线，引擎仍认得，只剩老报表在用）
      */
     splitMode: 'single',
-    /** perRow 时 sheet 名取主接口的哪个字段 */
+    /** perRowPage 时单据名取主接口的哪个字段（页头页尾里 ${sheet} 的值） */
     sheetNameField: '',
     /** 父子关联（子接口查询）：[{name, master, child, mappings:[{param, field}]}] */
     datasetLinks: [],

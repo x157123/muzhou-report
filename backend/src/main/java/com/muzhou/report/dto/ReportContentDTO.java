@@ -41,19 +41,26 @@ public class ReportContentDTO implements Serializable {
     private String primaryDataset;
 
     /**
-     * 输出方式：{@code single} 单 sheet 输出（默认）/ {@code perRow} 主接口每条数据一个 sheet /
-     * {@code perRowPage} 每条数据一页、拼在同一张 sheet 里。
+     * 输出方式：{@code single} 单 sheet 输出（默认）/ {@code perRowPage} 每条数据一页、
+     * 拼在同一张 sheet 里（<b>设计器界面上叫「多 sheet 输出」</b> —— 打印设置不同的相邻份
+     * 会断成几张 sheet）。
      *
-     * <p>{@code perRow} 是「一条数据一张单据」那种报表：模板整份复制 N 遍，第 i 份只喂主接口的
-     * 第 i 行数据，其它数据集每份都拿全量。只对**集合型**主接口有意义 —— 分页型自己就分页了。
+     * <p>「一条数据一张单据」那种报表：模板整份复制 N 遍，第 i 份只喂主接口的第 i 行数据，
+     * 其它数据集每份都拿全量；再把那 N 份**首尾相接**拼回每个模板一张
+     * （{@code engine/SheetConcat}），并在每份的起始行打一个行分页符，保证打印时一条数据一页、
+     * 不会两条挤在同一张纸上。只对**集合型**主接口有意义 —— 分页型自己就分页了。
      *
-     * <p>{@code perRowPage} 拆分方式与 {@code perRow} 完全相同（同一段代码），只是在出口处把那 N 份
-     * **首尾相接**拼回每个模板一张（{@code engine/SheetConcat}），并在每份的起始行打一个行分页符，
-     * 保证打印时一条数据一页、不会两条挤在同一张纸上。
+     * <p><b>还有个已下线的 {@code perRow}</b>（每条数据一个 sheet）：同一段拆分代码的另一个出口，
+     * 不拼接、直接出 N×M 张 sheet。与 {@code perRowPage} 功能重叠，且会把同一条数据的几张单据
+     * 打散在整个工作簿里，**设计器里已经没有这个选项**（前端把它迁成 {@code perRowPage}）。
+     * 这里连同引擎那份实现一起留着，让没在新版设计器里存过盘的老报表照旧渲染。
      */
     private String splitMode;
 
-    /** {@code perRow} 时，sheet 名取主接口这一行的哪个字段（取不到值就退回「第 n 条」）。 */
+    /**
+     * 单据名取主接口这一行的哪个字段（取不到值就退回「第 n 条」）：{@code perRowPage} 拿它当
+     * {@code mzDocNames}（页头页尾里的 {@code ${sheet}}），老的 {@code perRow} 拿它当 sheet 名。
+     */
     private String sheetNameField;
 
     /**
