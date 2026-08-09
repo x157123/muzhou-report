@@ -65,6 +65,9 @@
           </el-dropdown-menu>
         </template>
       </el-dropdown>
+      <el-button :icon="Upload" title="拿一份现成的 Excel 当版式起点" @click="excelDialogVisible = true">
+        导入 Excel
+      </el-button>
       <el-button :icon="Setting" @click="paramDialogVisible = true">参数配置</el-button>
       <el-button :icon="Printer" @click="printDialogVisible = true">打印设置</el-button>
       <el-button
@@ -194,6 +197,7 @@
       @open="switchVersion"
       @changed="onVersionsChanged"
     />
+    <ExcelImportDialog v-model="excelDialogVisible" @imported="onExcelImported" />
     <ExpressionHelpDialog v-model="helpVisible" />
     <DatasetLinkDialog v-model="linkDialogVisible" :datasets="normalizedDatasets" :index="editingLinkIndex" />
     <!-- 与数据集管理页同一个弹窗，只是带上 reportId -> 建出来的是本报表的内部数据集 -->
@@ -210,7 +214,7 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute, useRouter, onBeforeRouteLeave } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowLeft, ArrowDown, Check, View, Download, Setting, QuestionFilled, Printer, Grid } from '@element-plus/icons-vue'
+import { ArrowLeft, ArrowDown, Check, View, Download, Upload, Setting, QuestionFilled, Printer, Grid } from '@element-plus/icons-vue'
 // 只为了拿工具栏的默认按钮清单，见下面的 HIDDEN_TOOLBAR_ITEMS
 import { defaultSettings } from '@fortune-sheet/core'
 
@@ -222,6 +226,7 @@ import PrintConfigDialog from './components/PrintConfigDialog.vue'
 import PrintAreaOverlay from './components/PrintAreaOverlay.vue'
 import PreviewDrawer from './components/PreviewDrawer.vue'
 import VersionManageDialog from './components/VersionManageDialog.vue'
+import ExcelImportDialog from './components/ExcelImportDialog.vue'
 import ExpressionHelpDialog from './components/ExpressionHelpDialog.vue'
 import DatasetLinkDialog from './components/DatasetLinkDialog.vue'
 import DatasetEditDialog from '@/views/dataset/DatasetEditDialog.vue'
@@ -283,6 +288,7 @@ const nameInputRef = ref(null)
 
 const paramDialogVisible = ref(false)
 const printDialogVisible = ref(false)
+const excelDialogVisible = ref(false)
 const previewVisible = ref(false)
 const helpVisible = ref(false)
 
@@ -494,6 +500,24 @@ async function copyCurrentVersion() {
   } catch (e) {
     // 错误已提示
   }
+}
+
+/* ------------------------- 导入 Excel 版式 ------------------------- */
+
+/**
+ * 把解析出来的 Excel 版式挂上画布。
+ *
+ * 和切版本一样必须 `sheetRef.reload()` 重挂工作簿 —— FortuneSheet 桥接的 `data` prop 只在
+ * 挂载时读一次。挂完只是画布上有了，**没有落库**，用户点「保存」才写进当前版本。
+ *
+ * 重挂之后立刻更新列宽快照：`enforceWidthLimit` 是拿快照比对「用户又拖宽了多少」的，
+ * 不更新的话导入进来的那份宽度会被当成一次拖动，当场被压回去（同 switchVersion）。
+ */
+async function onExcelImported({ content, mode }) {
+  store.importSheets(content, mode)
+  await nextTick()
+  await sheetRef.value?.reload(store.content.sheets)
+  prevColumnWidths = snapshotColumnWidths(currentSheet.value)
 }
 
 /* ------------------------- 数据集 ------------------------- */

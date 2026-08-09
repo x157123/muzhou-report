@@ -3,7 +3,9 @@ package com.muzhou.report.controller;
 import com.muzhou.report.common.BizException;
 import com.muzhou.report.common.PageResult;
 import com.muzhou.report.common.Result;
+import com.muzhou.report.config.MzProperties;
 import com.muzhou.report.dto.ReportImportResultDTO;
+import com.muzhou.report.export.ExcelImporter;
 import com.muzhou.report.dto.ReportVersionSaveDTO;
 import com.muzhou.report.entity.MzReport;
 import com.muzhou.report.entity.MzReportVersion;
@@ -53,6 +55,9 @@ public class ReportController {
     private final ReportVersionService versionService;
 
     private final ReportPackageService packageService;
+
+    /** 导入 Excel 的行数/单元格数闸门取这里的 muzhou.report.max-rows / max-cells */
+    private final MzProperties props;
 
     /** 分页查询报表（不含 content）。 */
     @GetMapping("/page")
@@ -136,6 +141,27 @@ public class ReportController {
             throw new BizException("请选择要导入的文件");
         }
         return Result.ok(packageService.importPackage(file.getBytes(), mode));
+    }
+
+    /**
+     * 把一份 xlsx 解析成报表版式，**只解析、不落库**。
+     *
+     * <p>导入是不可逆的：直接写进库会把用户当前的版式冲掉。所以这里只把 xlsx 翻译成 content
+     * 还给设计器，用户在画布上看过、点「保存」才落库（走原来的 {@code PUT /api/report}）。
+     *
+     * <p><b>只做静态版式</b>：返回的 {@code cellConfigs} 恒为空，占位符与取数由用户导入之后
+     * 在设计器里手工配 —— 猜绑定猜错了让人逐格去拆，比自己画还慢。带不过来的东西
+     * （水印、条件格式、图片…）逐条写在 {@code warnings} 里，见 {@link ExcelImporter}。
+     */
+    @PostMapping("/parse-excel")
+    public Result<ExcelImporter.Result> parseExcel(@RequestPart("file") MultipartFile file)
+            throws IOException {
+        if (file == null || file.isEmpty()) {
+            throw new BizException("请选择要导入的 Excel 文件");
+        }
+        ExcelImporter.Options options =
+                new ExcelImporter.Options(props.getMaxRows(), props.getMaxCells(), true);
+        return Result.ok(ExcelImporter.parse(file.getBytes(), options));
     }
 
     /** 单张导出时用报表名当文件名，报表没了就退回 id（导出那头会抛，这里只是取个名字）。 */

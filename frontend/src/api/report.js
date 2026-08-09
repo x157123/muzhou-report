@@ -41,6 +41,20 @@ export const importReports = (file, mode) => {
   return request.post('/report/import', form, { params: { mode }, timeout: 180000 })
 }
 
+/**
+ * 把一份 xlsx 解析成报表版式（**只解析、不落库**）。
+ *
+ * 只做静态版式：返回的 content 里 cellConfigs 恒为空，占位符与取数由用户在设计器里手工配。
+ *
+ * @returns { content, warnings } —— warnings 是「哪些东西没带过来」，要原样给用户看
+ */
+export const parseExcelTemplate = (file) => {
+  const form = new FormData()
+  form.append('file', file)
+  // 大表解析比普通请求慢，别用默认的 120s 卡在半路
+  return request.post('/report/parse-excel', form, { timeout: 180000 })
+}
+
 /* ------------------------------ 版本 ------------------------------ */
 
 /** 版本列表（不含 content），按 versionNo 升序 */

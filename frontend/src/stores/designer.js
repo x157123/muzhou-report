@@ -23,6 +23,23 @@ import { normalizePageConfig, pageConfigOf, shiftPrintArea } from '@/utils/print
  */
 const MAX_DROPPED_STASH = 50
 
+/** 追加工作表时避开已有的 id（id 只要唯一，不必好看） */
+function uniqueSheetId(taken, index) {
+  let id = `sheet_${index + 1}`
+  while (taken.has(id)) id = `sheet_${index + 1}_${Math.random().toString(36).slice(2, 7)}`
+  taken.add(id)
+  return id
+}
+
+/** 追加工作表时重名的挂 (2)(3)，同 Excel */
+function uniqueSheetName(taken, name) {
+  let out = name
+  let n = 2
+  while (taken.has(out)) out = `${name}(${n++})`
+  taken.add(out)
+  return out
+}
+
 /**
  * 设计器状态：当前报表、单元格配置、选中单元格、可用数据集。
  */
@@ -200,6 +217,58 @@ export const useDesignerStore = defineStore('designer', {
       // 尤其是多 sheet 模板 —— perRow 会出 M×N 张、同一条数据的几张单据被打散，正是下线的原因
       if (this.content.splitMode === 'perRow') {
         this.content.splitMode = 'perRowPage'
+      }
+      this.dirty = true
+    },
+
+    /**
+     * 把导入的 Excel 版式装进当前报表。
+     *
+     * **不走 setSheets**：那个方法收的是工作簿回传的运行时结构、只管把按下标寻址的配置跟着搬；
+     * 这里是往报表里塞新 sheet，还得把它们各自的打印设置一起安顿好，两件事不一样。
+     * 调用方改完必须 `sheetRef.reload()` 重挂工作簿（`data` prop 只在挂载时读一次）。
+     *
+     * @param imported 后端解析出来的 content：{ sheets, pageConfig, pageConfigs }
+     * @param mode     `replace` 整个工作簿换掉 / `append` 追加到末尾
+     *
+     * `replace` 会把 `cellConfigs` 整个清掉 —— 版式都换了，老绑定说的是旧坐标，留着就是一堆
+     * 指向别处的配置，空格子上还会凭空多出扩展行带。
+     *
+     * `append` 只往后面加，前面每张的下标纹丝不动，所以不需要搬 key。导入那份的**报表级**打印
+     * 设置落到新 sheet 各自的 `pageConfigs` 上 —— 本报表的报表级设置是老 sheet 在用的，
+     * 不能被导入的那份顶掉。
+     */
+    importSheets(imported, mode = 'replace') {
+      const incoming = normalizeSheets(imported?.sheets)
+      const perSheetIn = imported?.pageConfigs || {}
+      const reportLevelIn = imported?.pageConfig
+
+      if (mode === 'append') {
+        const base = this.content.sheets.length
+        const ids = new Set(this.content.sheets.map((s) => s.id))
+        const names = new Set(this.content.sheets.map((s) => s.name))
+        incoming.forEach((sheet, i) => {
+          const index = base + i
+          sheet.id = uniqueSheetId(ids, index)
+          sheet.name = uniqueSheetName(names, sheet.name || `Sheet${index + 1}`)
+          sheet.order = index
+          sheet.status = 0
+          const own = perSheetIn[String(i)] || reportLevelIn
+          if (own) this.content.pageConfigs[String(index)] = normalizePageConfig(own)
+        })
+        this.content.sheets = [...this.content.sheets, ...incoming]
+      } else {
+        this.content.sheets = incoming
+        this.content.cellConfigs = {}
+        this.content.pageConfig = normalizePageConfig(reportLevelIn)
+        const perSheet = {}
+        Object.entries(perSheetIn).forEach(([i, cfg]) => {
+          perSheet[String(i)] = normalizePageConfig(cfg)
+        })
+        this.content.pageConfigs = perSheet
+        this.sheetIndex = 0
+        this.activeCell = null
+        this.droppedCellConfigs = []
       }
       this.dirty = true
     },

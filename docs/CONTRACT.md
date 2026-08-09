@@ -196,6 +196,7 @@ status / is_default）—— 漏了后者，副本会是一张没有版式的报
 | POST | `/{id}/copy` | `String newId`（版本行、内部数据集整套复制） |
 | POST | `/export` | `["报表id", ...]` → 字节流（一个报表包，一张或多张，见下）。内容是 JSON，但 `Content-Type` 报 `application/octet-stream` —— 前端那道「200 里装着错误结构」的识别只把 json 类型的 blob 读成文本，报成 json 就是每次导出白解码一遍整个包 |
 | POST | `/import` | multipart：`file` = 报表包，`mode` = `skip`\|`overwrite`\|`copy` → `ReportImportResultDTO` |
+| POST | `/parse-excel` | multipart：`file` = `.xlsx` → `{content, warnings}`，**只解析不落库**（见下） |
 
 **报表包（导入导出）** —— 测试环境调好，整包带进正式环境。文件是一份 JSON
 （下载名 `xxx.mzreport.json`），结构见 `dto/ReportPackageDTO`：
@@ -239,6 +240,23 @@ status / is_default）—— 漏了后者，副本会是一张没有版式的报
 `mode`（目标环境已有**同编码**报表时怎么办）：`skip` 跳过 / `overwrite` 覆盖
 （**报表 id 不变** —— 外部系统拿 id 开设计器的链接不能断；版式与内部数据集整套替换，
 包里没有的删掉）/ `copy` 一律新建（编码加 `_import_时间戳` 后缀）。
+
+**导入 Excel 模板**（`/parse-excel`）—— 拿一份现成的 xlsx 当版式起点，省掉照着它重画表头、
+边框、合并、列宽。响应是 `{ content: ReportContent, warnings: ["…"] }`：
+
+- **只解析、不落库**。导入是不可逆的，直接写库会把用户当前的版式冲掉；接口只把 xlsx 翻译成
+  `content` 还给设计器，用户在画布上看过、点「保存」才走 `PUT /api/report` 落到当前版本。
+- **只做静态版式**：带过来的是 §4 里的 `sheets`（值/样式/合并/行高列宽/边框）与
+  `pageConfig`/`pageConfigs`（纸张、页边距、缩放、打印区域、顶端标题行、页眉页脚）。
+  **`cellConfigs` 恒为空** —— 占位符与取数由用户导入之后在设计器里手工配，猜错了让人逐格去拆
+  比自己画还慢。
+- **数值和日期落成文字**（Excel 里显示成什么样就是什么样）：渲染时 `ct` 会被 `CellFormatter`
+  按 cellConfig 重建，模板里带的 `ct.fa` 活不到出纸那一步 —— 照搬「值 + 格式串」的话
+  `1,234.00` 会出成 `1234`、日期会出成序列号。代价是这些格子在导出的 xlsx 里是文本。
+- 带不过来的（水印 —— xlsx 里没有这个概念、条件格式、数据有效性、图片、图表、隐藏 sheet…）
+  逐条写在 `warnings` 里**原样给用户看**，不说清楚就是「导进来不对」的报障。
+- 只收 `.xlsx`；行数/单元格数的闸门用 `muzhou.report.max-rows` / `max-cells`，超了直接报错
+  不许截断。实现见 `export/ExcelImporter`，它是 `ExcelExporter` 的逆映射，两个类必须对着改。
 
 版本（见 §2 `mz_report_version`）：
 
