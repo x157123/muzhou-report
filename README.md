@@ -1,13 +1,34 @@
 # 木舟报表 · MuZhou Report
 
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![CI](https://github.com/x157123/muzhou-report/actions/workflows/ci.yml/badge.svg)](https://github.com/x157123/muzhou-report/actions/workflows/ci.yml)
+[![JDK](https://img.shields.io/badge/JDK-21%2B-orange.svg)](https://adoptium.net/)
+[![Node](https://img.shields.io/badge/Node-18%2B-green.svg)](https://nodejs.org/)
+
 一个开箱即用的**拖拽式报表设计器**。
 用 Excel 一样的方式设计报表：把数据集字段拖到单元格里，运行时自动按行扩展、分组合并、聚合计算，并可导出 Excel / PDF / Word。
+
+**Apache-2.0 许可**：个人与公司都可免费使用、修改、商用与闭源分发，无需付费或授权。
 
 ```
 Vue 3 + Vite + Pinia + FortuneSheet + vuedraggable
         ↕  REST (/api)
 Spring Boot 3 + MyBatis-Plus + Aviator + Dynamic-Datasource
 ```
+
+---
+
+## 长什么样
+
+**报表设计器** —— 左边拖字段，中间像 Excel 一样排版，右边配这个格子怎么取数；
+画布上那条虚线是按当前打印设置算出来的**纸张边界**，所见即所打。
+
+![报表设计器](docs/images/designer.png)
+
+**数据集** —— SQL / HTTP API / 静态 JSON 三种取数方式，一键解析字段、预览数据；
+公共数据集所有报表都能用，内部数据集只属于某一张报表、随它一起复制和删除。
+
+![数据集](docs/images/dataset.png)
 
 ---
 
@@ -311,3 +332,16 @@ FortuneSheet 官方只发布了 `@fortune-sheet/core`（无 UI 内核）和 `@fo
   （导出的 Excel / PDF / Word 都生效，靠的是 Excel 自己的「打印标题行」）。
   只能是表格（或打印区域）最上面的连续若干行。
 - 无用户体系与权限，适合内网 / 二次开发起步。
+
+---
+
+## 许可证
+
+[Apache License 2.0](LICENSE)。
+
+**任何人都可以免费使用，包括公司**：允许商用、修改、再分发，也允许把改动后的版本闭源，
+不要求你公开自己的源码（这一点与 AGPL 类的报表工具不同）。唯一的义务是保留许可证与版权声明
+（见 [NOTICE](NOTICE)）。协议同时包含一份**专利授权**，企业法务评估时通常比 MIT 更省事。
+
+第三方组件各自的许可证见 [NOTICE](NOTICE)。其中 PDF 导出用的 **OpenPDF 是 LGPL-2.1 / MPL-2.0 双许可**，
+本项目以未修改的二进制形式依赖它，不影响你按 Apache-2.0 使用与分发本项目。

@@ -1,10 +1,25 @@
 <!--
   报表设计器：左（数据集面板） / 中（FortuneSheet 工作簿） / 右（单元格属性面板）。
-  顶部工具栏：返回、报表名、保存、预览、导出(Excel/PDF)、参数配置、打印设置、分页线开关、表达式帮助。
+
+  顶部分成两带、底部一条状态栏，**按优先级分层**而不是把八个按钮排成一行：
+    ① 标题栏  —— 导航（返回）、身份（报表名 / 版本）、三个主操作（保存 / 预览 / 导出）。
+                 只有「保存」是 primary，眼睛才有落点。
+    ② 报表工具条 —— 报表专有的那几样（导入 Excel / 参数配置 / 打印设置 / 分页线 / 表达式帮助），
+                 扁平按钮 + 分隔符按语义分组，紧挨着下面 FortuneSheet 自带的排版工具栏，
+                 两条读起来是一套。
+    ③ 状态栏  —— 未保存、页数纸张、超宽/补格提示。这些是**状态与建议**不是命令，
+                 跟「保存」并排长成一个样子最伤专业感，一律沉到底部。
+
+  没有把这几个按钮塞进 FortuneSheet 自己的工具栏（它确实有 customToolbarItems），原因有三：
+  自定义项不参与工具栏的溢出折叠（窄窗口下先被收进「更多」的反而是高频的字体字号），
+  它只给得出图标按钮、承载不了「导出」「版本」这种下拉，
+  且 Toolbar 那层没有把 selected 透传给 CustomButton，「分页线」的高亮开关表达不出来。
+  更要紧的是那条路要在业务代码里写 React 组件，与本项目「业务代码不应出现 React」相悖。
 -->
 <template>
   <div class="report-designer" v-loading="loading">
-    <div class="designer-toolbar">
+    <!-- ① 标题栏：导航 + 身份 + 主操作 -->
+    <div class="designer-titlebar">
       <el-button link :icon="ArrowLeft" @click="goBack">返回</el-button>
 
       <div v-if="!editingName" class="report-name" title="点击修改报表名" @click="startEditName">
@@ -49,7 +64,7 @@
         </template>
       </el-dropdown>
 
-      <el-divider direction="vertical" />
+      <div class="flex-spacer"></div>
 
       <el-button type="primary" :icon="Check" :loading="saving" @click="handleSave">保存</el-button>
       <el-button :icon="View" @click="openPreview">预览</el-button>
@@ -65,49 +80,29 @@
           </el-dropdown-menu>
         </template>
       </el-dropdown>
-      <el-button :icon="Upload" title="拿一份现成的 Excel 当版式起点" @click="excelDialogVisible = true">
+    </div>
+
+    <!-- ② 报表工具条：版式来源 | 报表设置 | 帮助，三组之间用分隔符断开 -->
+    <div class="designer-tools">
+      <el-button text :icon="Upload" title="拿一份现成的 Excel 当版式起点" @click="excelDialogVisible = true">
         导入 Excel
       </el-button>
-      <el-button :icon="Setting" @click="paramDialogVisible = true">参数配置</el-button>
-      <el-button :icon="Printer" @click="printDialogVisible = true">打印设置</el-button>
+      <el-divider direction="vertical" />
+      <el-button text :icon="Setting" @click="paramDialogVisible = true">参数配置</el-button>
+      <el-button text :icon="Printer" @click="printDialogVisible = true">打印设置</el-button>
+      <!-- 开关型按钮：用底色标出「开着」，不切成 primary —— 它跟标题栏的「保存」不是一个量级 -->
       <el-button
+        text
         :icon="Grid"
-        :type="showPrintArea ? 'primary' : ''"
-        :plain="showPrintArea"
+        class="tool-toggle"
+        :class="{ 'is-on': showPrintArea }"
         :title="showPrintArea ? '隐藏分页线' : '显示分页线'"
         @click="togglePrintArea"
       >
         分页线
       </el-button>
-      <el-button :icon="QuestionFilled" @click="helpVisible = true">表达式帮助</el-button>
-
-      <div class="flex-spacer"></div>
-      <el-button
-        v-if="widthOverflow > 1"
-        link
-        type="warning"
-        :title="`列宽之和比 ${pageConfig.paperSize} 可打印宽度多出 ${Math.round(widthOverflow)}px，点击按比例压回一页`"
-        @click="shrinkToPageWidth"
-      >
-        超出纸张宽度 · 压缩到一页宽
-      </el-button>
-      <el-button
-        v-if="showPrintArea && needsGridFill"
-        link
-        type="warning"
-        title="表格比一页还小，纸张边界落在网格之外，补足空行空列后才能显示"
-        @click="ensurePaperVisible"
-      >
-        表格不足一页 · 补足网格
-      </el-button>
-      <span v-if="showPrintArea && pageBreaks.pages" class="page-indicator">
-        {{ pageBreaks.pages }} 页 · {{ pageConfig.paperSize }}
-        {{ pageConfig.orientation === 'landscape' ? '横向' : '纵向' }}
-        <template v-if="store.hasOwnPageConfig"> · 本表单独设置</template>
-      </span>
-      <span class="dirty-indicator" :class="{ dirty: store.dirty }">
-        {{ store.dirty ? '● 未保存' : '已保存' }}
-      </span>
+      <el-divider direction="vertical" />
+      <el-button text :icon="QuestionFilled" @click="helpVisible = true">表达式帮助</el-button>
     </div>
 
     <div class="designer-body">
@@ -172,6 +167,47 @@
         @update="onCellConfigUpdate"
         @clear="onCellConfigClear"
       />
+    </div>
+
+    <!--
+      ③ 状态栏：左边「在哪儿」，右边「怎么样」。
+      两条警告仍然可点（点了就是修复动作），但降到状态栏的量级 —— 它们是提示，不是命令。
+    -->
+    <div class="designer-statusbar">
+      <span class="sb-item">{{ currentSheet?.name || 'Sheet1' }}</span>
+      <!-- 只报坐标，宽高留给右侧属性面板，别两处说同一件事 -->
+      <span v-if="store.activeCell" class="sb-item sb-muted">{{ cellLabel }}</span>
+
+      <div class="flex-spacer"></div>
+
+      <el-button
+        v-if="widthOverflow > 1"
+        link
+        type="warning"
+        class="sb-action"
+        :title="`列宽之和比 ${pageConfig.paperSize} 可打印宽度多出 ${Math.round(widthOverflow)}px，点击按比例压回一页`"
+        @click="shrinkToPageWidth"
+      >
+        超出纸张宽度 · 压缩到一页宽
+      </el-button>
+      <el-button
+        v-if="showPrintArea && needsGridFill"
+        link
+        type="warning"
+        class="sb-action"
+        title="表格比一页还小，纸张边界落在网格之外，补足空行空列后才能显示"
+        @click="ensurePaperVisible"
+      >
+        表格不足一页 · 补足网格
+      </el-button>
+      <span v-if="showPrintArea && pageBreaks.pages" class="sb-item sb-muted">
+        {{ pageBreaks.pages }} 页 · {{ pageConfig.paperSize }}
+        {{ pageConfig.orientation === 'landscape' ? '横向' : '纵向' }}
+        <template v-if="store.hasOwnPageConfig"> · 本表单独设置</template>
+      </span>
+      <span class="sb-item dirty-indicator" :class="{ dirty: store.dirty }">
+        {{ store.dirty ? '● 未保存' : '已保存' }}
+      </span>
     </div>
 
     <ParamConfigDialog v-model="paramDialogVisible" />
@@ -241,6 +277,7 @@ import {
   getCellText,
   replaceToken,
   downloadBlob,
+  toA1,
   DATA_BOUND_TYPES,
   FIELD_DRAG_MIME
 } from '@/utils/sheet'
@@ -994,6 +1031,9 @@ const activeCellSize = computed(() => {
   return cell ? cellSizePx(currentSheet.value, cell.r, cell.c) : null
 })
 
+/** 状态栏左侧的选中格坐标（A1 记法） */
+const cellLabel = computed(() => (store.activeCell ? toA1(store.activeCell.r, store.activeCell.c) : ''))
+
 /**
  * 根据配置把单元格文本同步为对应的占位符（数据/图片/公式/参数），文本类型不覆盖用户手输内容。
  *
@@ -1114,15 +1154,75 @@ async function handleExport(type) {
   overflow: hidden;
 }
 
-.designer-toolbar {
-  height: var(--mz-header-h);
-  min-height: var(--mz-header-h);
+/* ① 标题栏 */
+.designer-titlebar {
+  height: 44px;
+  min-height: 44px;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 16px;
+  padding: 0 12px 0 8px;
   border-bottom: 1px solid var(--mz-border);
   background: #fff;
+}
+
+/*
+  ② 报表工具条：背景与下面 FortuneSheet 自带的工具栏一致（#fff），只用一条细线跟标题栏断开，
+  这样两条工具栏读起来是连续的一块，而不是「又一排按钮」。
+*/
+.designer-tools {
+  height: 36px;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--mz-border);
+  background: #fff;
+}
+.designer-tools :deep(.el-button) {
+  height: 28px;
+  padding: 0 8px;
+  font-size: 13px;
+  color: #4a4f57;
+}
+.designer-tools :deep(.el-button:hover) {
+  background: #f2f3f5;
+  color: #303133;
+}
+.designer-tools :deep(.el-divider--vertical) {
+  height: 16px;
+  margin: 0 6px;
+}
+/* 开关按下的样子：浅色底 + 主色字，比 primary 实心低一个量级 */
+.designer-tools :deep(.tool-toggle.is-on) {
+  background: #ecf5ff;
+  color: var(--mz-primary);
+}
+
+/* ③ 状态栏 */
+.designer-statusbar {
+  height: 24px;
+  min-height: 24px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 12px;
+  border-top: 1px solid var(--mz-border);
+  background: var(--mz-panel-bg);
+  font-size: 12px;
+  color: var(--el-text-color-regular);
+}
+.sb-item {
+  white-space: nowrap;
+}
+.sb-muted {
+  color: var(--el-text-color-secondary);
+}
+.designer-statusbar :deep(.sb-action) {
+  height: 20px;
+  padding: 0;
+  font-size: 12px;
 }
 
 .report-name {
@@ -1160,14 +1260,7 @@ async function handleExport(type) {
   font-size: 12px;
 }
 
-.page-indicator {
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-  margin-right: 12px;
-}
-
 .dirty-indicator {
-  font-size: 12px;
   color: #67c23a;
 }
 .dirty-indicator.dirty {

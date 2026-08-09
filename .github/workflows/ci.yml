@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # 手动触发，方便在 Actions 页面单跑一次
+  workflow_dispatch:
+
+# 同一分支上新的推送把旧的跑批掐掉，别排队浪费 runner
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: 后端 · JDK ${{ matrix.java }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        java: ['21']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+          cache: maven
+
+      # PdfExporterTest 是拿「PDF 真正内嵌的那款字体」的字面宽度做断言的
+      # （见 PdfExporter#growWrapRows），runner 上没有中文字体时会退回 Helvetica，
+      # 破折号这类字符的宽度对不上，那条用例必挂。装的这款正好是
+      # FONT_CANDIDATES 里 Linux 的第一顺位。
+      - name: 装中文字体（PDF 导出要内嵌）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fonts-wqy-microhei
+          ls -l /usr/share/fonts/truetype/wqy/
+
+      - name: 跑测试
+        working-directory: backend
+        run: mvn -B --no-transfer-progress test
+
+      - name: 打包
+        working-directory: backend
+        run: mvn -B --no-transfer-progress -DskipTests package
+
+      - name: 留存测试报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-surefire-reports
+          path: backend/target/surefire-reports/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  frontend:
+    name: 前端 · Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['18', '20']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 装依赖
+        working-directory: frontend
+        run: npm ci
+
+      - name: 构建
+        working-directory: frontend
+        run: npm run build
