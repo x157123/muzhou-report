@@ -1028,7 +1028,7 @@ const cellLabel = computed(() => (store.activeCell ? toA1(store.activeCell.r, st
 /**
  * 根据配置把单元格文本同步为对应的占位符（数据/图片/公式/参数），文本类型不覆盖用户手输内容。
  *
- * 图片格（img / base64）与数据格写的是同一个 `#{code.field}`：格子里那串占位符是「绑定还在」
+ * 图片/条码格（img / base64 / barcode / qrcode）与数据格写的是同一个 `#{code.field}`：格子里那串占位符是「绑定还在」
  * 的凭据，缺了它 `pruneEmptyCellConfigs` 会把这条配置当成「格子已清空」回收掉。
  */
 function syncCellText(r, c, cfg) {

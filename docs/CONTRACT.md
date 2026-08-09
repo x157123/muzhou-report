@@ -345,11 +345,13 @@ status / is_default）—— 漏了后者，副本会是一张没有版式的报
     // key = `${sheetIndex}_${r}_${c}`，sheetIndex 是 sheets 数组的下标，见下方「按下标寻址」
     "0_3_1": {
       "sheetIndex": 0, "r": 3, "c": 1,
-      // data | formula | param | text | img | base64
-      // img / base64 = **图片单元格**：取数方式与 data 完全一样（datasetCode + field + expandType
-      // + groupType），区别只在于取到的值是当图片画还是当文字写。
-      //   img    值是图片地址（http/https）
-      //   base64 值是图片的 base64（带不带 `data:image/png;base64,` 前缀都认）
+      // data | formula | param | text | img | base64 | barcode | qrcode
+      // img / base64 / barcode / qrcode = **图片单元格**：取数方式与 data 完全一样
+      // （datasetCode + field + expandType + groupType），区别只在于取到的值是当图片画还是当文字写。
+      //   img     值是图片地址（http/https）
+      //   base64  值是图片的 base64（带不带 `data:image/png;base64,` 前缀都认）
+      //   barcode 值是要编成一维条形码的那串字，由服务端现画一张 PNG
+      //   qrcode  值是要编成二维码的那串字（支持中文，按 UTF-8 编）
       // 图片**等比例装进单元格并居中**（落在合并区里就按整块装）：宽、高哪个先顶到边就以哪个
       // 为准，另一个方向留白 —— 铺满整格等于把图片拉变形。格子本身不再输出文字
       // ——照常输出的话导出的 Excel 里会写进一长串 base64。
@@ -377,7 +379,17 @@ status / is_default）—— 漏了后者，副本会是一张没有版式的报
       // 换 formatType 时模板一并换成该类型的默认值（utils/sheet.js#defaultFormatPattern）
       // —— 留着上一个类型的模板，界面上看不见、渲染时却在生效。
       "formatPattern": "#,##0.00",
-      "expression": ""            // type=formula 时的 Aviator 表达式
+      "expression": "",           // type=formula 时的 Aviator 表达式
+      // 以下三项只对 barcode / qrcode 有意义（engine/BarcodeGenerator）
+      // 码制，ZXing 的 BarcodeFormat 名。空 = 按类型给默认：barcode → CODE_128，qrcode → QR_CODE。
+      // 设计器给的是一份精选清单：一维 CODE_128 / CODE_39 / CODE_93 / EAN_13 / EAN_8 / UPC_A /
+      // ITF / CODABAR，二维 QR_CODE / DATA_MATRIX / PDF_417 / AZTEC。
+      // **各码制能编什么是有硬限制的**（EAN_13 只收 13 位数字、CODE_39 不认小写），
+      // 编不出来的那一格记一条 warn 后出空白，不让整份渲染失败。
+      "barcodeFormat": "",
+      "qrLevel": "",              // 二维码纠错级别 L/M/Q/H，空按 M。**只有 QR_CODE 收**
+                                  // （Aztec/PDF417 的纠错参数是整数，塞 ErrorCorrectionLevel 会编不出码）
+      "barcodeText": true         // 条形码下方印不印那串原文，默认印；二维码无此概念
     }
   },
   "params": [
@@ -560,6 +572,11 @@ Excel 里那一块；`WordExporter#readPictures` 只取「占了哪几行哪几�
 **别在各条路上再实现一遍「地址怎么变成字节」** —— 那意味着一张图要下载三遍，还会三处不一致。
 只认两点锚定的图片（报表出的都是这种），手工插进 xlsx 的浮动图片不在还原范围内。
 
+**条码不是第四条路**：`barcode` / `qrcode` 的图是**渲染时**就画好的（`engine/BarcodeGenerator`
+把那串字编成 PNG，归一化成一个 `data:` URI 挂到同一个 `v.mzImg.src` 上），
+所以预览、Excel、PDF、Word 拿到的是同一张图，谁也认不出它是画的还是取回来的。
+放到前端画的话导出那头（三条路都在服务端）还得再实现一遍，两份实现迟早对不齐。
+
 图片取不回来时**只跳过这一张并记一条 warn**（导出不中断）。「预览里看得到、导出的文件里没有」
 基本都出在这里：预览是**浏览器**去拉图，导出是**服务端**去拉 —— 服务端可能没有代理
 （JDK 的 HttpClient 默认不走系统代理，所以显式挂了 `ProxySelector.getDefault()`）、
@@ -699,14 +716,15 @@ xlsx 读回来（`getRowBreaks()`），**别在各条路上再造一份**。前�
 `utils/print.js#pageConfigOfResult`），认不到（老结果、手工构造的）才退回下面那条按
 `mzTemplateIndex` 推算的路。
 
-**图片单元格的输出**：`type=img/base64` 的格子在 celldata 里多带一个 `v.mzImg`，
+**图片单元格的输出**：`type=img/base64/barcode/qrcode` 的格子在 celldata 里多带一个 `v.mzImg`，
 它是图片在整条链路上唯一的载体（`v`/`m` 都是空串）：
 
 ```json
 { "r": 3, "c": 1, "v": { "v": "", "m": "", "mzImg": { "src": "https://.../a.png" } } }
 ```
 
-`src` 已经归一化好，可以直接当 `<img src>` 用（`base64` 类型补成了 `data:image/png;base64,...`）。
+`src` 已经归一化好，可以直接当 `<img src>` 用（`base64` 补成了 `data:image/png;base64,...`，
+两种条码是现画的一张 PNG，同样以 `data:` URI 给出）。
 FortuneSheet 的单元格画不了图片，所以**前端要把它摊成浮动图片**（`sheet.images`，坐标由行高列宽
 累加得到，框就是该格/该合并块），见 `utils/cellImage.js#applyCellImages` ——
 图片在这个框里**等比例居中**是靠一条全局 CSS（`styles/index.css` 里给

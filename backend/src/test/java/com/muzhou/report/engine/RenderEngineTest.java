@@ -17,6 +17,8 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -371,7 +373,7 @@ class RenderEngineTest {
         assertEquals("王五（B）", grid.get(1, 0).getDisplay());
     }
 
-    /* ------------------------- 图片单元格（img / base64） ------------------------- */
+    /* ------------- 图片单元格（img / base64 / barcode / qrcode） ------------- */
 
     /** 图片格的配置：取数部分与数据格一模一样，只有 type 不同。 */
     private CellConfigDTO imageCfg(String type, String field, String expandType) {
@@ -428,6 +430,38 @@ class RenderEngineTest {
         // 值为空的格子不出图片，也不该留下一个空 data URI
         RenderGrid blank = renderRow(List.of(picRow("张三", "")), cfgs, "#{emp.pic}");
         assertNull(blank.get(0, 0).getImage());
+    }
+
+    @Test
+    @DisplayName("type=qrcode/barcode：值当条码现画一张图挂到 image 上，取数与扩展跟 img 一模一样")
+    void barcodeCellExpandsAndCarriesGeneratedImage() {
+        Map<String, CellConfigDTO> cfgs = new LinkedHashMap<>();
+        cfgs.put("0_0_0", imageCfg("qrcode", "pic", "down"));
+        RenderGrid grid = renderRow(
+                List.of(picRow("张三", "MZ-0001"), picRow("李四", "MZ-0002")),
+                cfgs, "#{emp.pic}");
+
+        // 两行数据展开成两行，每行按自己的那串字画了一张码（内容不同，图也不同）
+        assertTrue(grid.get(0, 0).getImage().startsWith("data:image/png;base64,"));
+        assertTrue(grid.get(1, 0).getImage().startsWith("data:image/png;base64,"));
+        assertNotEquals(grid.get(0, 0).getImage(), grid.get(1, 0).getImage());
+        // 与别的图片格一样，格子本身不出文字
+        assertEquals("", grid.get(0, 0).getDisplay());
+        assertEquals("", grid.get(0, 0).getValue());
+        // 载体仍是 v.mzImg.src —— 前端预览与三条导出路认不出这张图是画的还是取回来的
+        Object mzImg = grid.get(0, 0).toCellValue().get("mzImg");
+        assertTrue(String.valueOf(((Map<?, ?>) mzImg).get("src")).startsWith("data:image/png;base64,"));
+
+        // 编不出码的那一格出空白，不影响同一行带里的其它数据
+        Map<String, CellConfigDTO> ean = new LinkedHashMap<>();
+        CellConfigDTO cfg = imageCfg("barcode", "pic", "down");
+        cfg.setBarcodeFormat("EAN_13");
+        ean.put("0_0_0", cfg);
+        RenderGrid mixed = renderRow(
+                List.of(picRow("张三", "6901234567892"), picRow("李四", "位数不够")),
+                ean, "#{emp.pic}");
+        assertNotNull(mixed.get(0, 0).getImage());
+        assertNull(mixed.get(1, 0).getImage());
     }
 
     @Test

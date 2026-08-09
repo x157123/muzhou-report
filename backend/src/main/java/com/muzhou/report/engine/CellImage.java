@@ -1,10 +1,13 @@
 package com.muzhou.report.engine;
 
+import com.muzhou.report.dto.CellConfigDTO;
+
 /**
- * 图片单元格（{@code type=img} / {@code type=base64}）的取值归一化。
+ * 图片单元格（{@code img} / {@code base64} / {@code barcode} / {@code qrcode}）的取值归一化。
  *
- * <p>两种类型的差别只在数据长什么样：{@code img} 拿到的是一个地址，{@code base64} 拿到的是
- * 图片本身的 base64 编码。归一化之后都变成「一个能直接当 {@code <img src>} 用的串」——
+ * <p>几种类型的差别只在数据长什么样：{@code img} 拿到的是一个地址，{@code base64} 拿到的是
+ * 图片本身的 base64 编码，两种条码拿到的是要编成码的那串字（现画一张 PNG，见
+ * {@link BarcodeGenerator}）。归一化之后都变成「一个能直接当 {@code <img src>} 用的串」——
  * 前端预览直接挂上去，导出那头（{@code export/ImageLoader}）再按它取字节。
  *
  * <p>base64 一律补成 data URI：光有一串 base64 浏览器认不出来，而 MIME 类型只能从头几个字节
@@ -25,6 +28,23 @@ public final class CellImage {
             {"PHN2Zw", "image/svg+xml"},
             {"PD94bWw", "image/svg+xml"},
     };
+
+    /**
+     * 把单元格取到的值变成图片地址。
+     *
+     * <p>条码要按配置出图（码制/纠错级别/印不印文字都在 cfg 里），所以走这个入口而不是下面
+     * 那个只认类型的重载。
+     *
+     * @param cfg   单元格配置
+     * @param value 取到的字段值
+     * @return 图片地址；值为空、或不像图片/编不出码时返回 null（该格就当普通空格子处理）
+     */
+    public static String src(CellConfigDTO cfg, Object value) {
+        if (cfg == null) {
+            return null;
+        }
+        return cfg.isBarcode() ? BarcodeGenerator.dataUri(cfg, value) : src(cfg.getType(), value);
+    }
 
     /**
      * 把单元格取到的值变成图片地址。

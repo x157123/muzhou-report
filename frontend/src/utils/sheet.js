@@ -166,8 +166,8 @@ export function parseFieldToken(text) {
   return m ? { datasetCode: m[1], field: m[2] } : null
 }
 
-/** 值来自单元格里那串占位符（`#{}` / `!{}` / `${}`）的配置类型（img/base64 的绑定写法同 data） */
-const BOUND_TYPES = new Set(['data', 'formula', 'param', 'img', 'base64'])
+/** 值来自单元格里那串占位符（`#{}` / `!{}` / `${}`）的配置类型（图片/条码格的绑定写法同 data） */
+const BOUND_TYPES = new Set(['data', 'formula', 'param', 'img', 'base64', 'barcode', 'qrcode'])
 
 const isBlankValue = (x) => x === null || x === undefined || String(x) === ''
 
@@ -470,8 +470,9 @@ export function downloadBlob(blob, filename) {
 /**
  * 单元格类型，见 CONTRACT §4。
  *
- * `img` / `base64` 的取数配置与 `data` 完全一样（数据集 + 字段 + 扩展方式），
- * 区别只在于取到的值是当图片画还是当文字写；图片按格子的宽高铺满。
+ * `img` / `base64` / `barcode` / `qrcode` 的取数配置与 `data` 完全一样（数据集 + 字段 + 扩展方式），
+ * 区别只在于取到的值是当图片画还是当文字写：地址去下载、base64 直接解、条码则拿那串字现编成一张图。
+ * 四者都等比例装进格子并居中。
  */
 export const CELL_TYPES = [
   { label: '文本', value: 'text' },
@@ -479,14 +480,52 @@ export const CELL_TYPES = [
   { label: '公式', value: 'formula' },
   { label: '参数', value: 'param' },
   { label: '图片（地址）', value: 'img' },
-  { label: '图片（Base64）', value: 'base64' }
+  { label: '图片（Base64）', value: 'base64' },
+  { label: '条形码', value: 'barcode' },
+  { label: '二维码', value: 'qrcode' }
 ]
 
-/** 值当图片渲染的单元格类型 */
-export const IMAGE_TYPES = ['img', 'base64']
+/** 值当条码画的单元格类型（值是要编成码的那串字，后端出图） */
+export const BARCODE_TYPES = ['barcode', 'qrcode']
 
-/** 按数据集字段取值的单元格类型（data 与两种图片类型的取数配置一致） */
+/** 值当图片渲染的单元格类型 */
+export const IMAGE_TYPES = ['img', 'base64', ...BARCODE_TYPES]
+
+/** 按数据集字段取值的单元格类型（data 与几种图片类型的取数配置一致） */
 export const DATA_BOUND_TYPES = ['data', ...IMAGE_TYPES]
+
+/**
+ * 一维条形码的码制。名字是 ZXing 的 `BarcodeFormat`，后端照着它出图。
+ *
+ * 各码制能编什么是**有硬限制**的（EAN_13 只收 13 位数字、CODE_39 不认小写字母…），
+ * 编不出来的那一格后端记 warn 后当空格处理，不会让整份渲染失败。
+ */
+export const BARCODE_FORMATS = [
+  { label: 'Code 128（字母数字，默认）', value: 'CODE_128' },
+  { label: 'Code 39（大写字母 + 数字）', value: 'CODE_39' },
+  { label: 'Code 93', value: 'CODE_93' },
+  { label: 'EAN-13（13 位数字，商品条码）', value: 'EAN_13' },
+  { label: 'EAN-8（8 位数字）', value: 'EAN_8' },
+  { label: 'UPC-A（12 位数字）', value: 'UPC_A' },
+  { label: 'ITF（偶数位数字）', value: 'ITF' },
+  { label: 'Codabar', value: 'CODABAR' }
+]
+
+/** 二维码的码制 */
+export const QRCODE_FORMATS = [
+  { label: 'QR Code（默认）', value: 'QR_CODE' },
+  { label: 'DataMatrix（小面积）', value: 'DATA_MATRIX' },
+  { label: 'PDF417（长条形）', value: 'PDF_417' },
+  { label: 'Aztec', value: 'AZTEC' }
+]
+
+/** 二维码纠错级别：越高越抗污损，同样面积能编的内容越少 */
+export const QR_LEVELS = [
+  { label: 'L　低（约 7%）', value: 'L' },
+  { label: 'M　中（约 15%，默认）', value: 'M' },
+  { label: 'Q　较高（约 25%）', value: 'Q' },
+  { label: 'H　高（约 30%）', value: 'H' }
+]
 
 export const EXPAND_TYPES = [
   { label: '不扩展', value: 'none' },

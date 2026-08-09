@@ -188,7 +188,7 @@ public class ExpandProcessor {
             return aggregate(cfg, datasets);
         }
 
-        // 图片单元格（img / base64）取值方式与 data 完全一致，区别只在 buildCell 里当图片画
+        // 图片单元格（img / base64 / barcode / qrcode）取值方式与 data 完全一致，区别只在 buildCell 里当图片画
         if (cfg.isDataBound() && notBlank(cfg.getField())) {
             if (rowData != null) {
                 return rowData.get(cfg.getField());
@@ -353,10 +353,10 @@ public class ExpandProcessor {
         if (tc.getStyle() != null && !tc.getStyle().isEmpty()) {
             cell.setStyle(new LinkedHashMap<>(tc.getStyle()));
         }
-        // 图片单元格：值是图片地址/base64，格子本身不出文字 —— 照常输出的话，导出的 Excel 里
-        // 会写进一长串 base64，预览里也是图片下面压着一行乱码
+        // 图片单元格：值是图片地址/base64/要编成条码的那串字，格子本身不出文字 —— 照常输出的话，
+        // 导出的 Excel 里会写进一长串 base64，预览里也是图片下面压着一行乱码
         if (cfg != null && cfg.isImage()) {
-            cell.setImage(CellImage.src(cfg.getType(), value));
+            cell.setImage(CellImage.src(cfg, value));
             cell.setValue("");
             cell.setDisplay("");
             cell.setCt(formatter.format("", null).ct());
@@ -375,7 +375,7 @@ public class ExpandProcessor {
     /**
      * 行带内的分组合并：groupType=group 的列，纵向相邻且值相等的单元格合并成一格。
      *
-     * <p>只对 {@code data} 类型生效。图片单元格（img / base64）的值已经被清空成文字空串
+     * <p>只对 {@code data} 类型生效。图片单元格（img / base64 / barcode / qrcode）的值已经被清空成文字空串
      * （图片走 {@code GridCell#image}），按值比对会把整列判成「全都一样」合并成一格。
      */
     private void applyGroupMerge(RenderGrid grid, List<TemplateCell> cells, int bandStart, int n) {

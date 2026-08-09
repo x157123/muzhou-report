@@ -25,6 +25,7 @@
         <poi.version>5.3.0</poi.version>
         <hutool.version>5.8.32</hutool.version>
         <openpdf.version>3.0.5</openpdf.version>
+        <zxing.version>3.5.3</zxing.version>
     </properties>
 
     <dependencies>
@@ -77,6 +78,17 @@
             <groupId>com.github.librepdf</groupId>
             <artifactId>openpdf</artifactId>
             <version>${openpdf.version}</version>
+        </dependency>
+
+        <!--
+            条形码 / 二维码：ZXing 只取 core（纯 Java，Apache 2.0，无传递依赖）。
+            官方另有 javase 模块，但它只多一个「点阵转 BufferedImage」的工具类
+            （BarcodeGenerator 自己画了，还要顺带管文字），不值得把 jcommander 那串也拖进来。
+        -->
+        <dependency>
+            <groupId>com.google.zxing</groupId>
+            <artifactId>core</artifactId>
+            <version>${zxing.version}</version>
         </dependency>
 
         <dependency>

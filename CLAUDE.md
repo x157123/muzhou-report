@@ -54,13 +54,22 @@ npm run build
   由 `ExpandProcessor#applyMergeMarkers` 按结果重建，模板里那份是模板坐标、不能沿用
   （所以 `TemplateParser` 把 `mc` 挡在样式外面）。
 - `aggregate != none` 的单元格**不参与扩展**，在整个数据集上求一个值。
-- **图片单元格**（`type=img` 值是地址 / `type=base64` 值是 base64）的取数与扩展跟 `data` 一模一样，
+- **图片单元格**（`type=img` 值是地址 / `base64` 值是 base64 / `barcode`、`qrcode` 值是要编成码的
+  那串字）的取数与扩展跟 `data` 一模一样，
   所以引擎里判的是 `CellConfigDTO#isDataBound()` 而不是 `"data".equals(type)`；区别只在 `buildCell`：
   值归一化成一个 src 挂到 `GridCell#image`（输出成 `v.mzImg.src`），**文字置空**
   ——不置空的话导出的 Excel 里会写进一长串 base64。图片**等比例装进**格子（合并区则整块）并居中，
   **不铺满**——格子的宽高比几乎不可能等于图片的，铺满就是把图片拉变形。这条规则在
   `export/ImageFit#contain` 一处，三条输出路共用；预览那边靠 `object-fit: contain`（见下）。
   分组合并只对 `data` 生效：图片格的值已经是空串，按值比对会把整列合成一格。
+- **条码（`barcode` / `qrcode`）是 base64 图片格的延长线，不是第四条导出路**：
+  `engine/BarcodeGenerator`（ZXing core，纯 Java）在**渲染时**把那串字编成 PNG、归一化成
+  `data:` URI 交回 `CellImage`，于是预览、Excel、PDF、Word 拿到的是同一张图，下游一处都不用改。
+  放到前端画的话导出那三条路（都在服务端）还得再实现一遍，两份实现迟早对不齐。
+  两个容易踩的点：① **`ERROR_CORRECTION` 这个 hint 各家写法不通用** —— 只有 `QRCodeWriter` 收
+  `ErrorCorrectionLevel`，Aztec / PDF417 收的是整数，一律塞进去它们会在 `Integer.parseInt("M")`
+  上抛出来；② **编不出码只让这一格出空白并记 warn**（EAN_13 只收 13 位数字、CODE_39 不认小写），
+  500 行里有一条脏数据就整份渲染失败没法交代 —— 同 `ImageLoader` 对坏图链的态度。
 - 公式两条路：`!{}` 走 Aviator（`FormulaEvaluator` + `GridFunctions`，区间函数在**渲染后的网格**上求值），
   `=` 原生公式只做 A1 引用偏移（`A1RefUtils`）后交给 FortuneSheet 前端算。
 - `RenderServiceImpl` 手写构造器而非 `@RequiredArgsConstructor`：容器里有两个 `ObjectMapper`，

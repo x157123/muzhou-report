@@ -16,19 +16,15 @@
           <el-select
             :model-value="config?.type || 'text'"
             style="width: 100%"
-            @change="onChange('type', $event)"
+            @change="onTypeChange"
           >
             <el-option v-for="t in CELL_TYPES" :key="t.value" :label="t.label" :value="t.value" />
           </el-select>
         </el-form-item>
 
-        <!-- 图片单元格取数方式与数据格完全一致，只是取到的值当图片画 -->
+        <!-- 图片/条码单元格取数方式与数据格完全一致，只是取到的值当图片画 -->
         <div v-if="isImage" class="text-muted type-hint">
-          {{
-            config?.type === 'img'
-              ? '字段值是图片地址（http/https）。导出时由服务端去下载，内网地址要服务器也能访问'
-              : '字段值是图片的 Base64（带不带 data: 前缀都行）'
-          }}<br />
+          {{ typeHint }}<br />
           图片等比例装进格子并居中（不拉伸），要显示得更大就拖高这一行或合并几格
         </div>
 
@@ -80,6 +76,39 @@
             <el-select :model-value="config?.aggregate" style="width: 100%" @change="onChange('aggregate', $event)">
               <el-option v-for="t in AGGREGATES" :key="t.value" :label="t.label" :value="t.value" />
             </el-select>
+          </el-form-item>
+        </template>
+
+        <!-- 条码由服务端出图，预览与导出的三种格式看到的是同一张 -->
+        <template v-if="isBarcode">
+          <el-form-item label="码制">
+            <el-select
+              :model-value="config?.barcodeFormat || defaultBarcodeFormat"
+              style="width: 100%"
+              @change="onChange('barcodeFormat', $event)"
+            >
+              <el-option
+                v-for="f in barcodeFormats"
+                :key="f.value"
+                :label="f.label"
+                :value="f.value"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item v-if="isQrLevel" label="纠错级别">
+            <el-select
+              :model-value="config?.qrLevel || 'M'"
+              style="width: 100%"
+              @change="onChange('qrLevel', $event)"
+            >
+              <el-option v-for="l in QR_LEVELS" :key="l.value" :label="l.label" :value="l.value" />
+            </el-select>
+          </el-form-item>
+          <el-form-item v-if="config?.type === 'barcode'" label="条码下方印出原文">
+            <el-switch
+              :model-value="config?.barcodeText !== false"
+              @change="onChange('barcodeText', $event)"
+            />
           </el-form-item>
         </template>
 
@@ -187,6 +216,10 @@ import {
   CELL_TYPES,
   DATA_BOUND_TYPES,
   IMAGE_TYPES,
+  BARCODE_TYPES,
+  BARCODE_FORMATS,
+  QRCODE_FORMATS,
+  QR_LEVELS,
   EXPAND_TYPES,
   AGGREGATES,
   GROUP_TYPES,
@@ -213,10 +246,32 @@ const emit = defineEmits(['update', 'clear'])
 
 const coordText = computed(() => (props.cell ? toA1(props.cell.r, props.cell.c) : ''))
 
-/** 值当图片渲染（img / base64）：没有格式化、没有汇总 */
+/** 值当图片渲染（img / base64 / barcode / qrcode）：没有格式化、没有汇总 */
 const isImage = computed(() => IMAGE_TYPES.includes(props.config?.type))
-/** 按数据集字段取值：数据格与两种图片格共用同一套绑定配置 */
+/** 值是要编成码的那串字（后端出图） */
+const isBarcode = computed(() => BARCODE_TYPES.includes(props.config?.type))
+/** 按数据集字段取值：数据格与几种图片格共用同一套绑定配置 */
 const isDataBound = computed(() => DATA_BOUND_TYPES.includes(props.config?.type))
+
+const TYPE_HINTS = {
+  img: '字段值是图片地址（http/https）。导出时由服务端去下载，内网地址要服务器也能访问',
+  base64: '字段值是图片的 Base64（带不带 data: 前缀都行）',
+  barcode: '字段值就是要编进条码的那串字。编不出来（位数/字符不合码制）的那一格出空白，不影响其它格',
+  qrcode: '字段值就是要编进二维码的那串字，支持中文。内容越长码越密，扫码距离越近'
+}
+const typeHint = computed(() => TYPE_HINTS[props.config?.type] || '')
+
+const barcodeFormats = computed(() =>
+  props.config?.type === 'qrcode' ? QRCODE_FORMATS : BARCODE_FORMATS
+)
+const defaultBarcodeFormat = computed(() =>
+  props.config?.type === 'qrcode' ? 'QR_CODE' : 'CODE_128'
+)
+/** 纠错级别只有 QR 收：Aztec / PDF417 的「纠错」是另一套取值，DataMatrix 压根不给配 */
+const isQrLevel = computed(
+  () =>
+    props.config?.type === 'qrcode' && (props.config?.barcodeFormat || 'QR_CODE') === 'QR_CODE'
+)
 
 const currentFields = computed(() => {
   const ds = props.datasets.find((d) => d.code === props.config?.datasetCode)
@@ -229,6 +284,22 @@ const isChineseUpper = computed(() => props.config?.formatPattern === CN_UPPER_P
 
 function onChange(field, value) {
   emit('update', { [field]: value })
+}
+
+/**
+ * 换单元格类型时，把不属于新类型的码制一并清掉。
+ *
+ * 条形码与二维码各有一套码制名，留着 `CODE_128` 切到二维码就是「下拉框空着、后端照旧出一维码」。
+ * 清成空串而不是填上新默认值 —— 空串的语义就是「按类型给默认」（见 CellConfigDTO#barcodeFormat）。
+ */
+function onTypeChange(value) {
+  const patch = { type: value }
+  const formats = value === 'qrcode' ? QRCODE_FORMATS : BARCODE_FORMATS
+  const current = props.config?.barcodeFormat
+  if (current && !formats.some((f) => f.value === current)) {
+    patch.barcodeFormat = ''
+  }
+  emit('update', patch)
 }
 
 /** 换格式化类型时模板一起换成该类型的默认值，见 utils/sheet.js#defaultFormatPattern */

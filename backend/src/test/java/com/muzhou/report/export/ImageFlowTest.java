@@ -42,6 +42,16 @@ class ImageFlowTest {
 
     /** 三行数据，每行一张图（base64 裸串，由引擎补成 data URI）。 */
     private RenderResultDTO render() {
+        return render("base64", TestImages.PNG_1X1);
+    }
+
+    /**
+     * 三行数据，每行一张图。
+     *
+     * @param type 图片格的类型（base64 / barcode / …）
+     * @param pic  字段值；条码格给的是要编成码的那串字，后端现画一张 PNG
+     */
+    private RenderResultDTO render(String type, String pic) {
         TemplateParser parser = new TemplateParser();
         CellFormatter formatter = new CellFormatter();
         FormulaEvaluator evaluator = new FormulaEvaluator();
@@ -53,14 +63,15 @@ class ImageFlowTest {
         for (int i = 1; i <= 3; i++) {
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("name", "产品" + i);
-            row.put("pic", TestImages.PNG_1X1);
+            // 条码格每行给一串不同的字，才看得出「每行画的是自己那张码」
+            row.put("pic", "base64".equals(type) ? pic : pic + i);
             rows.add(row);
         }
-        return engine.render(content(), Map.of(), (code, params) -> rows);
+        return engine.render(content(type), Map.of(), (code, params) -> rows);
     }
 
     /** 模板：第 0 行表头，第 1 行是「名称 + 图片」的数据行带。 */
-    private ReportContentDTO content() {
+    private ReportContentDTO content(String type) {
         Map<String, Object> sheet = new LinkedHashMap<>();
         sheet.put("name", "产品图册");
         sheet.put("id", "sheet_1");
@@ -77,7 +88,7 @@ class ImageFlowTest {
         name.setExpandType("down");
 
         CellConfigDTO pic = new CellConfigDTO();
-        pic.setType("base64");
+        pic.setType(type);
         pic.setDatasetCode("goods");
         pic.setField("pic");
         pic.setExpandType("down");
@@ -134,6 +145,18 @@ class ImageFlowTest {
                     .mapToLong(run -> run.getEmbeddedPictures().size())
                     .sum();
             assertEquals(3, refs, "3 行数据该在 Word 的表格里出 3 处图片");
+        }
+    }
+
+    @Test
+    @DisplayName("条码格走的是同一条路：现画的那张 PNG 照样锚进 xlsx，每行各一张")
+    void barcodesReachXlsxThroughTheSamePipe() throws Exception {
+        byte[] xlsx = excel.export(render("barcode", "MZ-000").getSheets(), new PageConfigDTO());
+
+        try (XSSFWorkbook wb = new XSSFWorkbook(new ByteArrayInputStream(xlsx))) {
+            assertEquals(3, wb.getSheetAt(0).getDrawingPatriarch().getShapes().size(), "3 行数据该出 3 张码");
+            // 每行的单号不同 => 画出来的码也不同，不该被 POI 按内容去重成一张
+            assertEquals(3, wb.getAllPictures().size(), "每行该是自己那张码");
         }
     }
 }
