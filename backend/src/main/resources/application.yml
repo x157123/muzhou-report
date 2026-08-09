@@ -26,6 +26,7 @@ spring:
         - classpath:db/mz_dataset_field.sql
         - classpath:db/mz_dataset_param.sql
         - classpath:db/mz_datasource.sql
+        - classpath:db/mz_param.sql
         - classpath:db/mz_report.sql
         - classpath:db/order_items.sql
         - classpath:db/order_shipments.sql

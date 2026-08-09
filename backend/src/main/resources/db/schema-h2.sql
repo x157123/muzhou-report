@@ -150,6 +150,33 @@ CREATE UNIQUE INDEX IF NOT EXISTS uk_version_report_no ON public.mz_report_versi
 CREATE INDEX IF NOT EXISTS idx_version_report ON public.mz_report_version (report_id);
 
 
+-- public.mz_param 定义
+--
+-- 全局参数：一份系统级的参数定义，所有报表共用（见 CONTRACT §2 mz_param / §3.5）。
+-- 列名跟 mz_dataset_param 一套（param_name/param_text/param_type）而不是 name/text/type，
+-- text 在几种数据库里是类型名，当列名要处处加引号。
+
+CREATE TABLE IF NOT EXISTS public.mz_param (
+                                  id character varying(32) NOT NULL,
+                                  param_name character varying(64) NOT NULL,
+                                  param_text character varying(128),
+                                  param_type character varying(20) DEFAULT 'string',
+                                  widget character varying(20) DEFAULT 'input',
+                                  default_value character varying(500),
+                                  required integer DEFAULT 0,
+                                  options character varying(2000),
+                                  remark character varying(500),
+                                  status integer DEFAULT 1,
+                                  deleted integer DEFAULT 0,
+                                  create_time timestamp,
+                                  update_time timestamp
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "PRIMARY_KEY_MP" ON public.mz_param (id);
+-- 逻辑删除不会把行删掉，所以这个唯一索引连已删参数一起管着 ——
+-- 删掉再建同名参数会撞唯一键，新建/改名前先物理清掉同名的已删除行（MzParamMapper#purgeDeletedByName）
+CREATE UNIQUE INDEX IF NOT EXISTS uk_param_name ON public.mz_param (param_name);
+
+
 -- public.order_items 定义
 
 -- Drop table

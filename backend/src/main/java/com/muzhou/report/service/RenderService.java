@@ -37,7 +37,8 @@ public interface RenderService {
                             String versionId);
 
     /**
-     * 查询报表定义的参数列表（供前端渲染参数表单）。取的是**默认版本**的那份参数定义。
+     * 查询报表的参数列表（供前端渲染参数表单）：**全局参数**（{@code mz_param}）与**默认版本**的
+     * 报表参数合并后的那一份，同名时报表那条整条覆盖全局那条（见 CONTRACT §5）。
      */
     List<ReportParamDTO> listParams(String reportId);
 

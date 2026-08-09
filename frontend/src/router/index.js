@@ -23,6 +23,13 @@ const routes = [
         name: 'DatasourceList',
         component: () => import('@/views/datasource/DatasourceList.vue'),
         meta: { title: '数据源', icon: 'Connection' }
+      },
+      {
+        // 全局参数：所有报表共用的一份参数定义，见 CONTRACT §3.5
+        path: 'param',
+        name: 'ParamList',
+        component: () => import('@/views/param/ParamList.vue'),
+        meta: { title: '参数管理', icon: 'Key' }
       }
     ]
   },

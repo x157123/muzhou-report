@@ -10,7 +10,7 @@
   这里只做换算与绘制，因此位置与 FortuneSheet 自身的绘制完全一致。
 -->
 <template>
-  <div v-if="visible" class="print-overlay" :style="overlayStyle">
+  <div class="print-overlay" :style="overlayStyle">
     <div v-for="(line, i) in lines" :key="i" :class="line.cls" :style="line.style">
       <span v-if="line.label" class="print-overlay-label">{{ line.label }}</span>
     </div>
@@ -22,7 +22,6 @@
 import { computed } from 'vue'
 
 const props = defineProps({
-  visible: { type: Boolean, default: true },
   /** FortuneSheet 画布相对其容器的位置尺寸 */
   rect: { type: Object, default: () => ({ left: 0, top: 0, width: 0, height: 0 }) },
   /** computePageBreaks 的结果 */

@@ -94,13 +94,6 @@
               {{ titleRowFirst }} 行起。
             </div>
           </el-form-item>
-
-          <el-divider style="margin: 4px 0 12px" />
-
-          <el-form-item label="画布显示">
-            <el-switch :model-value="showOverlay" @update:model-value="$emit('update:showOverlay', $event)" />
-            <span class="text-muted" style="margin-left: 8px">在设计器画布上显示分页线与打印区域</span>
-          </el-form-item>
         </el-form>
       </el-tab-pane>
 
@@ -405,14 +398,12 @@ import { versionIntervals, intervalText } from '@/utils/version'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
-  /** 画布分页线开关（由设计器持有） */
-  showOverlay: { type: Boolean, default: true },
   /** 取当前选区：() => {r1,c1,r2,c2} | null */
   getSelection: { type: Function, default: null },
   /** 当前正在设计的 sheet，用于估算页数 */
   sheet: { type: Object, default: null }
 })
-const emit = defineEmits(['update:modelValue', 'update:showOverlay', 'applied'])
+const emit = defineEmits(['update:modelValue', 'applied'])
 
 /** 页头页尾的三段 */
 const SECTIONS = [

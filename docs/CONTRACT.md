@@ -83,6 +83,32 @@ muzhou-report/
 ### mz_dataset_param
 `id, dataset_id, param_name, param_text, param_type(string|number|date|boolean), default_value, required(int), sort_no`
 
+### mz_param
+
+**全局参数**：一份系统级的参数定义，所有报表共用，在「参数管理」页维护。
+
+| 列 | 类型 | 说明 |
+|---|---|---|
+| id | varchar(32) PK | |
+| param_name | varchar(64) | 参数名，单元格里写 `${param_name}`；**全局唯一**（`uk_param_name(param_name)`） |
+| param_text | varchar(128) | 显示名 |
+| param_type | varchar(20) | string / number / date / boolean |
+| widget | varchar(20) | input / number / date / daterange / select |
+| default_value | varchar(500) | |
+| required | int | 1 必填。缺值时渲染直接报错，与报表参数同一条规则 |
+| options | varchar(2000) | 下拉选项 JSON 数组 `[{value,label}]`，`widget=select` 时用 |
+| remark | varchar(500) | |
+| status | int | 1 启用 0 停用。**停用 = 不参与合并**，等于这个参数不存在 |
+| deleted / create_time / update_time | | |
+
+列名跟 `mz_dataset_param` 一套（`param_name/param_text/param_type`）而不是 `name/text/type`：
+`text` 在几种数据库里是类型名，当列名要处处加引号。转成接口上的 `ReportParam`（§4）时改回 `name/text/type`。
+
+**唯一索引不带 `deleted` 条件**，所以删掉再建同名参数会撞唯一键 —— 新建/改名前先物理清掉同名的
+已删除行（`MzParamMapper#purgeDeletedByName`），与 `uk_dataset_code_scope` 那处是同一个坑。
+
+参数值怎么跟报表参数合并、谁覆盖谁，见 §5「参数值从哪来」。
+
 ### mz_report
 `id, name, code(unique), type(默认 'sheet'), content(clob/longtext), version_config(varchar(500)), remark, status, create_by, create_time, update_time`
 
@@ -272,7 +298,7 @@ status / is_default）—— 漏了后者，副本会是一张没有版式的报
 ### 3.4 渲染 `/api/render`
 | POST | `/report/{id}` | `{params:{k:v}, versionId?}` → `RenderResult`（`params` 里的 `pageNo`/`pageSize` 驱动主接口翻页，见 §5） |
 | POST | `/preview` | `{reportId, content:ReportContent, params:{}, versionId?}` → `RenderResult`（设计器免保存预览；`reportId` 用于解析该报表的内部数据集，见 §3.2。**不走版本选择** —— 渲染的就是请求里这份 content，`versionId` 只原样回显） |
-| GET | `/report/{id}/params` | `List<ReportParam>`（**默认版本**的参数定义） |
+| GET | `/report/{id}/params` | `List<ReportParam>`（全局参数 + **默认版本**的报表参数，已按 §5 合并去重；参数表单照这份渲染） |
 | POST | `/report/{id}/export/excel` | `{params:{}, versionId?}` → `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` 字节流 |
 | POST | `/report/{id}/export/pdf` | `{params:{}, sheetIndex?, versionId?}` → `application/pdf` 字节流（后端先出 xlsx 再转 PDF，页面设置同 Excel 导出）。`sheetIndex` = 只出**渲染结果**里的第几张 sheet，省略/越界 = 整本；预览页的「打印」打的就是这份 PDF，见 §7 |
 | POST | `/report/{id}/export/word` | `{params:{}, versionId?}` → `application/vnd.openxmlformats-officedocument.wordprocessingml.document` 字节流（同样先出 xlsx 再转，版式与 PDF 一致） |
@@ -288,6 +314,23 @@ status / is_default）—— 漏了后者，副本会是一张没有版式的报
 
 > 导出接口失败时返回的仍是 HTTP 200 + `Result`（JSON），只是 `Content-Type` 为 `application/json`；
 > 前端按 blob 收流，需识别出这种「200 里装着错误结构」的情况，否则会把错误 JSON 当文件下载。
+
+### 3.5 全局参数 `/api/param`
+
+系统级参数定义（表 `mz_param`），所有报表共用。参数**不属于任何一张报表**，
+所以这里是纯 CRUD，没有 `reportId` 这一维。
+
+| 方法 | 路径 | 入参 | 出参 |
+|---|---|---|---|
+| GET | `/page?pageNo&pageSize&name` | | `PageResult<MzParam>`（`name` 按参数名/显示名模糊匹配） |
+| GET | `/list` | | `List<MzParam>`（**只返回启用的**，按参数名排序） |
+| GET | `/{id}` | | `MzParam` |
+| POST | `` | MzParam | `String id` |
+| PUT | `` | MzParam | `Boolean` |
+| DELETE | `/{id}` | | `Boolean` |
+
+参数名重复、为空、或不合 `[A-Za-z_][A-Za-z0-9_]*` 一律 `BizException` 拦下 ——
+它要进 SQL 的 `${}` 与接口地址，名字随便起会在取数那头才炸。
 
 ## 4. 报表内容 JSON（`mz_report.content`）
 
@@ -698,11 +741,21 @@ api 类型数据集的**接口地址**里同样写 `${paramName}`，替换时对
 
 ### 参数值从哪来
 
-三个来源，**后面的覆盖前面的**：
+四个来源，**后面的覆盖前面的**：
 
 1. 数据集参数（`mz_dataset_param`）的默认值；
-2. 报表参数（`content.params`）的默认值；
-3. 渲染请求 `{params:{...}}` 里传进来的值。
+2. **全局参数（`mz_param`）的默认值**；
+3. 报表参数（`content.params`）的默认值；
+4. 渲染请求 `{params:{...}}` 里传进来的值。
+
+全局参数与报表参数**先合成一份定义再进引擎**（`ReportParamDTO#merge`，全局在前、报表在后）：
+同名时**报表那条整条覆盖全局那条**（类型/控件/必填/选项一起换，不是只换默认值）——
+只换默认值的话会出现「显示名和控件是全局的、值却按报表的类型转」这种半拉状态。
+合并只发生在 `RenderServiceImpl` 一处（`parseContent` 与免保存预览两个入口），
+**渲染引擎不知道有全局参数这回事**，它照旧只看 `content.params`；
+`GET /report/{id}/params` 返回的也是合并后的这一份，所以参数表单里全局参数就是普通参数。
+
+停用（`status=0`）的全局参数不参与合并 —— 等于它不存在，报表里同名的那条照常生效。
 
 第 3 条里包含**预览/设计器地址上的 query 参数**：前端把 `/preview/{id}?id=11233` 的 query
 一并提交（`utils/params.js#queryParams`），**报表里没声明过的参数也照传** —— 于是数据集里

@@ -16,6 +16,7 @@ import com.muzhou.report.export.ExcelExporter;
 import com.muzhou.report.export.PdfExporter;
 import com.muzhou.report.export.WordExporter;
 import com.muzhou.report.service.DatasetService;
+import com.muzhou.report.service.ParamService;
 import com.muzhou.report.service.RenderService;
 import com.muzhou.report.service.ReportService;
 import com.muzhou.report.service.ReportVersionService;
@@ -62,6 +63,9 @@ public class RenderServiceImpl implements RenderService {
 
     private final DatasetService datasetService;
 
+    /** 全局参数：渲染前并进 content 的参数定义里，见 {@link #withGlobalParams}。 */
+    private final ParamService paramService;
+
     private final ReportRenderEngine renderEngine;
 
     private final ExcelExporter excelExporter;
@@ -86,6 +90,7 @@ public class RenderServiceImpl implements RenderService {
     public RenderServiceImpl(ReportService reportService,
                              ReportVersionService versionService,
                              DatasetService datasetService,
+                             ParamService paramService,
                              ReportRenderEngine renderEngine,
                              ExcelExporter excelExporter,
                              PdfExporter pdfExporter,
@@ -95,6 +100,7 @@ public class RenderServiceImpl implements RenderService {
         this.reportService = reportService;
         this.versionService = versionService;
         this.datasetService = datasetService;
+        this.paramService = paramService;
         this.renderEngine = renderEngine;
         this.excelExporter = excelExporter;
         this.pdfExporter = pdfExporter;
@@ -119,6 +125,8 @@ public class RenderServiceImpl implements RenderService {
         if (content == null) {
             throw new BizException("预览内容不能为空");
         }
+        // 请求体里这份 content 没经过 parseContent，全局参数得自己并一次（见 withGlobalParams）
+        withGlobalParams(content);
         // 免保存预览渲染的就是请求里这份 content —— 设计器画布上是哪一版，预览出来就是哪一版，
         // 不走版本选择（走了反而会拿库里存着的那一版把用户没保存的改动盖掉）
         // 引擎并行取数时会从多个线程同时写，用并发容器（下同）
@@ -136,6 +144,7 @@ public class RenderServiceImpl implements RenderService {
     @Override
     public List<ReportParamDTO> listParams(String reportId) {
         // 传 false：查一张不存在的报表的参数，该报错而不是凭空建一张再回一份空参数列表
+        // parseContent 已经把全局参数并进去了（withGlobalParams），所以参数表单里全局参数就是普通参数
         ReportContentDTO content = parseContent(reportService.getDetail(reportId, null, false).getContent());
         return content.getParams() == null ? List.of() : content.getParams();
     }
@@ -458,12 +467,35 @@ public class RenderServiceImpl implements RenderService {
         if (contentJson == null || contentJson.isBlank()) {
             throw new BizException("报表内容为空，请先在设计器中保存");
         }
+        ReportContentDTO content;
         try {
-            return objectMapper.readValue(contentJson, ReportContentDTO.class);
+            content = objectMapper.readValue(contentJson, ReportContentDTO.class);
         } catch (Exception e) {
             log.error("解析报表 content 失败", e);
             throw new BizException("报表内容格式非法: " + e.getMessage());
         }
+        // 并全局参数放在 try 外面：它要查库，出错跟「content 格式非法」是两回事，别混成一句话
+        return withGlobalParams(content);
+    }
+
+    /**
+     * 把全局参数并进这份 content 的参数定义里。见 CONTRACT §5「参数值从哪来」。
+     *
+     * <p><b>合并只在这一层做，渲染引擎不知道有全局参数这回事</b> —— 它照旧只看
+     * {@code content.params}，于是默认值填充、必填校验、参数表单、`${}` 取值全都不必各写一遍。
+     *
+     * <p>挂在 {@link #parseContent} 上是因为它是「库里存的 content」进本类的唯一入口
+     * （渲染、逐行选版本的换版、{@link #listParams} 都经过它）；免保存预览的 content 来自请求体，
+     * 不走这里，所以 {@link #preview} 里另外调了一次。**两处，别漏。**
+     *
+     * <p>停用的全局参数不会出现在这里（{@link ParamService#listDefinitions} 只取启用的）。
+     */
+    private ReportContentDTO withGlobalParams(ReportContentDTO content) {
+        if (content == null) {
+            return null;
+        }
+        content.setParams(ReportParamDTO.merge(paramService.listDefinitions(), content.getParams()));
+        return content;
     }
 
     /** 版本切换规则；没配过（老报表）或写坏了都退回默认规则，不让它拦住渲染。 */

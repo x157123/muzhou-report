@@ -1,126 +1,105 @@
 <!--
   报表设计器：左（数据集面板） / 中（FortuneSheet 工作簿） / 右（单元格属性面板）。
 
-  顶部分成两带、底部一条状态栏，**按优先级分层**而不是把八个按钮排成一行：
-    ① 标题栏  —— 导航（返回）、身份（报表名 / 版本）、三个主操作（保存 / 预览 / 导出）。
-                 只有「保存」是 primary，眼睛才有落点。
-    ② 报表工具条 —— 报表专有的那几样（导入 Excel / 参数配置 / 打印设置 / 分页线 / 表达式帮助），
-                 扁平按钮 + 分隔符按语义分组，紧挨着下面 FortuneSheet 自带的排版工具栏，
-                 两条读起来是一套。
+  **顶上没有通栏**（曾经有一条 44px 的标题栏），三样东西各归各位，编辑区因此高了一整条：
+    ① 身份    —— 报表名 + 当前版式（版本下拉），占**左栏顶上一格**（`.report-identity`）。
+                 通栏时代它横铺整屏、纵向却吃掉编辑区一条，而上面只有这两样东西。
+                 **没有返回、没有导出**：设计器是嵌进外部系统用的，导航由宿主页面给
+                 （浏览器后退、或宿主自己的标签页），塞一个跳回 `/report` 的按钮在嵌入场景下
+                 反而是把人带出宿主系统；导出属于「出成品」，归预览页（那里有 Excel/PDF/Word
+                 三条路，且所见即所打）。
+    ② 命令（保存 / 预览 / 导入 Excel / 打印设置 / 表达式帮助）**长在 FortuneSheet
+                 自己的工具栏里**（`toolbarExtras` → `customToolbarItems`，见 FortuneSheet.vue），
+                 **只有图标、名字靠 tooltip**，排在内置排版按钮左边、由它自动补一条分隔符 ——
+                 与那些排版按钮长得一样，整条读起来是一条工具栏。
+                 曾经它们单占一带文字按钮，与下面那条排版工具栏是并排的两条。
     ③ 状态栏  —— 未保存、页数纸张、超宽/补格提示。这些是**状态与建议**不是命令，
-                 跟「保存」并排长成一个样子最伤专业感，一律沉到底部。
+                 跟命令按钮并排长成一个样子最伤专业感，一律沉到底部。
 
-  没有把这几个按钮塞进 FortuneSheet 自己的工具栏（它确实有 customToolbarItems），原因有三：
-  自定义项不参与工具栏的溢出折叠（窄窗口下先被收进「更多」的反而是高频的字体字号），
-  它只给得出图标按钮、承载不了「导出」「版本」这种下拉，
-  且 Toolbar 那层没有把 selected 透传给 CustomButton，「分页线」的高亮开关表达不出来。
-  更要紧的是那条路要在业务代码里写 React 组件，与本项目「业务代码不应出现 React」相悖。
+  搬进工具栏要认它的三条规矩（都在 FortuneSheet.vue 的 customToolbarItems 上写着）：
+  自定义项不参与溢出折叠 —— 窄窗口下先被收进「更多」的反而是高频的字体字号，所以只放这五个；
+  下拉做不了（CustomButton 只是个按钮），所以「版本」只能待在左栏那一格里；
+  开关与 loading 也做不了（Toolbar 没把 selected 透传下去）—— 原来那个「分页线」开关因此下线，
+  分页线与打印区域改成**常显**（本来也几乎没人关它），而「保存」改由 `handleSave` 自己防重入。
+
+  「参数配置」也不在这儿了：参数改成**全局**的（`/param` 参数管理页，CONTRACT §3.5），
+  一处配、所有报表共用，不再一张报表配一份。老报表 `content.params` 里那份照旧参与渲染
+  （渲染时与全局参数合并，同名以报表那条为准），只是设计器里不再有编辑入口。
 -->
 <template>
   <div class="report-designer" v-loading="loading">
-    <!-- ① 标题栏：导航 + 身份 + 主操作 -->
-    <div class="designer-titlebar">
-      <el-button link :icon="ArrowLeft" @click="goBack">返回</el-button>
-
-      <div v-if="!editingName" class="report-name" title="点击修改报表名" @click="startEditName">
-        {{ store.report.name || '未命名报表' }}
-      </div>
-      <el-input
-        v-else
-        ref="nameInputRef"
-        v-model="nameDraft"
-        size="small"
-        style="width: 220px"
-        @blur="confirmEditName"
-        @keyup.enter="confirmEditName"
-      />
-
-      <!--
-        版本下拉：一张报表可以有好几份版式，这里选的是「现在设计哪一份」。
-        切版本会重挂工作簿（FortuneSheet 的 data 只在挂载时读一次），所以 dirty 时先拦一道。
-      -->
-      <el-dropdown v-if="store.versions.length" trigger="click" @command="onVersionCommand">
-        <el-button size="small" :loading="versionSwitching">
-          {{ currentVersionText }}<el-icon class="el-icon--right"><ArrowDown /></el-icon>
-        </el-button>
-        <template #dropdown>
-          <el-dropdown-menu>
-            <el-dropdown-item
-              v-for="v in versionRows"
-              :key="v.id"
-              :command="{ type: 'open', id: v.id }"
-              :class="{ 'is-current': v.id === store.versionId }"
-            >
-              <span class="v-label">{{ v.label }}</span>
-              <span class="v-range">{{ intervalText(v) }}</span>
-              <span class="v-flag">
-                <template v-if="v.isDefault">默认</template>
-                <template v-else-if="v.id === store.versionId">● 当前</template>
-              </span>
-            </el-dropdown-item>
-            <el-dropdown-item divided :command="{ type: 'copy' }">从当前版本复制新版本</el-dropdown-item>
-            <el-dropdown-item :command="{ type: 'manage' }">版本管理…</el-dropdown-item>
-          </el-dropdown-menu>
-        </template>
-      </el-dropdown>
-
-      <div class="flex-spacer"></div>
-
-      <el-button type="primary" :icon="Check" :loading="saving" @click="handleSave">保存</el-button>
-      <el-button :icon="View" @click="openPreview">预览</el-button>
-      <el-dropdown trigger="click" :disabled="exporting" @command="handleExport">
-        <el-button :icon="Download" :loading="exporting">
-          导出<el-icon class="el-icon--right"><ArrowDown /></el-icon>
-        </el-button>
-        <template #dropdown>
-          <el-dropdown-menu>
-            <el-dropdown-item command="excel">导出 Excel</el-dropdown-item>
-            <el-dropdown-item command="pdf">导出 PDF</el-dropdown-item>
-            <el-dropdown-item command="word">导出 Word</el-dropdown-item>
-          </el-dropdown-menu>
-        </template>
-      </el-dropdown>
-    </div>
-
-    <!-- ② 报表工具条：版式来源 | 报表设置 | 帮助，三组之间用分隔符断开 -->
-    <div class="designer-tools">
-      <el-button text :icon="Upload" title="拿一份现成的 Excel 当版式起点" @click="excelDialogVisible = true">
-        导入 Excel
-      </el-button>
-      <el-divider direction="vertical" />
-      <el-button text :icon="Setting" @click="paramDialogVisible = true">参数配置</el-button>
-      <el-button text :icon="Printer" @click="printDialogVisible = true">打印设置</el-button>
-      <!-- 开关型按钮：用底色标出「开着」，不切成 primary —— 它跟标题栏的「保存」不是一个量级 -->
-      <el-button
-        text
-        :icon="Grid"
-        class="tool-toggle"
-        :class="{ 'is-on': showPrintArea }"
-        :title="showPrintArea ? '隐藏分页线' : '显示分页线'"
-        @click="togglePrintArea"
-      >
-        分页线
-      </el-button>
-      <el-divider direction="vertical" />
-      <el-button text :icon="QuestionFilled" @click="helpVisible = true">表达式帮助</el-button>
-    </div>
-
     <div class="designer-body">
-      <DatasetPanel
-        class="panel-left"
-        :datasets="normalizedDatasets"
-        :primary-dataset="store.content.primaryDataset"
-        :links="store.content.datasetLinks"
-        @refresh="loadDatasets"
-        @insert-all="onInsertAll"
-        @create="openDatasetCreate"
-        @edit="openDatasetEdit"
-        @remove="handleDatasetDelete"
-        @set-primary="onSetPrimary"
-        @link-create="openLinkDialog(-1)"
-        @link-edit="openLinkDialog"
-        @link-remove="handleLinkDelete"
-      />
+      <div class="panel-left">
+        <!--
+          ① 身份：报表名 + 当前版式，一行排开。名字占满剩下的宽度、长了截断成「…」，
+          版本恒定靠右且不参与压缩（宽度固定的是它，该缩的是名字）。
+        -->
+        <div class="report-identity">
+          <div v-if="!editingName" class="report-name" title="点击修改报表名" @click="startEditName">
+            {{ store.report.name || '未命名报表' }}
+          </div>
+          <el-input
+            v-else
+            ref="nameInputRef"
+            v-model="nameDraft"
+            class="report-name-input"
+            size="small"
+            @blur="confirmEditName"
+            @keyup.enter="confirmEditName"
+          />
+
+          <!--
+            版本下拉：一张报表可以有好几份版式，这里选的是「现在设计哪一份」。
+            切版本会重挂工作簿（FortuneSheet 的 data 只在挂载时读一次），所以 dirty 时先拦一道。
+          -->
+          <el-dropdown
+            v-if="store.versions.length"
+            class="version-drop"
+            trigger="click"
+            placement="bottom-end"
+            @command="onVersionCommand"
+          >
+            <el-button size="small" :loading="versionSwitching">
+              {{ currentVersionText }}<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item
+                  v-for="v in versionRows"
+                  :key="v.id"
+                  :command="{ type: 'open', id: v.id }"
+                  :class="{ 'is-current': v.id === store.versionId }"
+                >
+                  <span class="v-label">{{ v.label }}</span>
+                  <span class="v-range">{{ intervalText(v) }}</span>
+                  <span class="v-flag">
+                    <template v-if="v.isDefault">默认</template>
+                    <template v-else-if="v.id === store.versionId">● 当前</template>
+                  </span>
+                </el-dropdown-item>
+                <el-dropdown-item divided :command="{ type: 'copy' }">从当前版本复制新版本</el-dropdown-item>
+                <el-dropdown-item :command="{ type: 'manage' }">版本管理…</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+        </div>
+
+        <DatasetPanel
+          class="panel-left-datasets"
+          :datasets="normalizedDatasets"
+          :primary-dataset="store.content.primaryDataset"
+          :links="store.content.datasetLinks"
+          @refresh="loadDatasets"
+          @insert-all="onInsertAll"
+          @create="openDatasetCreate"
+          @edit="openDatasetEdit"
+          @remove="handleDatasetDelete"
+          @set-primary="onSetPrimary"
+          @link-create="openLinkDialog(-1)"
+          @link-edit="openLinkDialog"
+          @link-remove="handleLinkDelete"
+        />
+      </div>
 
       <div
         class="designer-center"
@@ -140,6 +119,7 @@
           ref="sheetRef"
           :data="store.content.sheets"
           :options="sheetOptions"
+          :toolbar-extras="toolbarExtras"
           @change="onSheetChange"
           @op="onSheetOp"
           @selection-change="onSelectionChange"
@@ -147,7 +127,6 @@
         >
           <template #overlay="{ rect }">
             <PrintAreaOverlay
-              :visible="showPrintArea"
               :rect="rect"
               :breaks="pageBreaks"
               :geometry="geometry"
@@ -191,7 +170,7 @@
         超出纸张宽度 · 压缩到一页宽
       </el-button>
       <el-button
-        v-if="showPrintArea && needsGridFill"
+        v-if="needsGridFill"
         link
         type="warning"
         class="sb-action"
@@ -200,7 +179,7 @@
       >
         表格不足一页 · 补足网格
       </el-button>
-      <span v-if="showPrintArea && pageBreaks.pages" class="sb-item sb-muted">
+      <span v-if="pageBreaks.pages" class="sb-item sb-muted">
         {{ pageBreaks.pages }} 页 · {{ pageConfig.paperSize }}
         {{ pageConfig.orientation === 'landscape' ? '横向' : '纵向' }}
         <template v-if="store.hasOwnPageConfig"> · 本表单独设置</template>
@@ -210,10 +189,8 @@
       </span>
     </div>
 
-    <ParamConfigDialog v-model="paramDialogVisible" />
     <PrintConfigDialog
       v-model="printDialogVisible"
-      v-model:show-overlay="showPrintArea"
       :sheet="currentSheet"
       :get-selection="getSelectionRange"
       @applied="onPageConfigApplied"
@@ -250,14 +227,13 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute, useRouter, onBeforeRouteLeave } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowLeft, ArrowDown, Check, View, Download, Upload, Setting, QuestionFilled, Printer, Grid } from '@element-plus/icons-vue'
+import { ArrowDown, Check, View, Upload, Printer, QuestionFilled } from '@element-plus/icons-vue'
 // 只为了拿工具栏的默认按钮清单，见下面的 HIDDEN_TOOLBAR_ITEMS
 import { defaultSettings } from '@fortune-sheet/core'
 
 import FortuneSheet from '@/components/FortuneSheet.vue'
 import DatasetPanel from './components/DatasetPanel.vue'
 import CellPropertyPanel from './components/CellPropertyPanel.vue'
-import ParamConfigDialog from './components/ParamConfigDialog.vue'
 import PrintConfigDialog from './components/PrintConfigDialog.vue'
 import PrintAreaOverlay from './components/PrintAreaOverlay.vue'
 import PreviewDrawer from './components/PreviewDrawer.vue'
@@ -270,13 +246,11 @@ import DatasetEditDialog from '@/views/dataset/DatasetEditDialog.vue'
 import { useDesignerStore } from '@/stores/designer'
 import { getReport, updateReport, listVersion, copyVersion } from '@/api/report'
 import { listDataset, deleteDataset } from '@/api/dataset'
-import { exportExcel, exportPdf, exportWord } from '@/api/render'
 import {
   findCell,
   fieldToken,
   getCellText,
   replaceToken,
-  downloadBlob,
   toA1,
   DATA_BOUND_TYPES,
   FIELD_DRAG_MIME
@@ -310,7 +284,6 @@ const externalParams = queryParams(route.query)
 
 const loading = ref(false)
 const saving = ref(false)
-const exporting = ref(false)
 
 const sheetRef = ref(null)
 /** 报表 content 是否已加载完成（决定工作簿何时挂载） */
@@ -323,14 +296,44 @@ const editingName = ref(false)
 const nameDraft = ref('')
 const nameInputRef = ref(null)
 
-const paramDialogVisible = ref(false)
 const printDialogVisible = ref(false)
 const excelDialogVisible = ref(false)
 const previewVisible = ref(false)
 const helpVisible = ref(false)
 
-/** 画布上是否显示分页线与打印区域 */
-const showPrintArea = ref(true)
+/**
+ * FortuneSheet 工具栏最左边的报表专有按钮（桥接翻成 customToolbarItems，见 FortuneSheet.vue）。
+ *
+ * **只有图标，名字交给 tooltip**（悬停显示）—— 与内置的排版按钮长得一样，两段读起来是一条工具栏；
+ * 文字标签塞不进那个 24px 的图标盒子（会溢出来盖住旁边的按钮），细节在桥接那边写着。
+ *
+ * 五个都是「点一下就走」的命令，正好是 CustomButton 给得出的那种按钮。放不进来的有两类：
+ * 开关型（Toolbar 没把 selected 透传下来）—— 原来的「分页线」因此下线、改成常显；
+ * 下拉型（CustomButton 只是个按钮）—— 「版本」因此留在左栏顶上那一格里。
+ * 另外两样是**整个从设计器拿掉**的，不是放不进来：「导出」归预览页（见顶部注释），
+ * 「参数配置」归全局参数管理页（`/param`，CONTRACT §3.5）—— 参数不再一张报表配一份，
+ * 老报表 content 里那份 params 照旧参与渲染，只是没有编辑入口。
+ *
+ * 保存**没有 loading 态**（CustomButton 给不出），所以 handleSave 自己防重入。
+ * 引用稳定：数组只建一次，桥接那边 watch 到引用变化才重挂工具栏。
+ */
+const toolbarExtras = [
+  { key: 'save', icon: Check, tooltip: '保存', onClick: () => handleSave() },
+  { key: 'preview', icon: View, tooltip: '预览', onClick: () => openPreview() },
+  {
+    key: 'excel-import',
+    icon: Upload,
+    tooltip: '导入 Excel（拿一份现成的表当版式起点）',
+    onClick: () => (excelDialogVisible.value = true)
+  },
+  {
+    key: 'print-config',
+    icon: Printer,
+    tooltip: '打印设置（纸张 / 页边距 / 打印区域 / 页头页尾 / 输出）',
+    onClick: () => (printDialogVisible.value = true)
+  },
+  { key: 'expr-help', icon: QuestionFilled, tooltip: '表达式帮助（占位符与公式速查）', onClick: () => (helpVisible.value = true) }
+]
 
 /**
  * 兼容两种数据集接口返回形态：
@@ -411,10 +414,6 @@ function onKeydown(e) {
     e.preventDefault()
     handleSave()
   }
-}
-
-function goBack() {
-  router.push('/report')
 }
 
 /* ------------------------- 报表名 ------------------------- */
@@ -772,7 +771,7 @@ let sampleBuf = null
  * 但坐标必须来自 FortuneSheet 自己 —— 行高列宽 + 滚动 + 缩放叠加后自己算总会差几像素。
  */
 function sampleCellGeometry(cell, info) {
-  if (!showPrintArea.value || !sampleBuf) return
+  if (!sampleBuf) return
   const pb = pageBreaks.value
   const { row, column, startX, startY, endX, endY } = info
 
@@ -900,15 +899,9 @@ function ensurePaperVisible() {
   ElMessage.info(`表格不足一页，已按 ${pageConfig.value.paperSize} 补足到 ${parts.join(' × ')}（可 Ctrl+Z 撤销）`)
 }
 
-function togglePrintArea() {
-  showPrintArea.value = !showPrintArea.value
-  if (showPrintArea.value) ensurePaperVisible()
-  repaintSheet()
-}
-
 /** 打印设置应用后：先按新纸张补足网格，再重绘；顺带提示宽度是否已超纸张 */
 function onPageConfigApplied() {
-  if (showPrintArea.value) ensurePaperVisible()
+  ensurePaperVisible()
   repaintSheet()
   prevColumnWidths = snapshotColumnWidths(currentSheet.value)
   if (widthOverflow.value > 1) {
@@ -1015,9 +1008,7 @@ function getSelectionRange() {
 // 分页位置变了（改了纸张/边距/缩放/打印区域，或调整了行高列宽）才重绘，避免每次编辑都刷画布
 watch(
   () => pageBreaks.value.signature,
-  () => {
-    if (showPrintArea.value) repaintSheet()
-  }
+  () => repaintSheet()
 )
 
 /* ------------------------- 单元格属性面板 ------------------------- */
@@ -1079,6 +1070,10 @@ async function handleSave() {
     ElMessage.warning('报表尚未加载完成，暂时无法保存')
     return
   }
+  // 保存按钮在工具栏上，CustomButton 给不出 loading 态、拦不住连点，只能自己防重入
+  if (saving.value) {
+    return
+  }
   saving.value = true
   try {
     store.setSheets(sheetRef.value.getAllSheets())
@@ -1101,49 +1096,6 @@ function openPreview() {
   previewVisible.value = true
 }
 
-/** 导出时用参数的默认值（导出前若有未保存修改会先提示保存），地址上带了同名参数则用它 */
-function buildDefaultParams() {
-  const obj = {}
-  ;(store.content.params || []).forEach((p) => {
-    obj[p.name] = externalParams[p.name] ?? p.defaultValue ?? ''
-  })
-  // 报表里没声明、只在地址上出现的参数也一并透传，数据集里 ${名字} 照样取得到
-  return { ...externalParams, ...obj }
-}
-
-/**
- * 导出格式 -> [接口, 扩展名]。
- * 统一成 `(id, params, versionId)` 三参 —— PDF 那个接口中间还夹了 sheetIndex（设计器整本导出，传 null）。
- */
-const EXPORTERS = {
-  excel: [exportExcel, 'xlsx'],
-  pdf: [(id, params, versionId) => exportPdf(id, params, null, versionId), 'pdf'],
-  word: [exportWord, 'docx'],
-}
-
-/** @param type 'excel' | 'pdf' | 'word' */
-async function handleExport(type) {
-  if (store.dirty) {
-    try {
-      await ElMessageBox.confirm('导出前需要先保存报表，是否立即保存？', '提示', { type: 'warning' })
-    } catch (e) {
-      return
-    }
-    await handleSave()
-    if (store.dirty) return // 保存失败则不继续导出
-  }
-  const [api, ext] = EXPORTERS[type] || EXPORTERS.excel
-  exporting.value = true
-  try {
-    // 导的是**画布上这一版**，不是版本规则自动选的那一版 —— 否则「预览看的是 v2、导出的是 v3」
-    const res = await api(store.report.id, buildDefaultParams(), store.versionId)
-    downloadBlob(res.data, `${store.report.name || 'report'}.${ext}`)
-  } catch (e) {
-    // 错误已提示
-  } finally {
-    exporting.value = false
-  }
-}
 </script>
 
 <style scoped>
@@ -1152,52 +1104,6 @@ async function handleExport(type) {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-}
-
-/* ① 标题栏 */
-.designer-titlebar {
-  height: 44px;
-  min-height: 44px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0 12px 0 8px;
-  border-bottom: 1px solid var(--mz-border);
-  background: #fff;
-}
-
-/*
-  ② 报表工具条：背景与下面 FortuneSheet 自带的工具栏一致（#fff），只用一条细线跟标题栏断开，
-  这样两条工具栏读起来是连续的一块，而不是「又一排按钮」。
-*/
-.designer-tools {
-  height: 36px;
-  min-height: 36px;
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 0 10px;
-  border-bottom: 1px solid var(--mz-border);
-  background: #fff;
-}
-.designer-tools :deep(.el-button) {
-  height: 28px;
-  padding: 0 8px;
-  font-size: 13px;
-  color: #4a4f57;
-}
-.designer-tools :deep(.el-button:hover) {
-  background: #f2f3f5;
-  color: #303133;
-}
-.designer-tools :deep(.el-divider--vertical) {
-  height: 16px;
-  margin: 0 6px;
-}
-/* 开关按下的样子：浅色底 + 主色字，比 primary 实心低一个量级 */
-.designer-tools :deep(.tool-toggle.is-on) {
-  background: #ecf5ff;
-  color: var(--mz-primary);
 }
 
 /* ③ 状态栏 */
@@ -1225,19 +1131,48 @@ async function handleExport(type) {
   font-size: 12px;
 }
 
+/*
+  ① 身份：报表名 + 当前版式，占左栏顶上一格。
+
+  以前它单占一条 44px 的通栏，而上面只有这两样东西 —— 横向铺满整个屏幕、纵向吃掉编辑区
+  一整条。挪进左栏后画布高了一截，两样东西也离左栏里的数据集更近（都是「这张报表是什么」）。
+*/
+.report-identity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-bottom: 1px solid var(--mz-border);
+  background: #fff;
+}
+
+/*
+  名字占满剩下的宽度、长了截断。`min-width: 0` 是关键 —— flex 项的最小尺寸默认是 auto
+  （按内容撑开），不写这条 ellipsis 永远不生效，长名字会把版本按钮顶出左栏。
+*/
+.report-name,
+.report-name-input {
+  flex: 1;
+  min-width: 0;
+}
+
 .report-name {
   font-weight: 600;
   font-size: 15px;
   cursor: pointer;
-  padding: 2px 8px;
+  padding: 2px 4px;
   border-radius: 4px;
-  max-width: 260px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .report-name:hover {
   background: var(--mz-panel-bg);
+}
+
+/* 版本恒定靠右、不参与压缩：它是这一格里宽度固定的那一样，该缩的是名字 */
+.version-drop {
+  flex: none;
 }
 
 /* 版本下拉：版本号 / 生效区间 / 标记三列对齐，扫一眼就知道哪一版管哪一段 */
@@ -1273,9 +1208,21 @@ async function handleExport(type) {
   display: flex;
 }
 
+/* 左栏是一竖列：上面「身份」定高，下面数据集面板占满剩下的，自己内部滚动 */
 .panel-left {
   width: 260px;
   min-width: 260px;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--mz-border);
+}
+.panel-left-datasets {
+  flex: 1;
+  min-height: 0;
+  /* .mz-panel 是按 height:100% 撑的，留着会连「身份」那一格的高度一起算进去、把左栏撑长 */
+  height: auto;
+  /* 边框改由 .panel-left 统一画，否则这里会多出一条 */
+  border-right: none;
 }
 
 .panel-right {

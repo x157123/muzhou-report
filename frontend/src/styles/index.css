@@ -117,6 +117,26 @@ body,
   object-position: center;
 }
 
+/*
+  工具栏最左边那几个报表专有按钮的图标（components/FortuneSheet.vue 的 toolbarExtras）。
+
+  样式只能写在这里：那几个按钮是 FortuneSheet 自己渲染的 React 节点，Toolbar 只透传固定
+  那几个 prop、加不上 class —— mz-toolbar-icon 是我们塞进 icon 里的那个 span 自带的。
+
+  Element Plus 的图标 svg 不带宽高（靠外层字号撑），落进 FortuneSheet 那个 24px 的图标盒子里
+  会铺满整格，比旁边内置按钮的图标大一圈，所以在这儿定死 18px 与它们对齐。
+*/
+.fortune-toolbar .mz-toolbar-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #2b2b2b;
+}
+.fortune-toolbar .mz-toolbar-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
 /* 滚动条 */
 ::-webkit-scrollbar {
   width: 8px;

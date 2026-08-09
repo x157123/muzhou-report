@@ -28,7 +28,7 @@
 </template>
 
 <script setup>
-import { ref, shallowRef, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
+import { ref, shallowRef, onMounted, onBeforeUnmount, watch, nextTick, h, render } from 'vue'
 import React from 'react'
 import { createRoot } from 'react-dom/client'
 import { Workbook } from '@fortune-sheet/react'
@@ -43,6 +43,12 @@ const props = defineProps({
   data: { type: Array, default: () => [] },
   allowEdit: { type: Boolean, default: true },
   showToolbar: { type: Boolean, default: true },
+  /**
+   * 工具栏最左边的自定义按钮，形如 `[{ key, icon, tooltip, onClick }]`。
+   * `icon` 传 Vue 图标组件（如 Element Plus 的 `Printer`），React 节点由本组件拼
+   * （见 customToolbarItems）；按钮上只有图标，`tooltip` 就是它的名字。
+   */
+  toolbarExtras: { type: Array, default: () => [] },
   showFormulaBar: { type: Boolean, default: true },
   showSheetTabs: { type: Boolean, default: true },
   lang: { type: String, default: 'zh' },
@@ -162,6 +168,59 @@ function mergeHooks(base, extra) {
   return merged
 }
 
+/**
+ * Vue 图标组件 -> 静态 SVG 字符串。
+ *
+ * Element Plus 的图标是 Vue 组件，塞不进 React 树；而它们都是无状态的纯 SVG，
+ * 所以在一个游离的 div 上渲一次、把 HTML 取走就够了，不必让两套框架在同一个节点上共存。
+ * 同一个组件只渲一次（结果缓存），工具栏重挂时不再重复渲。
+ */
+const iconHtmlCache = new WeakMap()
+
+function iconHtml(component) {
+  if (!component) {
+    return ''
+  }
+  if (iconHtmlCache.has(component)) {
+    return iconHtmlCache.get(component)
+  }
+  const host = document.createElement('div')
+  render(h(component), host)
+  const html = host.innerHTML
+  // 渲完就卸掉，免得这个游离节点一直挂在 Vue 的渲染树上
+  render(null, host)
+  iconHtmlCache.set(component, html)
+  return html
+}
+
+/**
+ * 把 `toolbarExtras` 翻成 FortuneSheet 的 `customToolbarItems`（值是 React 节点）。
+ * 业务侧只给数据与 Vue 图标组件，React 全留在桥接里。
+ *
+ * 三条是 @fortune-sheet 1.0.4 的 Toolbar 定死的，业务侧配按钮前要知道：
+ * ① 自定义项恒排在内置按钮**前面**，且**不参与工具栏的溢出折叠**（折叠只切 `toolbarItems`）
+ *    —— 每多一个，窄窗口下被收进「更多」的内置按钮就多一个，别拿它当抽屉用；
+ * ② `CustomButton` 自己收 `selected`（会画选中底色），但 Toolbar 那一层没往下传，
+ *    所以**开关型按钮做不了**，也没有 loading/disabled，只放「点一下就走」的命令；
+ * ③ 拿不到 className（Toolbar 只透传固定那几个 prop），样式只能从 `styles/index.css` 里按结构选。
+ *
+ * 图标走 `icon`：`CustomIcon` 会把它放进一个写死 24px 的盒子里居中 —— 图标正合适，
+ * **文字则会溢出来盖住旁边的按钮**（文字得走 `children`，那是 flex 行里算宽度的正常节点）。
+ * 这里一律只放图标，名字交给 `tooltip`（悬停显示），与内置按钮长得一样。
+ */
+function customToolbarItems() {
+  return props.toolbarExtras.map((item) => ({
+    key: item.key,
+    tooltip: item.tooltip,
+    onClick: item.onClick,
+    icon: React.createElement('span', {
+      className: 'mz-toolbar-icon',
+      // 内容是自己用 Vue 渲出来的图标，不是外来串
+      dangerouslySetInnerHTML: { __html: iconHtml(item.icon) }
+    })
+  }))
+}
+
 function renderWorkbook() {
   if (!reactRoot.value) return
   const element = React.createElement(Workbook, {
@@ -182,6 +241,7 @@ function renderWorkbook() {
     lang: props.lang,
     allowEdit: props.allowEdit,
     showToolbar: props.showToolbar,
+    customToolbarItems: customToolbarItems(),
     showFormulaBar: props.showFormulaBar,
     showSheetTabs: props.showSheetTabs,
     onChange: handleChange,
@@ -253,7 +313,7 @@ onBeforeUnmount(() => {
 
 // 非 reload 的 props 变化只需重新 render（Workbook 内部状态保留）
 watch(
-  () => [props.allowEdit, props.showToolbar, props.showFormulaBar, props.showSheetTabs],
+  () => [props.allowEdit, props.showToolbar, props.showFormulaBar, props.showSheetTabs, props.toolbarExtras],
   () => renderWorkbook()
 )
 

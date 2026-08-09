@@ -442,6 +442,17 @@ api 数据集接口地址里的 `${id}`（`DatasetServiceImpl#substituteUrl`，�
 改参数合并逻辑时别顺手加「未声明就丢弃」的过滤——那会把这条链路整个掐断。
 行数/超时/单元格数上限在 `application.yml` 的 `muzhou.report.*`，读取自 `MzProperties`。
 
+**参数定义本身是全局的**（`mz_param` + 「参数管理」页 `/param`，CONTRACT §2/§3.5/§5）：
+公司抬头、打印人这类每张报表都要的东西，一处配好所有报表都能用，**设计器里已经没有参数配置入口了**。
+老报表 `content.params` 里那份照旧参与渲染 —— 渲染前由 `RenderServiceImpl#withGlobalParams`
+把两份合成一份（`ReportParamDTO#merge`，同名时**报表那条整条覆盖全局那条**，不是只换默认值），
+**引擎完全不知道有全局参数这回事**，它照旧只看 `content.params`，于是默认值填充、必填校验、
+参数表单、`${}` 取值都不必各写一遍。合并挂在**两个入口**上：`parseContent`（库里存的 content
+进本类的唯一通道，渲染/换版/`listParams` 都过它）与 `preview`（content 来自请求体，不走 parseContent）
+—— **漏了后者就是「预览取不到全局参数、正式渲染又取得到」**。
+`mz_param` 的唯一索引不带 deleted 条件，删掉再建同名参数会撞唯一键，
+所以新建/改名前先 `MzParamMapper#purgeDeletedByName`（同 `uk_dataset_code_scope` 那个坑）。
+
 ### 报表版本：版本化的是「版式」，不是数据集
 
 一张报表可以有好几份版式（`mz_report_version`，每行一份完整的 `ReportContent`），
@@ -556,7 +567,8 @@ FortuneSheet 删内容只是把该格置成 `{}`，不删 celldata 条目也不�
 
 默认内嵌 H2 文件库 `backend/data/muzhoureport.mv.db`，`spring.sql.init` 每次启动执行
 `db/schema-h2.sql`（建表）+ `db/*.sql` 那一批**按表拆开的 H2 导出快照**
-（`mz_dataset*.sql` / `mz_datasource.sql` / `mz_report.sql` = 演示报表，`orders*.sql` 等 = 演示业务表），
+（`mz_dataset*.sql` / `mz_datasource.sql` / `mz_param.sql` = 全局参数 / `mz_report.sql` = 演示报表，
+`orders*.sql` 等 = 演示业务表），
 清单写在 `application.yml` 的 `spring.sql.init.data-locations` 里，`continue-on-error: true`。
 
 **这批数据脚本是纯 `INSERT`，不是 `MERGE`**：库已经建好之后再跑，主键冲突直接失败、被
