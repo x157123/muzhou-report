@@ -45,7 +45,7 @@ public class DatasourceServiceImpl extends ServiceImpl<MzDatasourceMapper, MzDat
         if (StringUtils.hasText(name)) {
             wrapper.like(MzDatasource::getName, name);
         }
-        wrapper.orderByDesc(MzDatasource::getUpdateTime);
+        wrapper.orderByDesc(MzDatasource::getCreateTime);
         Page<MzDatasource> pageParam = new Page<>(pageNo, pageSize);
         Page<MzDatasource> result = page(pageParam, wrapper);
         return PageResult.of(result);

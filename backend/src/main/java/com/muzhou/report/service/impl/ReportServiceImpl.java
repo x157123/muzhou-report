@@ -70,7 +70,7 @@ public class ReportServiceImpl extends ServiceImpl<MzReportMapper, MzReport> imp
         if (StringUtils.hasText(name)) {
             wrapper.like(MzReport::getName, name);
         }
-        wrapper.orderByDesc(MzReport::getUpdateTime);
+        wrapper.orderByDesc(MzReport::getCreateTime);
         Page<MzReport> pageParam = new Page<>(pageNo, pageSize);
         Page<MzReport> result = page(pageParam, wrapper);
         return PageResult.of(result);

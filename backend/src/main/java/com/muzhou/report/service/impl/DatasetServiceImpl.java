@@ -552,7 +552,7 @@ public class DatasetServiceImpl extends ServiceImpl<MzDatasetMapper, MzDataset> 
         if (StringUtils.hasText(name)) {
             wrapper.like(MzDataset::getName, name);
         }
-        wrapper.orderByDesc(MzDataset::getUpdateTime);
+        wrapper.orderByDesc(MzDataset::getCreateTime);
         Page<MzDataset> pageParam = new Page<>(pageNo, pageSize);
         return PageResult.of(page(pageParam, wrapper));
     }
