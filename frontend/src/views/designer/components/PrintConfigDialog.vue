@@ -94,6 +94,19 @@
               {{ titleRowFirst }} 行起。
             </div>
           </el-form-item>
+
+          <el-form-item label="超高行">
+            <el-radio-group v-model="form.rowOverflow">
+              <el-radio-button value="slice">横切跨页</el-radio-button>
+              <el-radio-button value="split">续行</el-radio-button>
+            </el-radio-group>
+            <div class="text-muted" style="width: 100%; margin-top: 4px">
+              一行（比如长备注格）比一页还高时怎么出纸：<b>横切跨页</b>= 从中间切开接着印，
+              切口两边的格子各缺一条横边；<b>续行</b>= 装不下的文字另起一行接着印，
+              每页上都是边框闭合的完整格子，同一行里那些短格子也跟着留在第一页。
+              <b>只对导出的 PDF / Word 生效</b> —— Excel 里一行就是一行，浏览器打印同理。
+            </div>
+          </el-form-item>
         </el-form>
       </el-tab-pane>
 

@@ -542,46 +542,12 @@ public class ExcelExporter {
     /**
      * 文字在给定宽度下折成几行。
      *
-     * <p>字宽按「全角 1 个字号、半角半个字号」估，不去加载字体：服务器上未必装了报表用的那款
-     * 字体（Linux 容器常常连中文字体都没有），拿 AWT 量出来的反而可能离谱。中文报表里这个估法
-     * 误差在几个百分点，宁可略宽一点也不要把字切掉。
+     * <p>折行本身在 {@link RowSpill#wrapEstimate} 一处（字宽按「全角 1 个字号、半角半个字号」估，
+     * 不去加载字体）—— {@code WordExporter} 的续行用的是同一份，两处算出来的行数必须一样，
+     * 否则「Excel 里 12 行、Word 里切在第 11 行」。
      */
     private int countLines(String text, float fontSize, float maxWidth) {
-        int lines = 0;
-        for (String paragraph : text.split("\r\n|\r|\n", -1)) {
-            if (paragraph.isEmpty()) {
-                lines++;
-                continue;
-            }
-            float used = 0;
-            int inLine = 0;
-            for (int i = 0; i < paragraph.length(); i++) {
-                float w = charWidth(paragraph.charAt(i)) * fontSize;
-                if (inLine > 0 && used + w > maxWidth) {
-                    lines++;
-                    used = 0;
-                    inLine = 0;
-                }
-                used += w;
-                inLine++;
-            }
-            lines++;
-        }
-        return Math.max(lines, 1);
-    }
-
-    /** 字符占几个「字号」宽：CJK / 全角算 1，其余算 0.5。 */
-    private float charWidth(char ch) {
-        if (ch >= 0x1100 && (ch <= 0x115F                       // 韩文字母
-                || (ch >= 0x2E80 && ch <= 0xA4CF)               // CJK 部首 / 汉字 / 假名
-                || (ch >= 0xAC00 && ch <= 0xD7A3)               // 韩文音节
-                || (ch >= 0xF900 && ch <= 0xFAFF)               // CJK 兼容汉字
-                || (ch >= 0xFE30 && ch <= 0xFE6F)               // CJK 兼容标点
-                || (ch >= 0xFF00 && ch <= 0xFF60)               // 全角字符
-                || (ch >= 0xFFE0 && ch <= 0xFFE6))) {
-            return 1f;
-        }
-        return 0.5f;
+        return Math.max(RowSpill.wrapEstimate(text, fontSize, maxWidth).size(), 1);
     }
 
     /** 把报表的打印设置写进 sheet 的页面设置，使导出的 xlsx 直接按设计器里的设定出纸。 */

@@ -463,6 +463,16 @@ status / is_default）—— 漏了后者，副本会是一张没有版式的报
                                 //      **只能是内容范围最上面的连续若干行**（设了打印区域就从区域
                                 //      的第一行起算）；落在中间的三条导出路语义对不齐，一律忽略。
                                 //      存进 xlsx 的 _xlnm.Print_Titles，PDF / Word 从那里读回来
+    "rowOverflow": "slice",     // 比一页还高的行（长备注那种自动换行格）怎么出纸：
+                                //      slice = 横着劈开跨页印（默认，也是老报表的行为），
+                                //              切口两边的格子各缺一条横边；
+                                //      split = 续行，装不下的文字另起一行接着印，每页上都是
+                                //              边框闭合的完整格子，同一行里的短格子按顶对齐、
+                                //              跟着留在第一页。
+                                //      **只作用于 PDF / Word 两条导出路**（见下面的能力表）：
+                                //      xlsx 里没有「把一行拆成两行」这种表达，和水印一样存不进去，
+                                //      由 PdfExporter / WordExporter 各自从 PageConfigDTO 里读。
+                                //      缺省视为 slice
     // 页头 / 页尾：左中右三段，三段都空 = 没设置。缺省视为「没设置」（老报表没有这两项）。
     // 文字里可以写占位符，见下方「页头页尾占位符」。
     "header": {
@@ -540,13 +550,13 @@ sheet 的下标只打那一张。打出来与「导出 PDF」的文件逐页一�
 
 **各输出通道支持的范围**（不是所有通道都做得到）：
 
-| | 页头页尾 | 水印 | 顶端标题行（`titleRows`） | 行分页符（`mzRowBreaks`） | 按单据编页码（`mzDocBreaks`） | 按单据取名（`mzDocNames`） | 跳过不印页码的 sheet |
-|---|---|---|---|---|---|---|---|
-| Excel (.xlsx) | ✅ 写进 sheet 的页眉页脚 | ❌ Excel 没有水印这个概念 | ✅ `_xlnm.Print_Titles`（**只此一处写**） | ✅ 手动行分页符 | ⚠️ 只到 sheet 级：起始页号钉成 1；`&N` 恒是整个打印任务的页数 | ⚠️ 只到 sheet 级：`&A` 就是工作表名，`perRowPage` 拼成一张后整张同名 | ⚠️ 起始页号钉在**每份单据里第一张印页码**的 sheet 上（`&P` 对了，见 `pagePins`）；`&N` 仍是整本页数 |
-| PDF（OpenPDF） | ✅ | ✅ 压在内容之上 | ✅ 标题行不参与分页，每页顶部重画一遍 | ✅ 读 xlsx 里那份 | ✅ 逐页自己画，页码/总页数都按本单据 | ✅ 逐页换名 | ✅ 整张跳过，两个数都对 |
-| Word（POI） | ✅ 页码是 `PAGE` 域 | ✅ 页眉里的 VML 艺术字，**在正文下面** | ✅ `w:tblHeader`，Word 自己重画 | ✅ 落成行首格的 `pageBreakBefore` | ⚠️ 只到节级：`w:pgNumType` 重编 + `SECTIONPAGES`；`perRowPage` 做不到 | ⚠️ 只到节级（一张 sheet 一节）：`perRowPage` 全在同一节里，做不到 | ❌ 页眉页脚整份只有一套、跟**第一张** sheet，封面没设就等于整份都没有 |
-| 预览页（默认 PDF 视图 / 「打印」按钮） | ✅ 看的打的都是后端 PDF | ✅ 同 PDF | ✅ 同 PDF | ✅ 同 PDF | ✅ 同 PDF | ✅ 同 PDF | ✅ 同 PDF |
-| 预览页浏览器直接打印（Ctrl+P，只在表格视图下） | ❌ 见下 | ✅ `position:fixed` 每页重画 | ❌ FortuneSheet 是一整张 canvas | ❌ FortuneSheet 是一整张 canvas | ❌ 连页码都给不出来 | ❌ 同左 | ❌ 同左 |
+| | 页头页尾 | 水印 | 顶端标题行（`titleRows`） | 行分页符（`mzRowBreaks`） | 按单据编页码（`mzDocBreaks`） | 按单据取名（`mzDocNames`） | 跳过不印页码的 sheet | 超高行续行（`rowOverflow=split`） |
+|---|---|---|---|---|---|---|---|---|
+| Excel (.xlsx) | ✅ 写进 sheet 的页眉页脚 | ❌ Excel 没有水印这个概念 | ✅ `_xlnm.Print_Titles`（**只此一处写**） | ✅ 手动行分页符 | ⚠️ 只到 sheet 级：起始页号钉成 1；`&N` 恒是整个打印任务的页数 | ⚠️ 只到 sheet 级：`&A` 就是工作表名，`perRowPage` 拼成一张后整张同名 | ⚠️ 起始页号钉在**每份单据里第一张印页码**的 sheet 上（`&P` 对了，见 `pagePins`）；`&N` 仍是整本页数 | ❌ xlsx 里一行就是一行，「把一行拆成两行」表达不了（Excel 自己也是把超高行硬切开跨页印的） |
+| PDF（OpenPDF） | ✅ | ✅ 压在内容之上 | ✅ 标题行不参与分页，每页顶部重画一遍 | ✅ 读 xlsx 里那份 | ✅ 逐页自己画，页码/总页数都按本单据 | ✅ 逐页换名 | ✅ 整张跳过，两个数都对 | ✅ 切口对到两行文字之间，每页上都是边框闭合的完整格子 |
+| Word（POI） | ✅ 页码是 `PAGE` 域 | ✅ 页眉里的 VML 艺术字，**在正文下面** | ✅ `w:tblHeader`，Word 自己重画 | ✅ 落成行首格的 `pageBreakBefore` | ⚠️ 只到节级：`w:pgNumType` 重编 + `SECTIONPAGES`；`perRowPage` 做不到 | ⚠️ 只到节级（一张 sheet 一节）：`perRowPage` 全在同一节里，做不到 | ❌ 页眉页脚整份只有一套、跟**第一张** sheet，封面没设就等于整份都没有 | ⚠️ 真的多出一行（`w:cantSplit`），但切在哪儿是**估**的（字宽/行距按 `RowSpill#wrapEstimate` 算），与 Word 自己排出来的会差一两行 |
+| 预览页（默认 PDF 视图 / 「打印」按钮） | ✅ 看的打的都是后端 PDF | ✅ 同 PDF | ✅ 同 PDF | ✅ 同 PDF | ✅ 同 PDF | ✅ 同 PDF | ✅ 同 PDF | ✅ 同 PDF |
+| 预览页浏览器直接打印（Ctrl+P，只在表格视图下） | ❌ 见下 | ✅ `position:fixed` 每页重画 | ❌ FortuneSheet 是一整张 canvas | ❌ FortuneSheet 是一整张 canvas | ❌ 连页码都给不出来 | ❌ 同左 | ❌ 同左 | ❌ 同左 |
 
 页头页尾**在浏览器打印里做不到**：要每页出现只能用 `position:fixed`，而它定位的是页边距**以内**
 的区域，画不进页边距；画在里面就会压住表格（表格是一整张 canvas，没法像 `<thead>` 那样每页留白），
@@ -559,6 +569,15 @@ sheet 的下标只打那一张。打出来与「导出 PDF」的文件逐页一�
 `IntFunction<List<Integer>>`，与那份 xlsx 一一对齐（见 `RenderServiceImpl#renderToXlsx`）。
 `mzDocNames` 走同一条通道（`&A` 在 xlsx 里只有工作表名一个值），只有 `PdfExporter` 收
 —— 另两条路做不到逐份换名，见上面的能力表。
+
+**超高行的续行（`rowOverflow`）与水印同一条通道**：xlsx 里表达不了「把一行拆成两行」，
+所以它也是顺着 `PageConfigDTO` 递给两条转换器的。两边的做法不同、但**切口规则同一份**
+（`export/RowSpill`：切口只落在两行文字之间，绝不从一行字中间切过去）——
+PDF 是逐页自己画的，把格子的底色边框夹进本页就得到闭合的框（`PdfExporter#drawCell`）；
+Word 是转结构，得**真的多出一行**，于是要自己模拟一遍分页才知道切在哪儿
+（`WordExporter#plan`，行高按 Word 自己的列宽把文字重新折一遍算 —— xlsx 里那份被 Excel 的
+409.5pt 行高上限夹过，照它判永远触发不了续行）。
+Word 的 `rowOverflow` 与水印一样**整份一套、跟第一张 sheet**；PDF 是按 sheet 取的。
 
 **图片的三条导出路**：与水印相反，图片是**一处写、三处读**。`ExcelExporter#applyImages` 按
 `v.mzImg.src` 把图片取回字节（`export/ImageLoader`：`data:` URI 直接解码，http(s) 现下载，

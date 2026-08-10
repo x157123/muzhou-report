@@ -316,6 +316,205 @@ class PdfExporterTest {
                 blocks(PdfExporter.Geom.splitRows(new float[]{40, 40}, 100, Set.of(1))));
     }
 
+    /* ------------------------------ 超高行的续行 ------------------------------ */
+
+    @Test
+    @DisplayName("接着往下印的那一页不再重复前面印过的文字（不然 PDF 里每页都带着一整段）")
+    void continuationPageDoesNotRepeatThePrintedHead() throws Exception {
+        StringBuilder note = new StringBuilder();
+        for (int i = 0; i < 600; i++) {
+            note.append((char) ('一' + i));
+        }
+        PdfReader reader = new PdfReader(pdf.convert(
+                excel.export(List.of(noteSheet(note.toString())), new PageConfigDTO())));
+        int pages = reader.getNumberOfPages();
+        assertTrue(pages > 1, "前提：这一格该占好几页");
+
+        PdfTextExtractor extractor = new PdfTextExtractor(reader);
+        // 第 1 页的开头是备注的第一行；它不该再出现在后面任何一页上
+        String head = firstLine(extractor.getTextFromPage(1).lines()
+                .filter(s -> s.contains("一")).findFirst().orElse("一"));
+        for (int p = 2; p <= pages; p++) {
+            assertTrue(!extractor.getTextFromPage(p).contains(head),
+                    "第 " + p + " 页里还带着第 1 页印过的[" + head + "] —— 已经印过的文字仍写在内容流里，"
+                            + "画在了纸外面和页边距上");
+        }
+        reader.close();
+    }
+
+    @Test
+    @DisplayName("超高行跨页时，一个字都不许画到正文区外面（画出去的会露在页边距里、还让 PDF 每页都带一整段）")
+    void noTextIsDrawnOutsideTheBodyArea() throws Exception {
+        // 一行里好几列长短不一的长文字 —— 真实报表（询价单那种宽表）就是这个形状
+        for (String mode : List.of("slice", "split")) {
+            PageConfigDTO cfg = new PageConfigDTO();
+            cfg.setRowOverflow(mode);
+            byte[] bytes = pdf.convert(excel.export(List.of(multiNoteSheet()), cfg), i -> cfg);
+
+            PdfReader reader = new PdfReader(bytes);
+            assertTrue(reader.getNumberOfPages() > 2, "前提：该占好几页");
+            // A4 纵向、上下页边距各 10mm(28.35pt)；页尾没配，正文就是这一段
+            float top = 842 - 28.35f;
+            for (int p = 1; p <= reader.getNumberOfPages(); p++) {
+                for (float y : textBaselines(reader, p)) {
+                    // 字面框按真字体量级估：ascent≈0.85 个字号、descent≈-0.14，留 0.2pt 容差
+                    assertTrue(y - 0.14f * 11 > 28.35f - 0.2f && y + 0.85f * 11 < top + 0.2f,
+                            mode + " 模式第 " + p + " 页有文字画在正文区(" + 28.35f + ".." + top
+                                    + ")外面：基线 y=" + y);
+                }
+            }
+            reader.close();
+        }
+    }
+
+    /** 一页上所有文字的基线 y（`x y Tm` 的第二个数），页头页尾那两行除外 */
+    private List<Float> textBaselines(PdfReader reader, int page) throws Exception {
+        String content = new String(reader.getPageContent(page), java.nio.charset.StandardCharsets.ISO_8859_1);
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                        "[-\\d.]+ [-\\d.]+ [-\\d.]+ [-\\d.]+ ([-\\d.]+) ([-\\d.]+) Tm")
+                .matcher(content);
+        List<Float> ys = new ArrayList<>();
+        while (m.find()) {
+            ys.add(Float.parseFloat(m.group(2)));
+        }
+        return ys;
+    }
+
+    /** 一行里 4 列都是长文字（长短不一），列宽 60px —— 折出来比一页高好几倍 */
+    private Map<String, Object> multiNoteSheet() {
+        List<Map<String, Object>> celldata = new ArrayList<>();
+        Map<String, Object> columnlen = new LinkedHashMap<>();
+        int[] lengths = {900, 500, 260, 120};
+        for (int c = 0; c < lengths.length; c++) {
+            columnlen.put(String.valueOf(c), 60);
+            celldata.add(cell(0, c, "表头" + c, true));
+            StringBuilder text = new StringBuilder();
+            for (int i = 0; i < lengths[c]; i++) {
+                // 每列用不同的汉字段，各行文字互不相同
+                text.append((char) ('一' + c * 1000 + i));
+            }
+            Map<String, Object> wrapped = cell(1, c, text.toString(), false);
+            ((Map<String, Object>) wrapped.get("v")).put("tb", "2");
+            celldata.add(wrapped);
+        }
+
+        Map<String, Object> sheet = new LinkedHashMap<>();
+        sheet.put("name", "多列长备注");
+        sheet.put("celldata", celldata);
+        sheet.put("config", Map.of("columnlen", columnlen));
+        return sheet;
+    }
+
+    @Test
+    @DisplayName("续行：切口两边各是一个边框闭合的完整格子，页底多出一条封口的横线")
+    void rowSplitClosesTheCellBox() throws Exception {
+        String note = "起" + "一二三四五六七八九十".repeat(60) + "止";
+
+        byte[] sliced = borderedNote(note, "slice");
+        byte[] split = borderedNote(note, "split");
+
+        // 横切时格子的下边框画在整行的底边上 —— 那在纸外面好几百磅，这一页上是个敞口的格子
+        assertTrue(horizontalLines(sliced, 1).stream().noneMatch(y -> y > 0 && y < 60),
+                "前提：横切时第 1 页底部没有封口的横线，实际 " + horizontalLines(sliced, 1));
+        assertTrue(horizontalLines(split, 1).stream().anyMatch(y -> y > 0 && y < 60),
+                "续行时第 1 页底部该有一条把格子封口的横线，实际 " + horizontalLines(split, 1));
+
+        // 下一页同理：接着印的那一段顶边要封口，而横切时它在纸上边好几百磅的地方
+        assertTrue(horizontalLines(split, 2).stream().anyMatch(y -> y > 780 && y < 820),
+                "续行时第 2 页顶部该有一条封口的横线，实际 " + horizontalLines(split, 2));
+        assertTrue(horizontalLines(sliced, 2).stream().noneMatch(y -> y > 780 && y < 820),
+                "前提：横切时第 2 页顶部没有封口的横线，实际 " + horizontalLines(sliced, 2));
+    }
+
+    @Test
+    @DisplayName("续行时超高行按顶对齐：同一行里那个短短的格子留在第一页，不会跑到第二页中间去")
+    void rowSplitKeepsShortCellsOnTheFirstPage() throws Exception {
+        // 这一行要有好几页高，「整行垂直居中」才明显落在后面的页上
+        String note = "起" + "一二三四五六七八九十".repeat(200) + "止";
+        Map<String, Object> sheet = noteSheet(note);
+        // 同一行第 2 列放一个短短的序号：垂直居中的话它会落在这一行（好几页高）的正中间
+        List<Map<String, Object>> celldata = new ArrayList<>((List<Map<String, Object>>) sheet.get("celldata"));
+        celldata.add(cell(1, 1, "序号A1", false));
+        sheet.put("celldata", celldata);
+
+        PageConfigDTO split = new PageConfigDTO();
+        split.setRowOverflow("split");
+        PdfReader reader = new PdfReader(pdf.convert(excel.export(List.of(sheet), split), i -> split));
+        assertTrue(new PdfTextExtractor(reader).getTextFromPage(1).contains("序号A1"),
+                "序号该跟着这条数据的开头留在第 1 页");
+        reader.close();
+
+        // 对照：横切时它按整行垂直居中，落在中间那一页
+        PdfReader old = new PdfReader(pdf.convert(excel.export(List.of(sheet), new PageConfigDTO())));
+        assertTrue(!new PdfTextExtractor(old).getTextFromPage(1).contains("序号A1"),
+                "前提：不开续行时它不在第 1 页（否则这个用例证明不了什么）");
+        old.close();
+    }
+
+    @Test
+    @DisplayName("续行不吃字：各页拼起来仍是完整的一段")
+    void rowSplitKeepsEveryCharacter() throws Exception {
+        StringBuilder note = new StringBuilder();
+        for (int i = 0; i < 400; i++) {
+            note.append((char) ('一' + i));
+        }
+        PageConfigDTO cfg = new PageConfigDTO();
+        cfg.setRowOverflow("split");
+
+        PdfReader reader = new PdfReader(pdf.convert(
+                excel.export(List.of(noteSheet(note.toString())), cfg), i -> cfg));
+        StringBuilder all = new StringBuilder();
+        PdfTextExtractor extractor = new PdfTextExtractor(reader);
+        for (int p = 1; p <= reader.getNumberOfPages(); p++) {
+            extractor.getTextFromPage(p).lines().map(String::trim).forEach(all::append);
+        }
+        for (int i = 0; i < 400; i++) {
+            assertTrue(all.indexOf(String.valueOf((char) ('一' + i))) >= 0,
+                    "第 " + i + " 个字丢了");
+        }
+        reader.close();
+    }
+
+    /** 一份带四周边框的长备注表，按给定的 rowOverflow 出 PDF */
+    private byte[] borderedNote(String note, String rowOverflow) {
+        Map<String, Object> sheet = noteSheet(note);
+        Map<String, Object> config = new LinkedHashMap<>((Map<String, Object>) sheet.get("config"));
+        config.put("borderInfo", List.of(Map.of(
+                "rangeType", "range", "borderType", "border-all", "style", "1", "color", "#000000",
+                "range", List.of(Map.of("row", List.of(0, 1), "column", List.of(0, 1))))));
+        sheet.put("config", config);
+
+        PageConfigDTO cfg = new PageConfigDTO();
+        cfg.setRowOverflow(rowOverflow);
+        return pdf.convert(excel.export(List.of(sheet), cfg), i -> cfg);
+    }
+
+    /**
+     * 一页上所有横线的 y 坐标（去重后从高到低）。
+     *
+     * <p>OpenPDF 把每条边框写成 {@code x1 y1 m  x2 y2 l  S}，这里就照这个形状把内容流扫一遍 ——
+     * 「切口两边的格子封没封口」只有在画出来的线上才看得出来，文字提取看不到边框。
+     */
+    private List<Float> horizontalLines(byte[] pdfBytes, int page) throws Exception {
+        PdfReader reader = new PdfReader(pdfBytes);
+        String content = new String(reader.getPageContent(page), java.nio.charset.StandardCharsets.ISO_8859_1);
+        reader.close();
+
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                        "(-?[\\d.]+) (-?[\\d.]+) m\\s+(-?[\\d.]+) (-?[\\d.]+) l")
+                .matcher(content);
+        java.util.TreeSet<Float> ys = new java.util.TreeSet<>();
+        while (m.find()) {
+            float y1 = Float.parseFloat(m.group(2));
+            float y2 = Float.parseFloat(m.group(4));
+            if (Math.abs(y1 - y2) < 0.01f) {
+                // 同一条线可能被相邻两格各画一次，四舍五入到 0.1pt 去重
+                ys.add(Math.round(y1 * 10) / 10f);
+            }
+        }
+        return new ArrayList<>(ys);
+    }
+
     /** 把切页结果压成 "起行-止行@首行已印高度" 的串，好写断言 */
     private List<String> blocks(List<PdfExporter.RowBlock> blocks) {
         return blocks.stream()

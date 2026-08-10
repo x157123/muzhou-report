@@ -56,6 +56,7 @@ import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTTblWidth;
 import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTTcBorders;
 import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTTcPr;
 import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTText;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTTrPr;
 import org.openxmlformats.schemas.wordprocessingml.x2006.main.STBorder;
 import org.openxmlformats.schemas.wordprocessingml.x2006.main.STFldCharType;
 import org.openxmlformats.schemas.wordprocessingml.x2006.main.STMerge;
@@ -73,6 +74,7 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.math.BigInteger;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -131,6 +133,21 @@ public class WordExporter {
      */
     private static final double CELL_SIDE_PADDING_PT = 11;
 
+    /** 文字行距系数，与 {@code ExcelExporter#LINE_HEIGHT}、前端 {@code utils/wrapHeight.js} 同一个数。 */
+    private static final float LINE_HEIGHT = (float) PageConfigDTO.LINE_HEIGHT;
+
+    /**
+     * 续行时正文高度按九成算。
+     *
+     * <p>切在哪儿是我们**估**出来的（字宽按字号估、行距按 1.35 估），而真正排版的是 Word。
+     * 估短了没事（那一段留白一点），估长了 Word 就把整段挤到下一页去、前一页大片空白 ——
+     * 所以宁可切得保守些。
+     */
+    private static final float SPILL_SAFETY = 0.9f;
+
+    /** 续行时一段至少要有这么高才值得切（磅）：再小就不如整段换页。 */
+    private static final float MIN_PART_PT = 12;
+
     /** 纸张尺寸（mm，纵向摆放），与 ExcelExporter / 前端 utils/print.js 的那份对齐。 */
     private static final Map<Short, int[]> PAPER_SIZES = Map.of(
             PrintSetup.A3_PAPERSIZE, new int[]{297, 420},
@@ -164,7 +181,9 @@ public class WordExporter {
      * xlsx -> docx。
      *
      * <p>页头页尾不用从这里传：{@code ExcelExporter} 已经把它们写进 xlsx 的页眉页脚，这里读回来
-     * 搬成 docx 的页眉页脚。{@code pageConfig} 只为**水印**而来 —— xlsx 里没有水印这个概念。
+     * 搬成 docx 的页眉页脚。{@code pageConfig} 是为**水印**和**续行开关**
+     * （{@code rowOverflow}，见 {@link #plan}）而来 —— 这两样 xlsx 里都没有对应的表达。
+     * 两者同样是**整份文档一套、跟第一张 sheet**。
      *
      * <p>纸张/方向/页边距同样不用传：它们在 xlsx 里按 sheet 存着，这里逐张读出来写进各自那一节。
      *
@@ -218,7 +237,8 @@ public class WordExporter {
                     applyHeaderFooter(doc, sheet, printable,
                             pageConfig == null ? null : pageConfig.getWatermark(), perDoc);
                 }
-                writeSheet(doc, sheet, wb.getPrintArea(i), printable, formatter, evaluator);
+                writeSheet(doc, sheet, wb.getPrintArea(i), printable, formatter, evaluator,
+                        pageConfig != null && pageConfig.isRowSplit());
                 // 每张 sheet 自成一节：最后一张的页面设置写在 body 的 sectPr 上，
                 // 前面几张写在各自的分节符里
                 CTSectPr body = bodySectPr(doc);
@@ -258,9 +278,6 @@ public class WordExporter {
         int width = mmToTwips(landscape ? mm[1] : mm[0]);
         int height = mmToTwips(landscape ? mm[0] : mm[1]);
 
-        int top = inchToTwips(sheet.getMargin(PageMargin.TOP));
-        int bottom = inchToTwips(sheet.getMargin(PageMargin.BOTTOM));
-
         CTPageSz pgSz = sect.isSetPgSz() ? sect.getPgSz() : sect.addNewPgSz();
         pgSz.setW(BigInteger.valueOf(width));
         pgSz.setH(BigInteger.valueOf(height));
@@ -269,14 +286,29 @@ public class WordExporter {
         int headerMargin = inchToTwips(sheet.getMargin(PageMargin.HEADER));
         int footerMargin = inchToTwips(sheet.getMargin(PageMargin.FOOTER));
 
+        int[] margins = bodyMargins(sheet);
         CTPageMar mar = sect.isSetPgMar() ? sect.getPgMar() : sect.addNewPgMar();
         mar.setLeft(BigInteger.valueOf(inchToTwips(sheet.getMargin(PageMargin.LEFT))));
         mar.setRight(BigInteger.valueOf(inchToTwips(sheet.getMargin(PageMargin.RIGHT))));
-        // 页眉页脚画在页边距里，页边距不够高时把正文推下去（和 Excel / PDF 那条路同一个规则）
-        mar.setTop(BigInteger.valueOf(Math.max(top, reserve(sheet, true, headerMargin))));
-        mar.setBottom(BigInteger.valueOf(Math.max(bottom, reserve(sheet, false, footerMargin))));
+        mar.setTop(BigInteger.valueOf(margins[0]));
+        mar.setBottom(BigInteger.valueOf(margins[1]));
         mar.setHeader(BigInteger.valueOf(headerMargin));
         mar.setFooter(BigInteger.valueOf(footerMargin));
+    }
+
+    /**
+     * 正文的上/下页边距（twip）。
+     *
+     * <p>页眉页脚画在页边距里，页边距不够高时把正文推下去（和 Excel / PDF 那条路同一个规则）。
+     * 续行要算「一页放得下多少正文」（{@link #bodyHeightPt}），用的必须是这一份 ——
+     * 各算各的就会与实际出纸对不上。
+     */
+    private int[] bodyMargins(XSSFSheet sheet) {
+        int headerMargin = inchToTwips(sheet.getMargin(PageMargin.HEADER));
+        int footerMargin = inchToTwips(sheet.getMargin(PageMargin.FOOTER));
+        return new int[]{
+                Math.max(inchToTwips(sheet.getMargin(PageMargin.TOP)), reserve(sheet, true, headerMargin)),
+                Math.max(inchToTwips(sheet.getMargin(PageMargin.BOTTOM)), reserve(sheet, false, footerMargin))};
     }
 
     /**
@@ -521,7 +553,7 @@ public class WordExporter {
     /* ------------------------------ 表格 ------------------------------ */
 
     private void writeSheet(XWPFDocument doc, XSSFSheet sheet, String printArea, int printable,
-                            DataFormatter formatter, FormulaEvaluator evaluator) {
+                            DataFormatter formatter, FormulaEvaluator evaluator, boolean spill) {
         int[] cols = columnRange(sheet, printArea);
         if (cols == null) {
             return;
@@ -536,21 +568,43 @@ public class WordExporter {
         int colCount = widths.length;
         Map<String, CellPicture> pictures = readPictures(sheet);
 
-        XWPFTable table = doc.createTable(lastRow - firstRow + 1, colCount);
-        layoutTable(table, widths);
         Set<Integer> breaks = rowBreaks(sheet);
-
         int titleR1 = titleRows(sheet, firstRow, lastRow);
+        List<Part> parts = plan(sheet, cols, widths, firstRow, lastRow, titleR1, breaks, spill,
+                formatter, evaluator);
 
-        for (int r = firstRow; r <= lastRow; r++) {
-            XWPFTableRow row = table.getRow(r - firstRow);
-            applyRowHeight(row, sheet.getRow(r));
+        XWPFTable table = doc.createTable(parts.size(), colCount);
+        layoutTable(table, widths);
+
+        // 源行 -> 它占了表格的哪几行（续行时一个源行会出好几行），合并要照它换算
+        int[] partFirst = new int[lastRow - firstRow + 1];
+        int[] partLast = new int[lastRow - firstRow + 1];
+        Arrays.fill(partFirst, -1);
+
+        for (int k = 0; k < parts.size(); k++) {
+            Part part = parts.get(k);
+            int r = part.src();
+            if (partFirst[r - firstRow] < 0) {
+                partFirst[r - firstRow] = k;
+            }
+            partLast[r - firstRow] = k;
+
+            XWPFTableRow row = table.getRow(k);
+            if (part.height() >= 0) {
+                setRowHeight(row, part.height());
+            } else {
+                applyRowHeight(row, sheet.getRow(r));
+            }
             if (r <= titleR1) {
                 // 顶端标题行：Word 自己会在每一页的表格上方重画这几行
                 row.setRepeatHeader(true);
             }
-            if (r > firstRow && breaks.contains(r)) {
+            if (r > firstRow && part.head() && breaks.contains(r)) {
                 pageBreakBefore(row);
+            }
+            if (part.text() != null) {
+                // 切好的段不许 Word 再断一次：两套断行叠加，位置对不上
+                cantSplit(row);
             }
             for (int c = cols[0]; c <= cols[1]; c++) {
                 XWPFTableCell cell = row.getCell(c - cols[0]);
@@ -558,10 +612,242 @@ public class WordExporter {
                     continue;
                 }
                 setCellWidth(cell, widths[c - cols[0]]);
-                writeCell(cell, sheet, r, c, formatter, evaluator, pictures.get(r + "_" + c), cols, widths);
+                // 图片切不开，只放在第一段里
+                CellPicture picture = part.head() ? pictures.get(r + "_" + c) : null;
+                writeCell(cell, sheet, r, c, formatter, evaluator, picture, cols, widths,
+                        part.text() == null ? null : part.text().getOrDefault(c, ""));
             }
         }
-        applyMerges(table, sheet, cols, firstRow, lastRow, widths);
+        applyMerges(table, sheet, cols, firstRow, lastRow, widths, partFirst, partLast);
+    }
+
+    /* ------------------------------ 续行 ------------------------------ */
+
+    /**
+     * 表格的一行。普通情况下一个源行出一行，续行时一个源行出好几行。
+     *
+     * @param src    对应 xlsx 里的第几行
+     * @param height 这一行多高（磅）；<b>负数 = 照搬 xlsx 里的行高</b>（没切过的行走这条）
+     * @param head   是不是该源行的第一段（分页符只挂在它上面，图片也只放它里面）
+     * @param text   列 -> 这一段该印的文字；<b>null = 整格文字原样印</b>（没切过的行）
+     */
+    private record Part(int src, float height, boolean head, Map<Integer, String> text) {
+    }
+
+    /** 一格量出来的文字：折出来的那些行 + 它们在行内的排布。 */
+    private record CellLines(int col, List<RowSpill.Line> lines, RowSpill.Lines geom, float height) {
+    }
+
+    /**
+     * 排出这张表要占表格的哪些行 —— 也就是「哪些超高行要切成几段」。
+     *
+     * <p>没开续行（{@code pageConfig.rowOverflow != split}）时原样一行一行排，与老行为一模一样。
+     *
+     * <p>开了续行就得<b>自己模拟一遍分页</b>：Word 是转结构不是渲染，切完要真的多出一行，
+     * 而「切在哪儿」只有知道页有多高、每行多高才说得出来。这两样都拿得到 —— 页高来自
+     * 这张 sheet 的页面设置，行高按 Word 自己的列宽把文字折一遍算出来
+     * （{@link #measureRow}；<b>不能照搬 xlsx 里的行高</b>：那份被 Excel 的 409.5pt 行高上限夹过，
+     * 三页高的备注格在 xlsx 里也就 409.5pt，照它判就永远不会触发续行）。
+     *
+     * <p>切口交给 {@link RowSpill#snapCut} 对到两行文字之间，与 PDF 那条路同一份算法 ——
+     * 不然同一张报表 PDF 切在第 12 行下面、Word 切在第 11 行下面，对着看就是两份东西。
+     *
+     * <p><b>估算与 Word 的实际排版必有出入</b>（字宽是估的、Word 的行距也未必正好 1.35），
+     * 所以正文高度按 {@link #SPILL_SAFETY} 打折 —— 估短了那一段留白一点，估长了 Word 会把整段
+     * 挤到下一页去、前一页大片空白。
+     *
+     * <p>不参与续行的：<b>跨行合并</b>的行（高度该摊给哪一行没有确定答案，与 PDF / Excel 那两处
+     * 同一条规则）、顶端标题行（每页重画，本来就该短）。
+     */
+    private List<Part> plan(XSSFSheet sheet, int[] cols, int[] widths, int firstRow, int lastRow,
+                            int titleR1, Set<Integer> breaks, boolean spill,
+                            DataFormatter formatter, FormulaEvaluator evaluator) {
+        List<Part> out = new ArrayList<>();
+        if (!spill) {
+            for (int r = firstRow; r <= lastRow; r++) {
+                out.add(new Part(r, -1, true, null));
+            }
+            return out;
+        }
+
+        // 一页放得下多少正文：可打印高度扣掉每页都要重画的标题行，再打个安全折扣
+        float cap = bodyHeightPt(sheet);
+        for (int r = firstRow; r <= titleR1; r++) {
+            cap -= rowHeightPt(sheet, r);
+        }
+        cap *= SPILL_SAFETY;
+
+        float used = 0;
+        for (int r = firstRow; r <= lastRow; r++) {
+            if (breaks.contains(r)) {
+                used = 0;
+            }
+            List<CellLines> cells = r > titleR1 && !inRowMerge(sheet, r)
+                    ? measureRow(sheet, cols, widths, r, formatter, evaluator) : null;
+            float h = Math.max(rowHeightPt(sheet, r), height(cells));
+            if (cap <= 0 || cells == null || h <= cap) {
+                // 装得进一页的行照旧整行走：放不下就整行挪到下一页
+                if (used + h > cap) {
+                    used = 0;
+                }
+                used += h;
+                out.add(new Part(r, -1, true, null));
+                continue;
+            }
+
+            // 比一页还高：从本页剩下的地方开始切，一页页接着印
+            List<RowSpill.Lines> grids = cells.stream().map(CellLines::geom).toList();
+            float printed = 0;
+            while (true) {
+                float room = cap - used;
+                if (h - printed <= room + 0.01f) {
+                    out.add(part(r, cells, printed, h, printed <= 0));
+                    used += h - printed;
+                    break;
+                }
+                float at = room > MIN_PART_PT ? RowSpill.snapCut(printed + room, grids) : printed;
+                if (at - printed <= MIN_PART_PT) {
+                    if (used > 0) {
+                        // 本页剩下的地方切不出一段，换页再来
+                        used = 0;
+                        continue;
+                    }
+                    // 整页都放不下一行字（字比一页还高）：硬切，不然这里就是个死循环
+                    at = printed + room;
+                }
+                out.add(part(r, cells, printed, at, printed <= 0));
+                printed = at;
+                used = 0;
+            }
+        }
+        return out;
+    }
+
+    /** 切出一段：每一格取「完整落在 {@code from..to} 里」的那几行文字。 */
+    private Part part(int r, List<CellLines> cells, float from, float to, boolean head) {
+        Map<Integer, String> text = new HashMap<>();
+        for (CellLines cl : cells) {
+            int a = RowSpill.linesAbove(cl.geom(), from);
+            int b = RowSpill.linesAbove(cl.geom(), to);
+            StringBuilder sb = new StringBuilder();
+            for (int i = a; i < b; i++) {
+                RowSpill.Line line = cl.lines().get(i);
+                // 段内的折行交给 Word 自己再折一次（它的字体与我们估的不一样，硬折会长短不齐），
+                // 只有原文里真有的换行才写成换行
+                if (i > a && line.head()) {
+                    sb.append('\n');
+                }
+                sb.append(line.text());
+            }
+            text.put(cl.col(), sb.toString());
+        }
+        return new Part(r, to - from, head, text);
+    }
+
+    /** 这一行按 Word 的列宽把文字折一遍，量出每一格占几行；整行没有文字时返回 null。 */
+    private List<CellLines> measureRow(XSSFSheet sheet, int[] cols, int[] widths, int r,
+                                       DataFormatter formatter, FormulaEvaluator evaluator) {
+        Row row = sheet.getRow(r);
+        if (row == null) {
+            return null;
+        }
+        List<CellLines> out = new ArrayList<>();
+        for (int c = cols[0]; c <= cols[1]; c++) {
+            Cell cell = row.getCell(c);
+            if (cell == null) {
+                continue;
+            }
+            String text = text(cell, formatter, evaluator);
+            if (text.isEmpty()) {
+                continue;
+            }
+            CellRangeAddress region = regionAt(sheet, r, c);
+            if (region != null && (region.getFirstRow() != r || region.getFirstColumn() != c)) {
+                // 跨列合并只在锚点那一格算，被吃掉的格子是空的
+                continue;
+            }
+            double twips = 0;
+            for (int i = Math.max(region == null ? c : region.getFirstColumn(), cols[0]);
+                 i <= Math.min(region == null ? c : region.getLastColumn(), cols[1]); i++) {
+                twips += widths[i - cols[0]];
+            }
+            // twip -> 磅是 /20，再让出单元格的左右内边距
+            float width = (float) Math.max(twips / 20 - CELL_SIDE_PADDING_PT, 1);
+            XSSFCellStyle style = (XSSFCellStyle) cell.getCellStyle();
+            XSSFFont font = style == null ? null : style.getFont();
+            float size = font == null || font.getFontHeightInPoints() <= 0
+                    ? DEFAULT_FONT_SIZE : font.getFontHeightInPoints();
+            // Word 表格里的文字一律自动换行，不看 Excel 那边开没开
+            List<RowSpill.Line> lines = RowSpill.wrapEstimate(text, size, width);
+            float lineHeight = size * LINE_HEIGHT;
+            // 行距即字面高 = 「行与行之间没有空隙」：量不到真字体，往保守的一侧靠，
+            // 切口一律对到整行上
+            out.add(new CellLines(c, lines,
+                    new RowSpill.Lines(0, lineHeight, lineHeight, lines.size()),
+                    lines.size() * lineHeight));
+        }
+        return out.isEmpty() ? null : out;
+    }
+
+    /** 这一行按文字量出来多高（磅）。 */
+    private float height(List<CellLines> cells) {
+        float h = 0;
+        if (cells != null) {
+            for (CellLines cl : cells) {
+                h = Math.max(h, cl.height());
+            }
+        }
+        return h;
+    }
+
+    /** 这一行有没有被跨行合并盖住。 */
+    private boolean inRowMerge(XSSFSheet sheet, int r) {
+        for (CellRangeAddress m : sheet.getMergedRegions()) {
+            if (m.getLastRow() > m.getFirstRow() && r >= m.getFirstRow() && r <= m.getLastRow()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** (r,c) 所属的合并区域，未合并返回 null。 */
+    private CellRangeAddress regionAt(XSSFSheet sheet, int r, int c) {
+        for (CellRangeAddress m : sheet.getMergedRegions()) {
+            if (m.isInRange(r, c)) {
+                return m;
+            }
+        }
+        return null;
+    }
+
+    /** xlsx 里第 r 行的行高（磅）。 */
+    private float rowHeightPt(XSSFSheet sheet, int r) {
+        Row row = sheet.getRow(r);
+        return row == null ? sheet.getDefaultRowHeightInPoints() : row.getHeightInPoints();
+    }
+
+    /** 这一节的正文高度（磅）= 纸张高 - 上下页边距（页边距已为页眉页脚让过位，与 {@link #applyPageSetup} 同源）。 */
+    private float bodyHeightPt(XSSFSheet sheet) {
+        PrintSetup ps = sheet.getPrintSetup();
+        int[] mm = PAPER_SIZES.getOrDefault(ps.getPaperSize(), PAPER_SIZES.get(PrintSetup.A4_PAPERSIZE));
+        int height = mmToTwips(ps.getLandscape() ? mm[0] : mm[1]);
+        int[] margins = bodyMargins(sheet);
+        return Math.max(height - margins[0] - margins[1], 0) / 20f;
+    }
+
+    /** 这一行不许 Word 自己再断开（{@code w:cantSplit}）。 */
+    private void cantSplit(XWPFTableRow row) {
+        CTTrPr pr = row.getCtRow().isSetTrPr() ? row.getCtRow().getTrPr() : row.getCtRow().addNewTrPr();
+        if (pr.sizeOfCantSplitArray() == 0) {
+            pr.addNewCantSplit();
+        }
+    }
+
+    private void setRowHeight(XWPFTableRow row, float points) {
+        int twips = Math.round(points * 20);
+        if (twips > 0) {
+            row.setHeight(twips);
+        }
     }
 
     /**
@@ -848,18 +1134,28 @@ public class WordExporter {
 
     /* ------------------------------ 单元格 ------------------------------ */
 
+    /**
+     * @param part 续行时这一段该印的文字（见 {@link #plan}）；null = 整格文字原样印。
+     *             切开的格子一律<b>顶对齐</b>：接着上一段往下印的文字要贴着格子上边，
+     *             居中的话每一段的文字都各自缩在自己那一格的中间，看着断断续续
+     */
     private void writeCell(XWPFTableCell cell, XSSFSheet sheet, int r, int c,
                            DataFormatter formatter, FormulaEvaluator evaluator,
-                           CellPicture picture, int[] cols, int[] widths) {
+                           CellPicture picture, int[] cols, int[] widths, String part) {
         Row row = sheet.getRow(r);
         Cell src = row == null ? null : row.getCell(c);
         XSSFCellStyle style = src == null ? null : (XSSFCellStyle) src.getCellStyle();
 
         applyFill(cell, style);
         applyBorders(cell, style);
-        applyVerticalAlign(cell, style);
+        if (part == null) {
+            applyVerticalAlign(cell, style);
+        } else {
+            (tcPr(cell).isSetVAlign() ? tcPr(cell).getVAlign() : tcPr(cell).addNewVAlign())
+                    .setVal(STVerticalJc.TOP);
+        }
 
-        String text = src == null ? "" : text(src, formatter, evaluator);
+        String text = part != null ? part : src == null ? "" : text(src, formatter, evaluator);
         XWPFParagraph p = cell.getParagraphs().get(0);
         p.setAlignment(alignment(style, src));
         // 表格里默认的段前段后间距会把行撑高，去掉才贴近 Excel 的行高
@@ -1017,10 +1313,17 @@ public class WordExporter {
      *       表现就是「合并单元格没算对」。</li>
      *   <li><b>从右往左处理</b>：删格子只影响它右边的下标，所以先做靠右的合并，
      *       左边的合并区下标才不用跟着修正。反过来做就会串位。</li>
+     *   <li><b>一个源行未必只占表格的一行</b>：续行时超高行被切成了好几行
+     *       （{@link #plan}），横向合并要在它的<b>每一段</b>上都做一次，否则第二段起整行多出
+     *       {@code span-1} 格。纵向合并的行不参与续行，所以那一维仍是一一对应的。</li>
      * </ol>
+     *
+     * @param partFirst 源行（下标 {@code r - firstRow}）-> 它在表格里的第一行
+     * @param partLast  源行 -> 它在表格里的最后一行
      */
     private void applyMerges(XWPFTable table, XSSFSheet sheet, int[] cols,
-                            int firstRow, int lastRow, int[] widths) {
+                            int firstRow, int lastRow, int[] widths,
+                            int[] partFirst, int[] partLast) {
         List<CellRangeAddress> merges = new ArrayList<>(sheet.getMergedRegions());
         merges.sort((a, b) -> Integer.compare(b.getFirstColumn(), a.getFirstColumn()));
 
@@ -1040,25 +1343,31 @@ public class WordExporter {
             }
 
             for (int r = r0; r <= r1; r++) {
-                XWPFTableRow row = table.getRow(r - firstRow);
-                XWPFTableCell cell = row == null ? null : row.getCell(idx);
-                if (cell == null) {
+                int from = partFirst[r - firstRow];
+                if (from < 0) {
                     continue;
                 }
-                if (span > 1) {
-                    CTTcPr pr = tcPr(cell);
-                    (pr.isSetGridSpan() ? pr.getGridSpan() : pr.addNewGridSpan())
-                            .setVal(BigInteger.valueOf(span));
-                    // 被合并吃掉的格子从行里删掉，否则整行会多出 span-1 格
-                    for (int k = 0; k < span - 1 && row.getTableCells().size() > idx + 1; k++) {
-                        row.removeCell(idx + 1);
+                for (int k = from; k <= partLast[r - firstRow]; k++) {
+                    XWPFTableRow row = table.getRow(k);
+                    XWPFTableCell cell = row == null ? null : row.getCell(idx);
+                    if (cell == null) {
+                        continue;
                     }
-                    setCellWidth(cell, width);
-                }
-                if (r1 > r0) {
-                    CTTcPr pr = tcPr(cell);
-                    (pr.isSetVMerge() ? pr.getVMerge() : pr.addNewVMerge())
-                            .setVal(r == r0 ? STMerge.RESTART : STMerge.CONTINUE);
+                    if (span > 1) {
+                        CTTcPr pr = tcPr(cell);
+                        (pr.isSetGridSpan() ? pr.getGridSpan() : pr.addNewGridSpan())
+                                .setVal(BigInteger.valueOf(span));
+                        // 被合并吃掉的格子从行里删掉，否则整行会多出 span-1 格
+                        for (int n = 0; n < span - 1 && row.getTableCells().size() > idx + 1; n++) {
+                            row.removeCell(idx + 1);
+                        }
+                        setCellWidth(cell, width);
+                    }
+                    if (r1 > r0) {
+                        CTTcPr pr = tcPr(cell);
+                        (pr.isSetVMerge() ? pr.getVMerge() : pr.addNewVMerge())
+                                .setVal(k == from && r == r0 ? STMerge.RESTART : STMerge.CONTINUE);
+                    }
                 }
             }
         }

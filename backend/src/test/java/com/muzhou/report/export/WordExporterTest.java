@@ -97,6 +97,84 @@ class WordExporterTest {
         }
     }
 
+    /* ------------------------------ 超高行的续行 ------------------------------ */
+
+    @Test
+    @DisplayName("续行：比一页还高的行真的拆成好几行，文字一个不丢，每一段都不许 Word 再断")
+    void rowSplitBreaksTheRowIntoRealRows() throws Exception {
+        String note = longNote();
+        PageConfigDTO cfg = new PageConfigDTO();
+        cfg.setRowOverflow("split");
+
+        try (XWPFDocument doc = new XWPFDocument(new ByteArrayInputStream(
+                word.convert(excel.export(List.of(noteSheet(note)), cfg), cfg)))) {
+            XWPFTable table = doc.getTables().get(0);
+            assertTrue(table.getNumberOfRows() > 2,
+                    "1 个表头 + 1 个超高行该拆成 3 行以上，实际 " + table.getNumberOfRows() + " 行");
+
+            StringBuilder all = new StringBuilder();
+            for (int r = 1; r < table.getNumberOfRows(); r++) {
+                XWPFTableRow row = table.getRow(r);
+                all.append(row.getCell(0).getText());
+                CTTrPr pr = row.getCtRow().getTrPr();
+                assertTrue(pr != null && pr.sizeOfCantSplitArray() == 1,
+                        "第 " + r + " 行是切出来的一段，得禁止 Word 再断一次");
+            }
+            assertEquals(note, all.toString(), "各段拼起来该是完整的原文");
+        }
+    }
+
+    @Test
+    @DisplayName("默认（横切）时行数与源行一一对应，老报表的表现不变")
+    void withoutRowSplitRowsMapOneToOne() throws Exception {
+        try (XWPFDocument doc = new XWPFDocument(new ByteArrayInputStream(
+                word.convert(excel.export(List.of(noteSheet(longNote())), new PageConfigDTO()))))) {
+            assertEquals(2, doc.getTables().get(0).getNumberOfRows(), "表头 + 备注，就两行");
+        }
+    }
+
+    @Test
+    @DisplayName("切开的每一段都要带上横向合并，否则第二段起整行多出几格")
+    void everyPartKeepsItsHorizontalMerge() throws Exception {
+        Map<String, Object> s = noteSheet(longNote());
+        Map<String, Object> config = new LinkedHashMap<>((Map<String, Object>) s.get("config"));
+        // 备注那一行横跨两列
+        config.put("merge", Map.of("1_0", Map.of("r", 1, "c", 0, "rs", 1, "cs", 2)));
+        s.put("config", config);
+
+        PageConfigDTO cfg = new PageConfigDTO();
+        cfg.setRowOverflow("split");
+        try (XWPFDocument doc = new XWPFDocument(new ByteArrayInputStream(
+                word.convert(excel.export(List.of(s), cfg), cfg)))) {
+            XWPFTable table = doc.getTables().get(0);
+            assertTrue(table.getNumberOfRows() > 2, "前提：该拆成好几行");
+            for (int r = 1; r < table.getNumberOfRows(); r++) {
+                assertEquals(1, table.getRow(r).getTableCells().size(),
+                        "第 " + r + " 行合并之后只该剩一格");
+                assertEquals(2, gridSpan(table.getRow(r).getCell(0)),
+                        "第 " + r + " 行该跨 2 列");
+            }
+        }
+    }
+
+    /** 一段长到 Word 里比一页还高的备注（列宽会被铺满正文宽度，所以要够长） */
+    private String longNote() {
+        return "起" + "长备注".repeat(2000) + "止";
+    }
+
+    /** 第 0 行是表头，第 1 行第 1 格是开了自动换行的长备注 */
+    private Map<String, Object> noteSheet(String note) {
+        Map<String, Object> config = new LinkedHashMap<>();
+        config.put("columnlen", Map.of("0", 100, "1", 100));
+
+        Map<String, Object> sheet = new LinkedHashMap<>();
+        sheet.put("name", "长备注");
+        sheet.put("celldata", List.of(cell(0, 0, "城市", Map.of("bl", "1")),
+                cell(1, 0, note, Map.of("tb", "2"))));
+        sheet.put("config", config);
+        return sheet;
+    }
+
     @Test
     @DisplayName("没配顶端标题行时一行都不标，老报表的表现不变")
     void withoutTitleRowsNoRepeatHeader() throws Exception {

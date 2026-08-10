@@ -104,6 +104,13 @@ export function defaultPageConfig() {
     printArea: '',
     /** 顶端标题行（跨页重复的表头），形如 "1:3"（1 起算、闭区间）；空串表示不重复 */
     titleRows: '',
+    /**
+     * 比一页还高的行怎么出纸：'slice' 横着劈开跨页印（默认）/ 'split' 续行（另起一行接着印，
+     * 每页上都是边框闭合的完整格子）。
+     * **只作用于 PDF / Word 两条导出路**，Excel 与浏览器打印做不到（见 CONTRACT §4 能力表），
+     * 所以画布上的分页线也不体现它。
+     */
+    rowOverflow: 'slice',
     /** 页头/页尾：画在页边距里，三段都空 = 没设置 */
     header: defaultHeaderFooter(),
     footer: defaultHeaderFooter(),
@@ -120,6 +127,8 @@ export function normalizePageConfig(cfg) {
   merged.limitWidth = merged.limitWidth == null ? true : !!merged.limitWidth
   merged.printArea = String(merged.printArea || '').trim().toUpperCase()
   merged.titleRows = String(merged.titleRows || '').trim().replace(/\$/g, '')
+  // 老报表里没有这一项，缺省是老行为（横切）
+  if (merged.rowOverflow !== 'split') merged.rowOverflow = 'slice'
   ;['marginTop', 'marginBottom', 'marginLeft', 'marginRight'].forEach((k) => {
     merged[k] = clamp(numOr(merged[k], 10), 0, 100)
   })

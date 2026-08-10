@@ -53,6 +53,26 @@ public class PageConfigDTO implements Serializable {
      */
     private String titleRows = "";
 
+    /**
+     * 比一页还高的行（长备注那种自动换行格）怎么出纸：
+     * {@code slice} 照旧横着劈开跨页印（默认，老报表就是这个行为）/ {@code split} 续行 ——
+     * 装不下的文字另起一行接着印，每一页上都是一个**边框闭合**的完整格子。
+     *
+     * <p><b>只作用于 PDF / Word 两条导出路</b>。Excel 里一行就是一行，xlsx 里没有「把一行拆成两行」
+     * 这种表达（Excel 自己也是把超高行硬切开跨页印的），浏览器打印同理 —— 见 CONTRACT §4 的能力表。
+     * 所以这一项和水印一样不进 xlsx，由 {@code PdfExporter} / {@code WordExporter} 各自从
+     * 打印设置里读。
+     *
+     * <p>两条路能做到的程度不一样：PDF 是逐页自己画的，切口精确；Word 是转结构（真的多出一行），
+     * 而 Word 自己排版用的字体与我们估的不完全一致，切口会有一两行的出入。
+     */
+    private String rowOverflow = "slice";
+
+    /** 续行开着吗（{@link #rowOverflow} = {@code split}）。 */
+    public boolean isRowSplit() {
+        return "split".equalsIgnoreCase(rowOverflow);
+    }
+
     /** 页头（左/中/右三段，画在上页边距里）；三段都空 = 没页头 */
     private HeaderFooterDTO header = new HeaderFooterDTO();
 
