@@ -6,6 +6,7 @@ import com.muzhou.report.dto.PageConfigDTO;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.openpdf.text.Rectangle;
+import org.openpdf.text.pdf.BaseFont;
 import org.openpdf.text.pdf.PdfDictionary;
 import org.openpdf.text.pdf.PdfName;
 import org.openpdf.text.pdf.PdfObject;
@@ -343,8 +344,15 @@ class PdfExporterTest {
     }
 
     @Test
-    @DisplayName("超高行跨页时，一个字都不许画到正文区外面（画出去的会露在页边距里、还让 PDF 每页都带一整段）")
+    @DisplayName("超高行跨页时，没有整行文字画在正文区外面（画出去的会露在页边距里、还让 PDF 每页都带一整段）")
     void noTextIsDrawnOutsideTheBodyArea() throws Exception {
+        // 字面框按出纸用的那一款字体量，不按「0.85 个字号」这类常数估：中文字体的字面框
+        // 各家差着一截，估出来的判定会在零点几磅上翻车（CI 上是文泉驿微米黑，开发机多半是
+        // 微软雅黑，同一份 PDF 一边绿一边红）。全局字面框比任何一个字都大，往「放过」那边偏
+        BaseFont font = pdf.font();
+        float inkTop = font.getFontDescriptor(BaseFont.BBOXURY, 11);
+        float inkBottom = font.getFontDescriptor(BaseFont.BBOXLLY, 11);
+
         // 一行里好几列长短不一的长文字 —— 真实报表（询价单那种宽表）就是这个形状
         for (String mode : List.of("slice", "split")) {
             PageConfigDTO cfg = new PageConfigDTO();
@@ -357,9 +365,11 @@ class PdfExporterTest {
             float top = 842 - 28.35f;
             for (int p = 1; p <= reader.getNumberOfPages(); p++) {
                 for (float y : textBaselines(reader, p)) {
-                    // 字面框按真字体量级估：ascent≈0.85 个字号、descent≈-0.14，留 0.2pt 容差
-                    assertTrue(y - 0.14f * 11 > 28.35f - 0.2f && y + 0.85f * 11 < top + 0.2f,
-                            mode + " 模式第 " + p + " 页有文字画在正文区(" + 28.35f + ".." + top
+                    // 横切（slice）时切口不躲文字行，一行字被劈成上下两半、两页各画半个（见
+                    // drawText），所以判的是「字面框与正文区还有交集」而不是「整个装在里面」。
+                    // 整行落在外面的才是 bug —— clipTop 换回 top 时每页多出几十行，最远画到 y=1221
+                    assertTrue(y + inkTop > 28.35f && y + inkBottom < top,
+                            mode + " 模式第 " + p + " 页有整行文字画在正文区(" + 28.35f + ".." + top
                                     + ")外面：基线 y=" + y);
                 }
             }

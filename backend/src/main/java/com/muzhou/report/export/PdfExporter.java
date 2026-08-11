@@ -1700,8 +1700,11 @@ public class PdfExporter {
      *
      * <p>退回 Helvetica 时中文会显示不出来，但导出本身不该因此失败 —— 报表可能全是英文数字，
      * 而且「导出了但中文是空的」比「导出直接报错」更容易让人定位到是字体问题。
+     *
+     * <p>包内可见是给测试用的：判「文字画在哪儿」的用例必须拿这一款字体的字面框去量，
+     * 按常数估的话换一款中文字体（CI 上是文泉驿微米黑，开发机多半是微软雅黑）就在零点几磅上翻车。
      */
-    private BaseFont font() {
+    BaseFont font() {
         BaseFont cached = baseFont;
         if (cached != null) {
             return cached;
