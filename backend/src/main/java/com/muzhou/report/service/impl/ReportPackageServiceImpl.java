@@ -148,30 +148,41 @@ public class ReportPackageServiceImpl implements ReportPackageService {
             item.getVersions().add(out);
         }
 
-        // 内部数据集：报表的一部分，整套带走
-        Set<String> internalCodes = new LinkedHashSet<>();
+        // 内部数据集：报表的一部分，整套带走（含各版本自己的那些，靠 versionNo 认亲）
+        Map<String, Integer> versionNos = new LinkedHashMap<>();
+        for (MzReportVersion v : versions) {
+            versionNos.put(v.getId(), v.getVersionNo());
+        }
+        Set<String> sharedInternalCodes = new LinkedHashSet<>();
         for (MzDataset ds : datasetService.listByReport(report.getId())) {
-            internalCodes.add(ds.getCode());
-            item.getDatasets().add(toDataset(ds, false, datasourceCodes));
+            // **只有报表级（全版本共用）的那些才算「这个 code 已经有内部集了」** ——
+            // 版本级的只盖住它自己那一版，别的版本用的仍是公共那份，不带走就取不到数
+            if (!StringUtils.hasText(ds.getVersionId())) {
+                sharedInternalCodes.add(ds.getCode());
+            }
+            item.getDatasets().add(toDataset(ds, false, datasourceCodes,
+                    versionNos.get(ds.getVersionId())));
         }
         // 内容里引用到的公共数据集：不带的话报表进了目标环境就是一张取不到数的空表
         for (String code : referencedCodes(versions)) {
-            if (internalCodes.contains(code)) {
+            if (sharedInternalCodes.contains(code)) {
                 continue;
             }
-            MzDataset ds = datasetService.getByCode(null, code);
+            MzDataset ds = datasetService.getByCode(null, null, code);
             if (ds != null) {
-                item.getDatasets().add(toDataset(ds, true, datasourceCodes));
+                item.getDatasets().add(toDataset(ds, true, datasourceCodes, null));
             }
         }
         return item;
     }
 
-    private ReportPackageDTO.Dataset toDataset(MzDataset ds, boolean shared, Map<String, String> codes) {
+    private ReportPackageDTO.Dataset toDataset(MzDataset ds, boolean shared, Map<String, String> codes,
+                                               Integer versionNo) {
         ReportPackageDTO.Dataset out = new ReportPackageDTO.Dataset();
         out.setName(ds.getName());
         out.setCode(ds.getCode());
         out.setShared(shared);
+        out.setVersionNo(versionNo);
         out.setDatasourceCode(datasourceCode(ds.getDatasourceId(), codes));
         out.setType(ds.getType());
         out.setResultType(ds.getResultType());
@@ -357,9 +368,12 @@ public class ReportPackageServiceImpl implements ReportPackageService {
             }
         }
 
-        // 版式整套替换（新建出来的那张只有一个空白 v1，同样在这里被换掉）
-        versionService.replaceVersions(reportId, toVersions(item.getVersions()));
-        importDatasets(reportId, item, out);
+        // 版式整套替换（新建出来的那张只有一个空白 v1，同样在这里被换掉）。
+        // 还回来的是「包里的 versionNo → 目标环境这一版的 id」，版本级数据集要照它安家，
+        // 所以**版式必须先于数据集**导入
+        Map<Integer, String> versionIds = versionService.replaceVersions(reportId,
+                toVersions(item.getVersions()));
+        importDatasets(reportId, item, versionIds, out);
     }
 
     private List<MzReportVersion> toVersions(List<ReportPackageDTO.Version> versions) {
@@ -386,7 +400,8 @@ public class ReportPackageServiceImpl implements ReportPackageService {
      * <p>内部数据集整套替换（它是报表的一部分）；<b>公共数据集只在目标环境没有同 code 时才建</b> ——
      * 它被多张报表共用，为了导一张报表改掉别人的取数是灾难，已存在就沿用目标环境那份并记一条 warning。
      */
-    private void importDatasets(String reportId, ReportPackageDTO.Item item, ReportImportResultDTO.Item out) {
+    private void importDatasets(String reportId, ReportPackageDTO.Item item,
+                                Map<Integer, String> versionIds, ReportImportResultDTO.Item out) {
         List<ReportPackageDTO.Dataset> packaged = item.getDatasets() == null ? List.of() : item.getDatasets();
         // 数据源按 code 找，一个包里多半就那么一两个，缓存一份
         Map<String, String> datasourceIds = new LinkedHashMap<>();
@@ -394,7 +409,7 @@ public class ReportPackageServiceImpl implements ReportPackageService {
         for (ReportPackageDTO.Dataset ds : packaged) {
             DatasetSaveDTO dto = toSaveDTO(ds, resolveDatasource(ds, datasourceIds, out));
             if (Boolean.TRUE.equals(ds.getShared())) {
-                MzDataset own = datasetService.getByCode(null, ds.getCode());
+                MzDataset own = datasetService.getByCode(null, null, ds.getCode());
                 if (own != null) {
                     out.getWarnings().add("公共数据集[" + ds.getCode() + "]目标环境已存在，沿用目标环境的定义（未覆盖）");
                     continue;
@@ -402,10 +417,30 @@ public class ReportPackageServiceImpl implements ReportPackageService {
                 dto.setReportId(PUBLIC);
                 datasetService.create(dto);
             } else {
+                dto.setVersionId(versionIdOf(ds, versionIds, out));
                 internal.add(dto);
             }
         }
         datasetService.replaceReportDatasets(reportId, internal);
+    }
+
+    /**
+     * 版本级数据集在目标环境挂到哪一版：包里记的是 versionNo，换成刚导进去那一版的 id。
+     *
+     * <p>对不上号（包被手工改过）时退回**全版本共用**并记一条 warning —— 挂着一个不存在的
+     * 版本 id 等于谁也解析不到它，报表看着好好的却取不到数，比多一份共用的数据集难查得多。
+     */
+    private String versionIdOf(ReportPackageDTO.Dataset ds, Map<Integer, String> versionIds,
+                               ReportImportResultDTO.Item out) {
+        if (ds.getVersionNo() == null) {
+            return null;
+        }
+        String id = versionIds == null ? null : versionIds.get(ds.getVersionNo());
+        if (id == null) {
+            out.getWarnings().add("数据集[" + ds.getCode() + "]标着只属于 v" + ds.getVersionNo()
+                    + "，但包里没有这一版，已改为全版本共用");
+        }
+        return id;
     }
 
     /** 包里记的是数据源 code，换成目标环境的 id；换不到就留空并记一条 warning。 */

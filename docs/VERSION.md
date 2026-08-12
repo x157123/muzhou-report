@@ -251,18 +251,29 @@ RenderResultDTO result = renderEngine.render(content, params, fetcher);
 | 机制 | 影响 | 处理 |
 |---|---|---|
 | `cellConfigs` / `pageConfigs` 按 sheet 下标寻址 | 无影响 | 每个版本自带完整 content，天然隔离；复制版本时整份拷贝，别「合并」 |
-| 内部数据集（`mz_dataset.report_id`） | **跨版本共用，不随版本走** | 见下 |
+| 内部数据集（`mz_dataset.report_id`） | 默认跨版本共用；**可以逐个分叉到某一版**（`mz_dataset.version_id`） | 见下 |
 | `content.primaryDataset` / `splitMode` / `datasetLinks` | 各版本各存一份，可能不一致 | 保存版本时**校验必须与默认版本一致**并提示；判定用的主接口以默认版本为准 |
 | `pageConfigOfRendered` 的取模 | Phase 1 无影响；Phase 2 会崩 | 见 §8 |
 | 导出 / 打印链路 | 漏传 = 「预览看的是 v2、导出的是 v3」 | `PreviewDrawer`、`ReportPreview`、`utils/printPdf.js`、设计器导出，四处都要透传 `versionId` |
 
-**为什么数据集不版本化**：数据集是「取数」，版本是「版式」。数据集一旦分叉，主接口、父子关联、
-分页 total、内部/公共作用域全要跟着分叉，成本是版式版本化的好几倍，而实际诉求
+**为什么数据集不整套跟着版本走**：数据集是「取数」，版本是「版式」。取数整套分叉的话主接口、
+父子关联、分页 total、内部/公共作用域全要跟着分叉，成本是版式版本化的好几倍，而实际诉求
 （「5 月起单据换个抬头 / 加一列」）几乎都是版式。
 
 代价要认：改 SQL 会同时影响所有版本，删字段会让老版本模板里的 `#{code.field}` 取不到数。
 **缓解**：版本管理页给一个「校验」按钮，扫这一版 `cellConfigs` 引用到的 `datasetCode` / `field`
 是否还存在，不存在就标红。
+
+**后来补的一维（2026-08-12）：单个数据集可以只属于某一版**（`mz_dataset.version_id`，
+契约见 CONTRACT §3.2）。诉求是「不同版本的接口不一样」——那时只能改公用那份 SQL，
+改了又波及所有版本。做法是给作用范围加一层，解析顺序**版本级 → 报表级 → 公共**，
+那一版下建个同 code 的数据集就把上层盖住了，模板不用动。三条边界与上面那段并不冲突：
+
+- 分叉是**逐个数据集**选的（设计器数据集弹窗里的「作用范围」），不是整套跟着版本走；
+- 取数配置（`primaryDataset` / `splitMode` / `datasetLinks` / 参数）仍以基准版本为准；
+- 逐行选版本（Phase 2）时**取数恒按基准版本解析**，逐行换的只有版式。
+
+老数据 `version_id` 全为 `''`（报表级 = 全版本共用），行为一字不变，不必洗数据。
 
 ---
 

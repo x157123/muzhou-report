@@ -10,6 +10,9 @@
     <el-alert v-if="isInternal" type="info" :closable="false" show-icon style="margin-bottom: 12px">
       内部数据集：只有当前这张报表能用它，不会出现在其它报表的字段树里；报表被删除时一并删除。
       需要多张报表共用请到「数据集管理」里建公共数据集。
+      <template v-if="form.versionId">
+        本条只属于{{ versionLabel }}，别的版本看不见它，那些版本会用同编码的共用/公共数据集。
+      </template>
     </el-alert>
 
     <el-form ref="formRef" :model="form" :rules="rules" label-width="90px">
@@ -61,6 +64,30 @@
         <el-col :span="6">
           <el-form-item label="状态" prop="status">
             <el-switch v-model="form.status" :active-value="1" :inactive-value="0" />
+          </el-form-item>
+        </el-col>
+      </el-row>
+
+      <!--
+        内部数据集的第二维作用范围。只在设计器里建/改时给得出（数据集管理页没有「当前版本」可言）。
+        「本版本」是默认：不同版本接口可能不一样，正是版本级数据集存在的理由；
+        真要几版共用就切到「全版本共用」。同 code 时窄的那个盖住宽的，模板里的绑定不用动。
+      -->
+      <el-row v-if="isInternal && versionId" :gutter="16">
+        <el-col :span="18">
+          <el-form-item label="作用范围">
+            <el-radio-group v-model="form.versionId">
+              <el-radio-button :value="versionId">只属于{{ versionLabel }}</el-radio-button>
+              <el-radio-button value="">本报表全版本共用</el-radio-button>
+            </el-radio-group>
+            <el-tooltip placement="top">
+              <template #content>
+                只属于这一版：换到别的版本就看不见它了，那一版会用同 code 的共用/公共数据集。<br />
+                本报表全版本共用：这张报表的每一版都能用（改它会同时影响所有版本）。<br />
+                复制版本时，「只属于这一版」的那些会跟着复制一份到新版本上。
+              </template>
+              <el-icon class="hint-icon"><QuestionFilled /></el-icon>
+            </el-tooltip>
           </el-form-item>
         </el-col>
       </el-row>
@@ -245,7 +272,14 @@ const props = defineProps({
    * 不传就是数据集管理页的**公共数据集**（所有报表可用）。
    * 编辑已有数据集时以库里存的作用范围为准，这个 prop 只影响新建。
    */
-  reportId: { type: String, default: '' }
+  reportId: { type: String, default: '' },
+  /**
+   * 设计器当前打开的是哪一版。新建内部数据集时**默认归属这一版**（不同版本接口可能不一样），
+   * 用户可以在「作用范围」里改成全版本共用。数据集管理页不传（公共数据集没有版本可言）。
+   */
+  versionId: { type: String, default: '' },
+  /** 「只属于 v2」这种话里的那个版本名，只用于文案 */
+  versionLabel: { type: String, default: '当前版本' }
 })
 const emit = defineEmits(['update:modelValue', 'saved'])
 
@@ -263,6 +297,8 @@ const emptyForm = () => ({
   code: '',
   /** 空 = 公共数据集；非空 = 该报表的内部数据集 */
   reportId: '',
+  /** 空 = 不限版本（公共集恒为空，内部集则是全版本共用）；非空 = 只属于那一版 */
+  versionId: '',
   datasourceId: '',
   type: 'sql',
   /** list 集合 / page 分页；SQL 恒为 list */
@@ -326,7 +362,11 @@ async function openDialog() {
       // 已由拦截器提示
     }
   } else {
-    Object.assign(form, emptyForm(), { reportId: props.reportId })
+    // 新建：在设计器里建的默认只属于当前这一版（版本级），公共数据集那头 versionId 恒为空
+    Object.assign(form, emptyForm(), {
+      reportId: props.reportId,
+      versionId: props.reportId ? props.versionId : ''
+    })
     fields.value = []
     params.value = []
   }

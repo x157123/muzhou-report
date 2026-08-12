@@ -65,8 +65,9 @@ muzhou-report/
 ### mz_dataset
 | id | varchar(32) PK |
 | name | varchar(100) |
-| code | varchar(50) | 单元格中 `#{code.field}` 使用，在同一 report_id 内唯一（`uk_dataset_code_scope(code, report_id)`） |
+| code | varchar(50) | 单元格中 `#{code.field}` 使用，在同一作用范围内唯一（`uk_dataset_code_scope_v(code, report_id, version_id)`） |
 | report_id | varchar(32) NOT NULL DEFAULT '' | **作用范围**：`''` = 公共数据集（所有报表可用）；报表 id = 该报表的内部数据集（只有它可用）。恒为非 NULL，否则唯一索引拦不住重名 |
+| version_id | varchar(32) NOT NULL DEFAULT '' | **作用范围的第二维**：`''` = 该报表全版本共用（公共数据集恒为空）；版本 id = 只属于那一版。同上恒为非 NULL |
 | datasource_id | varchar(32) |
 | type | varchar(20) | sql / api / json |
 | result_type | varchar(20) DEFAULT 'list' | 返回结果形态：`list` 集合（整份取回）/ `page` 分页（响应带数据数组 + 总数）。只对 api / json 有意义，sql 恒为 list |
@@ -137,10 +138,21 @@ muzhou-report/
 | remark | varchar(500) | |
 | create_by / create_time / update_time | | |
 
-**版本化的是「版式」，不是数据集**：数据集是「取数」，跨版本共用（改 SQL 会同时影响所有版本，
-删字段会让老版本模板里的 `#{code.field}` 取不到数 —— 版本管理页的「校验」按钮扫这个）。
-数据集一旦分叉，主接口、父子关联、分页 total、内部/公共作用域全要跟着分叉，成本是版式版本化的
-好几倍，而实际诉求（「5 月起单据换个抬头 / 加一列」）几乎都是版式。
+**版本化的主体是「版式」**：一版一份完整 content。数据集**默认**仍是跨版本共用的
+（改 SQL 会同时影响所有版本，删字段会让老版本模板里的 `#{code.field}` 取不到数 ——
+版本管理页的「校验」按钮扫这个）。
+
+**但取数这一维也能按版本分叉**（§3.2 的版本级数据集）：不同版本的接口确实可能不一样，
+在那一版下建一个**同 code** 的数据集把报表级/公共那份盖住即可，模板一个字都不用改。
+分叉是**逐个数据集**选的、不是整套跟着版本走 —— 整套分叉的话主接口、父子关联、分页 total
+全要跟着分叉，成本是版式版本化的好几倍，而绝大多数报表几版之间取数是同一套。
+由此定下两条边界，别在别处再造第二套规则：
+
+- **取数配置仍以基准（默认）版本为准**：`primaryDataset` / `splitMode` / `datasetLinks` / 参数
+  都从基准版读（版本管理页的「校验」会比对并提示不一致）。版本换掉的只有模板、打印设置，
+  以及**同 code 时解析到哪一个数据集**。
+- **`perRow` / `perRowPage` 逐行选版本时，取数恒按基准版本解析数据集**（`RenderServiceImpl`）。
+  逐行换的只有版式；一行一套接口的话父子关联与取数缓存都没法自圆其说。
 
 **生效区间两端都存**（`[effective_from, effective_to)`，**左闭右开**，两端都可为 NULL = 不限）。
 早先只存起点、右端靠排序推，说不了「这一版 8/1 到期、之后谁也不接」（推导出来的右端必定被
@@ -185,7 +197,7 @@ status / is_default）—— 漏了后者，副本会是一张没有版式的报
 
 ### 3.2 数据集 `/api/dataset`
 | GET | `/page?pageNo&pageSize&name` | `PageResult<MzDataset>`（**只返回公共数据集**，即数据集管理页） |
-| GET | `/list?reportId` | `List<DatasetDetailDTO>`（含 fields，用于设计器左侧树）。公共数据集 + `reportId` 那张报表的内部数据集；不传 `reportId` 只有公共的 |
+| GET | `/list?reportId&versionId` | `List<DatasetDetailDTO>`（含 fields，用于设计器左侧树）。公共数据集 + `reportId` 那张报表全版本共用的 + `versionId` 那一版自己的；不传 `reportId` 只有公共的，不传 `versionId` 不含任何版本级的。**别的版本自己的数据集不会返回** |
 | GET | `/{id}` | `DatasetDetailDTO{dataset, fields, params}` |
 | POST | `` | `DatasetSaveDTO` → `String id` |
 | PUT | `` | `DatasetSaveDTO` → `Boolean` |
@@ -196,20 +208,26 @@ status / is_default）—— 漏了后者，副本会是一张没有版式的报
 
 `DatasetSaveDTO` = MzDataset 全字段 + `List<MzDatasetField> fields` + `List<MzDatasetParam> params`。
 
-**数据集的两种作用范围**（由 `reportId` 区分，见 §2 `mz_dataset.report_id`）：
+**数据集的三种作用范围**（由 `reportId` + `versionId` 区分，见 §2 `mz_dataset`）：
 
-| | 公共数据集 | 内部数据集 |
-|---|---|---|
-| `reportId` | 空 | 所属报表 id |
-| 在哪里建 | 数据集管理页 | 报表设计器左侧数据集面板 |
-| 谁能用 | 所有报表 | 只有所属那张报表 |
-| code 唯一性 | 公共数据集之间唯一 | 同一报表内唯一；不同报表可以同名 |
-| 跟随报表 | 不 | 报表删除时一并删除，报表复制时整套复制（code 不变） |
+| | 公共数据集 | 报表级内部数据集 | 版本级内部数据集 |
+|---|---|---|---|
+| `reportId` / `versionId` | 空 / 空 | 所属报表 id / 空 | 所属报表 id / 所属版本 id |
+| 在哪里建 | 数据集管理页 | 报表设计器左侧数据集面板 | 同左（弹窗里选「只属于这一版」，**新建时的默认值**） |
+| 谁能用 | 所有报表 | 该报表的每一版 | 只有那一版 |
+| code 唯一性 | 公共数据集之间唯一 | 同一报表内唯一；不同报表可以同名 | 同一版内唯一；同报表不同版可以同名 |
+| 跟随谁 | 不跟 | 报表删除/复制时跟着走 | 报表与**版本**删除/复制时都跟着走 |
 
-- 新建时 `POST` 带 `reportId` 就是内部数据集；`PUT` 更新**不能改作用范围**（后端以库里存的为准）。
-- 内部数据集不允许与公共数据集重名（建的时候直接报错），免得 `#{code.字段}` 指哪一个要靠规则猜；
-  反过来不拦，所以取数时的解析顺序是**先本报表内部、后公共**。
-- 渲染取数因此必须带上「谁在渲染」：`DatasetService#fetchDataByCode(reportId, code, params)`。
+- **解析顺序由窄到宽：版本级 → 报表级 → 公共**（`DatasetService#getByCode(reportId, versionId, code)`）。
+  「不同版本接口不一样」就是靠这条顺序做到的 —— 在某一版下建一个**同 code**的数据集把上层盖住，
+  模板里的 `#{code.字段}` 一个字都不用改。
+- 渲染取数因此必须带上「谁在渲染、渲染的是哪一版」：
+  `DatasetService#fetchDataByCode(reportId, versionId, code, params)`。
+- 新建时 `POST` 带 `reportId` 就是内部数据集，带 `versionId` 则只属于那一版；`PUT` 更新**不能改归属报表**
+  （后端以库里存的为准），但**可以改版本这一维**（在「只属于这一版」与「全版本共用」之间搬）。
+- 报表级内部数据集不允许与公共数据集重名（建的时候直接报错），免得 `#{code.字段}` 指哪一个要靠规则猜；
+  反过来不拦。**版本级不受这一条约束** —— 同 code 覆盖上一层正是它存在的理由。
+- 老数据的 `version_id` 全是 `''`（= 报表级），所以这一维对老报表零影响，不必洗数据。
 
 **返回结果的两种形态**（由 `resultType` 区分，见 §2 `mz_dataset.result_type`）：
 
@@ -255,8 +273,9 @@ status / is_default）—— 漏了后者，副本会是一张没有版式的报
         "matchRules": null,                          // 匹配条件跟着走，见 §4.1
         "isDefault": 1, "status": 1, "remark": null }
     ],
-    "datasets": [                          // 内部数据集 + 内容里引用到的公共数据集
+    "datasets": [                          // 内部数据集（含各版自己的）+ 内容里引用到的公共数据集
       { "name": "明细", "code": "items", "shared": false,
+        "versionNo": null,                 // null = 全版本共用；写了号就是只属于那一版，见下
         "datasourceCode": "biz",           // 数据源按 **code** 引用，见下
         "type": "sql", "sqlText": "...", "fields": [...], "params": [...] }
     ]
@@ -267,7 +286,10 @@ status / is_default）—— 漏了后者，副本会是一张没有版式的报
 四条规矩，改这块之前先看：
 
 1. **包里一律按 code 引用，不带任何主键** —— 主键是 UUID，两个环境必定对不上。报表认 `code`、
-   数据集认 `code`、数据源认 `datasourceCode`。
+   数据集认 `code`、数据源认 `datasourceCode`，**版本级数据集认 `versionNo`**（导入时由
+   `ReportVersionService#replaceVersions` 还回来的「包里的号 → 目标环境这一版的 id」映射安家，
+   所以**版式必须先于数据集导入**；号对不上就退回全版本共用并报一条 warning）。
+   版本级数据集**不挡**同 code 的公共集进包 —— 它只盖住自己那一版，别的版本用的仍是公共那份。
 2. **数据源本身不进包**：它带着业务库地址与口令（口令还是 `WRITE_ONLY` 的，压根导不出来），
    两个环境的连接信息本来就该不一样。目标环境没有这个 code 时**不拦**，导入照常进行、
    在结果里报一条 warning 让人去补 —— 版式和数据集都是对的，只差一个连接。
@@ -305,10 +327,10 @@ status / is_default）—— 漏了后者，副本会是一张没有版式的报
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/{id}/version` | `List<MzReportVersion>`（**不含 content**，同 `/page` 不传大字段的规矩），按 `versionNo` 升序 |
-| POST | `/{id}/version/{versionId}/copy` | 从某版本复制新版本 → `String newId`（content 与 `matchRules` 原样，`status=0` 停用、生效区间两端清空、不是默认版本） |
+| POST | `/{id}/version/{versionId}/copy` | 从某版本复制新版本 → `String newId`（content 与 `matchRules` 原样，`status=0` 停用、生效区间两端清空、不是默认版本）。**源版本自己的那些数据集跟着复制一份**挂到新版本上（全版本共用的与公共的不动，它们本来就照样看得见） |
 | PUT | `/version` | `ReportVersionSaveDTO{id, name, effectiveFrom, effectiveTo, matchRules, status, remark}` → `Boolean`。三者传 null 分别表示「左端不限」「右端不限」「无条件匹配」，都能被显式清空；两端都填时结束必须**严格晚于**开始（左闭右开，相等 = 永不生效），**版本之间的重叠不拦**；`matchRules` 是 JSON 数组串，存之前字段名空的条目会被丢掉，格式非法直接报错 |
 | POST | `/{id}/version/{versionId}/default` | 设为默认（停用中的会一并启用） → `Boolean` |
-| DELETE | `/version/{versionId}` | `Boolean`。**默认版本、最后一个启用版本不许删** |
+| DELETE | `/version/{versionId}` | `Boolean`。**默认版本、最后一个启用版本不许删**；删掉时**这一版自己的数据集跟着删**（版本没了它们就是谁也解析不到的孤儿行） |
 | GET | `/{id}/version/{versionId}/check` | `List<String>` 体检：这一版引用的数据集/字段是否还在、**匹配条件引用的字段/参数是否还在**（字段名写错时这一版只是永远匹配不上，渲染既不报错也没有别的痕迹），以及主接口 / 输出方式 / 父子关联与默认版本是否一致（不一致时以默认版本为准，只提示不拦） |
 
 ### 3.4 渲染 `/api/render`
@@ -904,7 +926,8 @@ api 类型数据集的**接口地址**里同样写 `${paramName}`，替换时对
 
 1. **解析**：`sheets[i].celldata` → `TemplateCell{r,c,rawValue,config}`；合并单元格信息取自 `sheets[i].config.merge`。
 2. **取数**：收集所有 cellConfig 用到的 `datasetCode` → 逐个执行数据集（带报表参数映射到数据集参数，同名传递）→ `Map<String, List<Map<String,Object>>>`。
-   `datasetCode` 按 §3.2 的作用范围解析：先找当前报表的内部数据集，再找公共数据集。
+   `datasetCode` 按 §3.2 的作用范围**由窄到宽**解析：先找当前这一版自己的数据集，
+   再找本报表全版本共用的，最后才是公共数据集。
 3. **纵向扩展（按行带）**：
    - 从上往下扫描行；若某行含 `expandType=down` 的数据单元格，则该行为一个**扩展行带**，其数据集取该行首个 down 单元格的 `datasetCode`，行数 `n = data.size()`。
    - 该行复制为 n 行（n=0 时保留 1 行并置空）；行带内所有单元格随之复制：`data` 单元格填对应行字段值；`formula`/文本单元格复制并做行号偏移；`aggregate != none` 的单元格**不参与扩展**（在整个数据集上聚合，只输出一行值）。

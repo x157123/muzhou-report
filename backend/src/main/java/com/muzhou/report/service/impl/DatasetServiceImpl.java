@@ -71,6 +71,9 @@ public class DatasetServiceImpl extends ServiceImpl<MzDatasetMapper, MzDataset> 
     /** 公共数据集的 report_id：空串而不是 NULL，唯一索引才拦得住重名。 */
     private static final String PUBLIC = "";
 
+    /** 不限版本（公共集，以及报表下全版本共用的那些）的 version_id，同上，空串不是 NULL。 */
+    private static final String ALL_VERSIONS = "";
+
     /** api/json 类型里，从对象响应中依次尝试的数组字段名（顺序即优先级，别随手调）。 */
     private static final List<String> ARRAY_KEYS = List.of("data", "records", "rows", "result", "list");
 
@@ -139,19 +142,20 @@ public class DatasetServiceImpl extends ServiceImpl<MzDatasetMapper, MzDataset> 
     /* ------------------------------ 取数 ------------------------------ */
 
     @Override
-    public List<Map<String, Object>> fetchDataByCode(String reportId, String datasetCode,
+    public List<Map<String, Object>> fetchDataByCode(String reportId, String versionId, String datasetCode,
                                                      Map<String, Object> params) {
-        return fetchRowsByCode(reportId, datasetCode, params).getRows();
+        return fetchRowsByCode(reportId, versionId, datasetCode, params).getRows();
     }
 
     @Override
-    public DatasetRowsDTO fetchRowsByCode(String reportId, String datasetCode, Map<String, Object> params) {
-        return fetchRows(resolve(reportId, datasetCode), params);
+    public DatasetRowsDTO fetchRowsByCode(String reportId, String versionId, String datasetCode,
+                                          Map<String, Object> params) {
+        return fetchRows(resolve(reportId, versionId, datasetCode), params);
     }
 
     @Override
-    public ResolvedDataset resolve(String reportId, String datasetCode) {
-        MzDataset ds = getByCode(reportId, datasetCode);
+    public ResolvedDataset resolve(String reportId, String versionId, String datasetCode) {
+        MzDataset ds = getByCode(reportId, versionId, datasetCode);
         if (ds == null) {
             throw new BizException("数据集不存在: " + datasetCode);
         }
@@ -511,20 +515,34 @@ public class DatasetServiceImpl extends ServiceImpl<MzDatasetMapper, MzDataset> 
     /* ------------------------------ 查询 ------------------------------ */
 
     /**
-     * 内部数据集优先，其次公共数据集。
+     * 按作用范围**由窄到宽**找同 code 的那一个：版本级 → 报表级（全版本共用）→ 公共。
      *
-     * <p>正常情况下两者不会同名（新建内部数据集时会拦掉与公共重名），这里的优先级是兜底：
-     * 万一先建了内部集、后来又建了同名公共集，本报表仍然用自己的那份，语义不会飘。
+     * <p>「某一版换个接口」就是靠这条顺序实现的：在那一版下建一个同 code 的数据集，
+     * 它把报表级/公共的那份盖住，模板里的 {@code #{code.字段}} 一个字都不用改。
+     *
+     * <p>报表级压过公共这一层原本是兜底（新建内部集时会拦掉与公共重名），现在多了一层
+     * 同样的道理：万一三级都有同 code 的，本版本用自己的那份，语义不会飘。
      */
     @Override
-    public MzDataset getByCode(String reportId, String code) {
+    public MzDataset getByCode(String reportId, String versionId, String code) {
         if (StringUtils.hasText(reportId)) {
-            MzDataset own = lambdaQuery()
+            if (StringUtils.hasText(versionId)) {
+                MzDataset own = lambdaQuery()
+                        .eq(MzDataset::getCode, code)
+                        .eq(MzDataset::getReportId, reportId)
+                        .eq(MzDataset::getVersionId, versionId)
+                        .one();
+                if (own != null) {
+                    return own;
+                }
+            }
+            MzDataset shared = lambdaQuery()
                     .eq(MzDataset::getCode, code)
                     .eq(MzDataset::getReportId, reportId)
+                    .eq(MzDataset::getVersionId, ALL_VERSIONS)
                     .one();
-            if (own != null) {
-                return own;
+            if (shared != null) {
+                return shared;
             }
         }
         return lambdaQuery().eq(MzDataset::getCode, code).eq(MzDataset::getReportId, PUBLIC).one();
@@ -560,14 +578,19 @@ public class DatasetServiceImpl extends ServiceImpl<MzDatasetMapper, MzDataset> 
     /**
      * 一次性查出所有子表记录后在内存分组，避免 N+1 查询。
      *
-     * <p>返回公共数据集 + 该报表的内部数据集，两类由 {@code dataset.reportId} 区分，前端自己分组。
+     * <p>返回**这一版用得上的那些**：公共数据集 + 该报表全版本共用的 + 这一版自己的，
+     * 三类由 {@code dataset.reportId} / {@code dataset.versionId} 区分，前端自己分组。
+     * 别的版本自己的数据集不在其中 —— 设计 v2 时看得见 v3 的接口只会让人绑错。
      */
     @Override
-    public List<DatasetDetailDTO> listForReport(String reportId) {
+    public List<DatasetDetailDTO> listForReport(String reportId, String versionId) {
         List<String> scopes = StringUtils.hasText(reportId) ? List.of(PUBLIC, reportId) : List.of(PUBLIC);
         List<MzDataset> datasets = lambdaQuery()
                 .eq(MzDataset::getStatus, 1)
                 .in(MzDataset::getReportId, scopes)
+                // 版本级的只放行当前这一版；null 是老库刚加列时可能出现的形态，按「不限版本」算
+                .and(w -> w.eq(MzDataset::getVersionId, ALL_VERSIONS).or().isNull(MzDataset::getVersionId)
+                        .or(StringUtils.hasText(versionId), q -> q.eq(MzDataset::getVersionId, versionId)))
                 .orderByAsc(MzDataset::getName)
                 .list();
         if (datasets.isEmpty()) {
@@ -633,8 +656,13 @@ public class DatasetServiceImpl extends ServiceImpl<MzDatasetMapper, MzDataset> 
         if (old == null) {
             throw new BizException("数据集不存在");
         }
-        // 作用范围以库里存的为准：公共集不会被某次编辑悄悄变成某报表的内部集，反之亦然
+        // 归属报表以库里存的为准：公共集不会被某次编辑悄悄变成某报表的内部集，反之亦然。
+        // **版本这一维反过来，允许改** —— 「这个接口其实几版都要用」是常事，
+        // 不许改就只能删了重建（还得把字段/参数再配一遍）。公共集没有版本可言，强制清掉
         dto.setReportId(old.getReportId());
+        if (!StringUtils.hasText(old.getReportId())) {
+            dto.setVersionId(null);
+        }
         validate(dto, dto.getId());
         MzDataset ds = toEntity(dto);
         boolean ok = updateById(ds);
@@ -662,17 +690,24 @@ public class DatasetServiceImpl extends ServiceImpl<MzDatasetMapper, MzDataset> 
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void copyToReport(String fromReportId, String toReportId) {
+    public void copyToReport(String fromReportId, String toReportId, Map<String, String> versionIdMap) {
         if (!StringUtils.hasText(fromReportId) || !StringUtils.hasText(toReportId)) {
             return;
         }
+        Map<String, String> versions = versionIdMap == null ? Map.of() : versionIdMap;
         for (MzDataset src : listByReport(fromReportId)) {
             DatasetSaveDTO dto = new DatasetSaveDTO();
             dto.setName(src.getName());
             dto.setCode(src.getCode());
             dto.setReportId(toReportId);
+            // 版本级的那些要落到副本里**对应的那一版**上。映射里找不到（不该发生）就退回
+            // 「全版本共用」—— 挂着源报表的版本 id 等于挂空，那一版在副本里根本不存在
+            dto.setVersionId(StringUtils.hasText(src.getVersionId())
+                    ? versions.get(src.getVersionId()) : null);
             dto.setDatasourceId(src.getDatasourceId());
             dto.setType(src.getType());
+            // 结果形态照搬：漏了它分页型数据集会被 toEntity 归一成集合型，副本上的分页条就没了
+            dto.setResultType(src.getResultType());
             dto.setSqlText(src.getSqlText());
             dto.setApiUrl(src.getApiUrl());
             dto.setApiMethod(src.getApiMethod());
@@ -695,22 +730,25 @@ public class DatasetServiceImpl extends ServiceImpl<MzDatasetMapper, MzDataset> 
             throw new BizException("缺少报表 id");
         }
         List<DatasetSaveDTO> incoming = datasets == null ? List.of() : datasets;
+        // 对齐的键是**作用范围 + code**：同一张报表里 v1 与 v2 可以各有一个 code=orders，
+        // 只按 code 对齐会把两个当成同一个，第二个直接覆盖掉第一个
         Map<String, MzDataset> exist = new LinkedHashMap<>();
         for (MzDataset ds : listByReport(reportId)) {
-            exist.put(ds.getCode(), ds);
+            exist.put(scopeKey(ds.getVersionId(), ds.getCode()), ds);
         }
-        Set<String> codes = incoming.stream().map(DatasetSaveDTO::getCode).collect(Collectors.toSet());
+        Set<String> keys = incoming.stream()
+                .map(d -> scopeKey(d.getVersionId(), d.getCode())).collect(Collectors.toSet());
         // 包里没有的那些：这张报表已经不用它们了，跟着删
-        for (MzDataset ds : exist.values()) {
-            if (!codes.contains(ds.getCode())) {
-                remove(ds.getId());
+        for (Map.Entry<String, MzDataset> e : exist.entrySet()) {
+            if (!keys.contains(e.getKey())) {
+                remove(e.getValue().getId());
             }
         }
-        // 逻辑删除的行仍占着 uk_dataset_code_scope，不清掉的话同 code 的新行插不进来
+        // 逻辑删除的行仍占着 uk_dataset_code_scope_v，不清掉的话同 code 的新行插不进来
         baseMapper.purgeDeletedByReport(reportId);
         for (DatasetSaveDTO dto : incoming) {
             dto.setReportId(reportId);
-            MzDataset old = exist.get(dto.getCode());
+            MzDataset old = exist.get(scopeKey(dto.getVersionId(), dto.getCode()));
             if (old == null) {
                 insert(dto);
                 continue;
@@ -728,14 +766,80 @@ public class DatasetServiceImpl extends ServiceImpl<MzDatasetMapper, MzDataset> 
         return lambdaQuery().eq(MzDataset::getReportId, reportId).list();
     }
 
+    @Override
+    public List<MzDataset> listByVersion(String reportId, String versionId) {
+        if (!StringUtils.hasText(reportId) || !StringUtils.hasText(versionId)) {
+            return List.of();
+        }
+        return lambdaQuery()
+                .eq(MzDataset::getReportId, reportId)
+                .eq(MzDataset::getVersionId, versionId)
+                .list();
+    }
+
+    @Override
+    public boolean hasVersionDatasets(String reportId, String versionId) {
+        if (!StringUtils.hasText(reportId) || !StringUtils.hasText(versionId)) {
+            return false;
+        }
+        return count(new LambdaQueryWrapper<MzDataset>()
+                .eq(MzDataset::getReportId, reportId)
+                .eq(MzDataset::getVersionId, versionId)) > 0;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void copyToVersion(String reportId, String fromVersionId, String toVersionId) {
+        if (!StringUtils.hasText(toVersionId)) {
+            return;
+        }
+        for (MzDataset src : listByVersion(reportId, fromVersionId)) {
+            DatasetSaveDTO dto = new DatasetSaveDTO();
+            dto.setName(src.getName());
+            dto.setCode(src.getCode());
+            dto.setReportId(reportId);
+            dto.setVersionId(toVersionId);
+            dto.setDatasourceId(src.getDatasourceId());
+            dto.setType(src.getType());
+            dto.setResultType(src.getResultType());
+            dto.setSqlText(src.getSqlText());
+            dto.setApiUrl(src.getApiUrl());
+            dto.setApiMethod(src.getApiMethod());
+            dto.setApiHeaders(src.getApiHeaders());
+            dto.setJsonText(src.getJsonText());
+            dto.setRemark(src.getRemark());
+            dto.setStatus(src.getStatus());
+            dto.setFields(listFields(src.getId()));
+            dto.setParams(listParams(src.getId()));
+            // 同 copyToReport：走 insert 不走 create，源数据集本来就存在，不该被界面级校验挡下
+            insert(dto);
+        }
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void removeByVersion(String reportId, String versionId) {
+        for (MzDataset ds : listByVersion(reportId, versionId)) {
+            remove(ds.getId());
+        }
+    }
+
+    /** 「作用范围 + code」的对齐键：版本 id 可能为 null / 空串，统一归一后再拼。 */
+    private String scopeKey(String versionId, String code) {
+        return scopeOf(versionId) + " " + code;
+    }
+
     /**
      * code 只在**同一作用范围**内唯一：不同报表各自的内部数据集允许同名（各报表独立设计，
      * 谁都可能建一个 main），所以校验必须带上 report_id。
      *
-     * <p>额外拦一条：内部数据集不能与公共数据集重名 —— 两者同名时 {@code #{code.字段}}
+     * <p>额外拦一条：**报表级**内部数据集不能与公共数据集重名 —— 两者同名时 {@code #{code.字段}}
      * 到底指哪一个只能靠优先级规则解释，与其让人猜，不如建的时候就说清楚。
      * 反过来（先有内部集、再建同名公共集）不拦，否则一个不相干报表里的内部集
      * 就能占掉全局的编码。
+     *
+     * <p><b>版本级的那些不受这一条约束</b>：同 code 覆盖上一层正是它存在的理由
+     * （「这一版换个接口，模板不动」，见 {@link #getByCode}），拦掉就等于把这个功能拦没了。
      */
     private void validate(DatasetSaveDTO dto, String excludeId) {
         if (!StringUtils.hasText(dto.getName())) {
@@ -745,25 +849,28 @@ public class DatasetServiceImpl extends ServiceImpl<MzDatasetMapper, MzDataset> 
             throw new BizException("数据集编码必须以字母开头，只能包含字母、数字、下划线");
         }
         String scope = scopeOf(dto.getReportId());
+        String version = PUBLIC.equals(scope) ? ALL_VERSIONS : scopeOf(dto.getVersionId());
         LambdaQueryWrapper<MzDataset> wrapper = new LambdaQueryWrapper<MzDataset>()
                 .eq(MzDataset::getCode, dto.getCode())
-                .eq(MzDataset::getReportId, scope);
+                .eq(MzDataset::getReportId, scope)
+                .eq(MzDataset::getVersionId, version);
         if (StringUtils.hasText(excludeId)) {
             wrapper.ne(MzDataset::getId, excludeId);
         }
         if (count(wrapper) > 0) {
             throw new BizException("数据集编码已存在: " + dto.getCode());
         }
-        if (!PUBLIC.equals(scope) && count(new LambdaQueryWrapper<MzDataset>()
+        if (!PUBLIC.equals(scope) && ALL_VERSIONS.equals(version)
+                && count(new LambdaQueryWrapper<MzDataset>()
                 .eq(MzDataset::getCode, dto.getCode())
                 .eq(MzDataset::getReportId, PUBLIC)) > 0) {
             throw new BizException("编码已被公共数据集占用: " + dto.getCode());
         }
     }
 
-    /** null / 空白都归一成公共作用范围的空串。 */
-    private String scopeOf(String reportId) {
-        return StringUtils.hasText(reportId) ? reportId : PUBLIC;
+    /** null / 空白都归一成空串（公共作用范围 / 不限版本），唯一索引里 NULL 是可以重复的。 */
+    private String scopeOf(String scope) {
+        return StringUtils.hasText(scope) ? scope : PUBLIC;
     }
 
     private MzDataset toEntity(DatasetSaveDTO dto) {
@@ -772,6 +879,8 @@ public class DatasetServiceImpl extends ServiceImpl<MzDatasetMapper, MzDataset> 
         ds.setName(dto.getName());
         ds.setCode(dto.getCode());
         ds.setReportId(scopeOf(dto.getReportId()));
+        // 公共集恒为「不限版本」：版本是报表内部的概念，公共集不属于任何报表
+        ds.setVersionId(StringUtils.hasText(dto.getReportId()) ? scopeOf(dto.getVersionId()) : ALL_VERSIONS);
         ds.setDatasourceId(dto.getDatasourceId());
         ds.setType(StringUtils.hasText(dto.getType()) ? dto.getType() : "sql");
         // SQL 恒为集合型：分页要数据库端 limit/offset 再加一条 count，不在本项目范围内

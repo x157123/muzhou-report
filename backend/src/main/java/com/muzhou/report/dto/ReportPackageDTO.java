@@ -101,6 +101,15 @@ public class ReportPackageDTO implements Serializable {
         /** true = 公共数据集（导入时只新建不覆盖）；false = 这张报表的内部数据集。 */
         private Boolean shared;
 
+        /**
+         * 只属于哪一版（对应本包里 {@link Version#getVersionNo()}）；空 = 该报表全版本共用。
+         *
+         * <p>同 code 引用那条规矩：包里**不带版本 id**（主键在两个环境必定对不上），
+         * 靠 versionNo 认亲。目标环境的号被占用过而重新发号时，导入那头照着
+         * {@code ReportVersionService#replaceVersions} 还回来的映射安家。
+         */
+        private Integer versionNo;
+
         /** 绑的数据源**编码**；数据源本身不进包，见类注释。 */
         private String datasourceCode;
 

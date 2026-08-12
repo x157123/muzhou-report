@@ -89,6 +89,7 @@
           :datasets="normalizedDatasets"
           :primary-dataset="store.content.primaryDataset"
           :links="store.content.datasetLinks"
+          :version-label="currentVersionText"
           @refresh="loadDatasets"
           @insert-all="onInsertAll"
           @create="openDatasetCreate"
@@ -213,11 +214,16 @@
     <ExcelImportDialog v-model="excelDialogVisible" @imported="onExcelImported" />
     <ExpressionHelpDialog v-model="helpVisible" />
     <DatasetLinkDialog v-model="linkDialogVisible" :datasets="normalizedDatasets" :index="editingLinkIndex" />
-    <!-- 与数据集管理页同一个弹窗，只是带上 reportId -> 建出来的是本报表的内部数据集 -->
+    <!--
+      与数据集管理页同一个弹窗，只是带上 reportId -> 建出来的是本报表的内部数据集；
+      再带上 versionId -> 默认只属于当前这一版（弹窗里可改成全版本共用）
+    -->
     <DatasetEditDialog
       v-model="datasetDialogVisible"
       :dataset-id="editingDatasetId"
       :report-id="datasetDialogReportId"
+      :version-id="store.versionId"
+      :version-label="currentVersionText"
       @saved="onDatasetSaved"
     />
   </div>
@@ -341,14 +347,18 @@ const toolbarExtras = [
  * 2) 直接的数据集对象（含 fields 数组）
  */
 function normalizeDataset(item) {
-  if (!item) return { id: '', name: '', code: '', reportId: '', resultType: 'list', fields: [], params: [] }
-  // reportId 非空 = 本报表的内部数据集，面板据此分组；resultType=page 的才驱动得了分页
+  if (!item) {
+    return { id: '', name: '', code: '', reportId: '', versionId: '', resultType: 'list', fields: [], params: [] }
+  }
+  // reportId 非空 = 本报表的内部数据集，versionId 非空 = 只属于某一版，面板据此分三组；
+  // resultType=page 的才驱动得了分页
   const src = item.dataset || item
   return {
     id: src.id,
     name: src.name,
     code: src.code,
     reportId: src.reportId || '',
+    versionId: src.versionId || '',
     resultType: src.resultType || 'list',
     fields: item.fields || [],
     // params 是父子关联那边要的：子表参数的下拉就是它
@@ -363,12 +373,9 @@ const normalizedDatasets = computed(() => store.datasets.map(normalizeDataset))
 onMounted(async () => {
   loading.value = true
   try {
-    // 数据集拉取失败不应连带阻塞报表本身的回填
-    // 数据集列表要带上报表 id，否则拿不到本报表的内部数据集
     // 地址上带了 versionId 就打开那一版（刷新页面还停在同一版），否则是默认版本
-    const [reportRes, listRes, versionRes] = await Promise.allSettled([
+    const [reportRes, versionRes] = await Promise.allSettled([
       getReport(route.params.id, queryVersionId(route.query)),
-      listDataset(route.params.id),
       listVersion(route.params.id)
     ])
     if (reportRes.status === 'fulfilled') {
@@ -377,12 +384,12 @@ onMounted(async () => {
       // 限宽比对的基线：没有它，加载后的第一次改动会被误判成「拖宽了整张表」
       prevColumnWidths = snapshotColumnWidths(currentSheet.value)
     }
-    if (listRes.status === 'fulfilled') {
-      store.setDatasets(listRes.value)
-    }
     if (versionRes.status === 'fulfilled') {
       store.setVersions(versionRes.value)
     }
+    // 数据集要等报表回来才拉得对：列表按「报表 + 这一版」查，而是哪一版由 getReport 回填
+    // （地址上没写 versionId 时它是默认版本，前端事先并不知道）。失败不阻塞报表本身的回填
+    await loadDatasets(true)
   } catch (e) {
     // 错误已由 axios 拦截器提示
   } finally {
@@ -513,6 +520,9 @@ async function switchVersion(versionId) {
   try {
     const report = await getReport(store.report.id, versionId)
     store.setReport(report) // 会把 sheetIndex 归 0、dirty 清掉
+    // 数据集列表也要跟着换：版本级数据集只属于某一版，不重载的话左侧面板还是上一版那批接口
+    // （setReport 之后调，loadDatasets 读的是 store.versionId）
+    await loadDatasets(true)
     await nextTick()
     await sheetRef.value?.reload(store.content.sheets)
     prevColumnWidths = snapshotColumnWidths(currentSheet.value)
@@ -566,9 +576,15 @@ const editingDatasetId = ref('')
 /** 传给弹窗的归属报表 id：新建时是本报表（内部数据集），编辑时以库里存的为准，传空即可 */
 const datasetDialogReportId = ref('')
 
+/**
+ * 拉取本报表当前这一版能用的数据集。
+ *
+ * **必须带 versionId**：版本级数据集只属于某一版，不带的话切到 v2 看到的还是 v1 那批接口
+ * （切版本后要重新调一次，见 switchVersion）。
+ */
 async function loadDatasets(silent = false) {
   try {
-    const list = await listDataset(store.report.id)
+    const list = await listDataset(store.report.id, store.versionId)
     store.setDatasets(list)
     if (!silent) ElMessage.success('数据集已刷新')
   } catch (e) {

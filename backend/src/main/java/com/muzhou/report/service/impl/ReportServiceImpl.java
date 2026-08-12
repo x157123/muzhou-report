@@ -22,6 +22,7 @@ import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.Map;
 
 /**
  * 报表管理服务实现。见 docs/CONTRACT.md §3.3。
@@ -212,11 +213,12 @@ public class ReportServiceImpl extends ServiceImpl<MzReportMapper, MzReport> imp
         copy.setStatus(source.getStatus());
         copy.setCreateBy(source.getCreateBy());
         save(copy);
-        // content 里的 #{code.字段} 原样复制过来了，内部数据集不跟着复制的话副本会取不到数
-        datasetService.copyToReport(id, copy.getId());
         // **所有版本行一起复制**（保留 versionNo / 生效区间 / status / isDefault）——
-        // 漏了这条，副本会是一张没有版式的报表
-        versionService.copyToReport(id, copy.getId());
+        // 漏了这条，副本会是一张没有版式的报表。
+        // **必须排在数据集前面**：版本级数据集要落到副本里对应的那一版上，得先有那一版的新 id
+        Map<String, String> versionIdMap = versionService.copyToReport(id, copy.getId());
+        // content 里的 #{code.字段} 原样复制过来了，内部数据集不跟着复制的话副本会取不到数
+        datasetService.copyToReport(id, copy.getId(), versionIdMap);
         return copy.getId();
     }
 

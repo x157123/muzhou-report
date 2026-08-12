@@ -34,6 +34,18 @@ public class MzDataset implements Serializable {
      */
     private String reportId;
 
+    /**
+     * 作用范围的第二维：空串 = 该报表**全版本共用**（也是公共数据集恒有的值）；
+     * 非空 = 只属于 {@code mz_report_version} 里的那一版。
+     *
+     * <p>同 {@link #reportId}，恒为非 null（空串代表不限版本）—— 唯一索引
+     * {@code uk_dataset_code_scope_v(code, report_id, version_id)} 里 NULL 是可以重复的。
+     *
+     * <p>取数时按「版本级 → 报表级 → 公共」的顺序找同 code 的那一个，所以某一版想换个接口，
+     * 建一个同 code 的版本级数据集就行，模板里的 {@code #{code.字段}} 一个字都不用改。
+     */
+    private String versionId;
+
     private String datasourceId;
 
     /** sql / api / json。 */

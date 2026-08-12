@@ -33,6 +33,7 @@ import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
@@ -48,8 +49,9 @@ import java.util.function.Supplier;
  * <p>取数通过 {@link DatasetService#fetchDataByCode} 委派给数据集模块，本类不做任何取数逻辑，
  * 只负责「取报表 -> 选版本 -> 解析 content -> 交给渲染引擎」的编排。
  *
- * <p>递给引擎的取数函数一律**绑定当前报表 id**（{@link #dataFetcher}）：数据集分公共和内部两类，
- * 内部数据集只有它所属的报表能解析出来，所以「谁在渲染」是取数的必要上下文。
+ * <p>递给引擎的取数函数一律**绑定当前报表 id 与版本 id**（{@link #dataFetcher}）：数据集分公共、
+ * 报表级、版本级三层，内部数据集只有它所属的报表/版本能解析出来，所以「谁在渲染、渲染的是哪一版」
+ * 是取数的必要上下文。
  *
  * <p><b>版本在这一层落地，引擎完全不知道有这回事</b>：先按报表的版本切换规则选中一份 content
  * （{@link ReportVersionResolver}），再把它交给引擎。规则依据主接口字段时要先探一次主接口 ——
@@ -134,9 +136,11 @@ public class RenderServiceImpl implements RenderService {
         // 不走版本选择（走了反而会拿库里存着的那一版把用户没保存的改动盖掉）
         // 引擎并行取数时会从多个线程同时写，用并发容器（下同）
         Map<String, Long> totals = new ConcurrentHashMap<>();
-        // 免保存预览不选版本，也就没有那次探测取数要复用 —— 不必包记忆层
+        // 免保存预览不选版本，也就没有那次探测取数要复用 —— 不必包记忆层。
+        // 取数仍要绑 versionId：画布上是哪一版，就该用那一版自己的数据集取数，
+        // 否则「在 v2 里改了接口，预览出来还是 v1 的数」
         long start = System.currentTimeMillis();
-        RenderResultDTO result = renderEngine.render(content, params, dataFetcher(reportId, totals));
+        RenderResultDTO result = renderEngine.render(content, params, dataFetcher(reportId, versionId, totals));
         fillTotal(result, content, totals);
         result.setVersionId(versionId);
         log.info("预览渲染完成: 请求数据 {}ms → 渲染 {}ms → 合计 {}ms", result.getFetchElapsed(),
@@ -343,11 +347,14 @@ public class RenderServiceImpl implements RenderService {
         List<ReportVersionResolver.Candidate> candidates = versionService.candidates(reportId);
 
         Map<String, Long> totals = new ConcurrentHashMap<>();
+        // 探测取数按**默认版本**解析数据集：这时候还不知道最后用哪一版（版本正是要探出来的），
+        // 而 base 本来就是默认版本那份 content，主接口 code 也取自它
+        String baseVersionId = report.getVersionId();
         // 探测用它、引擎也用它：同一个 (code, params) 第二次直接命中缓存，主接口只被打一次。
         // **只记主接口这一个数据集** —— 别的数据集上游本来就去过重，而父子关联的子表每行参数都不同、
         // 永远命中不了第二次，全记只会把它们留在内存里到渲染结束（见 CachingDataFetcher 的类注释）
         BiFunction<String, Map<String, Object>, List<Map<String, Object>>> fetcher =
-                CachingDataFetcher.wrap(dataFetcher(reportId, totals), primaryCode(base));
+                CachingDataFetcher.wrap(dataFetcher(reportId, baseVersionId, totals), primaryCode(base));
 
         RenderResultDTO result;
         ReportContentDTO content;
@@ -355,18 +362,22 @@ public class RenderServiceImpl implements RenderService {
         // 主接口会被打第二遍。逐行那条路上 source=param 的匹配条件也从这份取值
         Map<String, Object> probeParams = renderEngine.mergeParams(base.getParams(), params);
         if (perRowVersioning(base, config, candidates, versionId)) {
-            // 逐行选版本：整份报表不定版，每条数据按自己的判定值/匹配条件挑一份版式
+            // 逐行选版本：整份报表不定版，每条数据按自己的判定值/匹配条件挑一份版式。
+            // **取数恒按基准版本解析**（fetcher 就是绑着 baseVersionId 的那个）—— 逐行换掉的
+            // 只有模板与打印设置，取数配置（primaryDataset / datasetLinks / 参数）本来就以基准版为准，
+            // 数据集这一维跟着它走才自洽：同一次渲染里一行一套接口，父子关联与缓存都没法自圆其说
             content = base;
             Function<Map<String, Object>, ReportContentDTO> picker =
-                    perRowPicker(reportId, report.getVersionId(), base, config, candidates, probeParams);
+                    perRowPicker(reportId, baseVersionId, base, config, candidates, probeParams);
             result = renderEngine.render(content, params, fetcher, picker);
             result.setVersionMatch("按每条数据的[" + perRowBasis(config, candidates) + "]逐行选版式");
         } else {
             // 整份报表选一版
             ReportVersionResolver.Resolution resolution = ReportVersionResolver.resolve(
                     candidates, versionId, config, base.getPrimaryDataset(), probeParams, fetcher);
-            content = contentOf(reportId, resolution.version().id(), report.getVersionId(), base);
-            result = renderEngine.render(content, params, fetcher);
+            content = contentOf(reportId, resolution.version().id(), baseVersionId, base);
+            result = renderEngine.render(content, params,
+                    rebind(fetcher, reportId, baseVersionId, resolution.version().id(), content, totals));
             result.setVersionId(resolution.version().id());
             result.setVersionNo(resolution.version().versionNo());
             result.setVersionName(resolution.version().name());
@@ -444,6 +455,26 @@ public class RenderServiceImpl implements RenderService {
         };
     }
 
+    /**
+     * 定版之后把取数函数**改绑到选中的那一版**：那一版可能有自己的同 code 数据集，
+     * 而探测那一次是按默认版本解析的，接着用就会「选了 v2 的版式，取的却是 v1 的接口」。
+     *
+     * <p>改绑意味着丢掉探测时那份缓存（主接口要再取一次），所以先判一句**有没有可能不一样**：
+     * 两版都没有自己的数据集时，同一个 code 解析出来的必定是同一行，原样接着用。
+     * 绝大多数报表一个版本级数据集都没有，走的都是这条 —— 取数次数与从前一模一样。
+     */
+    private BiFunction<String, Map<String, Object>, List<Map<String, Object>>> rebind(
+            BiFunction<String, Map<String, Object>, List<Map<String, Object>>> fetcher,
+            String reportId, String baseVersionId, String versionId, ReportContentDTO content,
+            Map<String, Long> totals) {
+        if (Objects.equals(baseVersionId, versionId)
+                || (!datasetService.hasVersionDatasets(reportId, baseVersionId)
+                && !datasetService.hasVersionDatasets(reportId, versionId))) {
+            return fetcher;
+        }
+        return CachingDataFetcher.wrap(dataFetcher(reportId, versionId, totals), primaryCode(content));
+    }
+
     /** 选中的那一版的 content：正好是默认版本时直接用已经解析好的那份，不再多查一次库。 */
     private ReportContentDTO contentOf(String reportId, String versionId, String defaultVersionId,
                                        ReportContentDTO base) {
@@ -465,15 +496,16 @@ public class RenderServiceImpl implements RenderService {
     }
 
     /**
-     * 引擎要的取数函数：{@code (datasetCode, params) -> rows}，把报表 id 绑进去。
+     * 引擎要的取数函数：{@code (datasetCode, params) -> rows}，把报表 id 与版本 id 绑进去。
      *
-     * <p>引擎刻意只认这个函数签名（不依赖 Spring 与数据库），所以「内部数据集按报表隔离」
+     * <p>引擎刻意只认这个函数签名（不依赖 Spring 与数据库），所以「内部数据集按报表/版本隔离」
      * 与「分页型数据集的总条数」这两件事都落在这一层里，引擎本身两件都不必知道。
      *
-     * @param totals 取数过程中收集各数据集总条数的口袋（集合型数据集不写入）
+     * @param versionId 按这一版解析数据集：同 code 时它自己的那份压过报表级与公共的
+     * @param totals    取数过程中收集各数据集总条数的口袋（集合型数据集不写入）
      */
     private BiFunction<String, Map<String, Object>, List<Map<String, Object>>> dataFetcher(
-            String reportId, Map<String, Long> totals) {
+            String reportId, String versionId, Map<String, Long> totals) {
         // 数据集定义与它的参数定义在一次渲染里恒定不变，解析一遍就够 ——
         // 不记的话每取一行数据都要再打 2~3 条元数据查询（getByCode 最多 2 条 + listParams 1 条），
         // perRow 200 条数据 × 3 个数据集就是一千多条。只活这一次渲染，跟着闭包一起回收；
@@ -481,7 +513,7 @@ public class RenderServiceImpl implements RenderService {
         Map<String, DatasetService.ResolvedDataset> defs = new ConcurrentHashMap<>();
         return (code, params) -> {
             DatasetService.ResolvedDataset resolved =
-                    defs.computeIfAbsent(code, c -> datasetService.resolve(reportId, c));
+                    defs.computeIfAbsent(code, c -> datasetService.resolve(reportId, versionId, c));
             DatasetRowsDTO fetched = datasetService.fetchRows(resolved, params);
             if (fetched.getTotal() != null) {
                 totals.put(code, fetched.getTotal());

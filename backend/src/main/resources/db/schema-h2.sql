@@ -28,6 +28,13 @@ CREATE UNIQUE INDEX uk_dataset_code_scope ON public.mz_dataset (code,report_id);
 -- 设计器左侧的数据集树按 report_id 查（DatasetServiceImpl#listForReport），
 -- 而上面那个唯一索引的前导列是 code，用不上它。新增索引一律 IF NOT EXISTS —— 老库已经建过了
 CREATE INDEX IF NOT EXISTS idx_dataset_report ON public.mz_dataset (report_id);
+-- 作用范围的第三级：version_id 非空 = 只属于那一版（不同版本可以有同 code 不同接口的数据集）。
+-- 空串 = 老语义（公共 / 该报表全版本共用），所以老数据一行都不用洗
+ALTER TABLE public.mz_dataset ADD COLUMN IF NOT EXISTS version_id character varying(32) DEFAULT '';
+-- 唯一索引要跟着扩一列，否则 v1 与 v2 各有一个 code=orders 的数据集会撞唯一键。
+-- 老索引换成新的：DROP 只在第一次真的做事，往后是空跑
+DROP INDEX IF EXISTS uk_dataset_code_scope;
+CREATE UNIQUE INDEX IF NOT EXISTS uk_dataset_code_scope_v ON public.mz_dataset (code,report_id,version_id);
 
 
 -- public.mz_dataset_field 定义

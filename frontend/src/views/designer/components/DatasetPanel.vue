@@ -1,9 +1,13 @@
 <!--
   设计器左侧面板：数据集/字段列表，支持拖拽字段到工作簿、搜索过滤、插入全部字段、刷新。
 
-  数据集分两类（见 CONTRACT §3.2）：
-  - **内部数据集**（dataset.reportId = 当前报表）：在这个面板里直接建，只有本报表能用，可改可删；
+  数据集分三类（见 CONTRACT §3.2），作用范围由窄到宽，同 code 时窄的盖住宽的：
+  - **版本级**（reportId = 当前报表 且 versionId = 当前版本）：只属于这一版，切到别的版本就看不见了
+    —— 「不同版本接口不一样」靠的就是它；
+  - **报表级**（reportId = 当前报表、versionId 为空）：这张报表的每一版都能用，改它波及所有版本；
   - **公共数据集**（reportId 为空）：在「数据集管理」里建，所有报表都能用，这里只读。
+
+  前两类都在这个面板里建/改/删，作用范围在数据集弹窗里选。
 -->
 <template>
   <div class="mz-panel dataset-panel">
@@ -24,10 +28,60 @@
     </div>
 
     <div class="dataset-scroll">
-      <!-- 内部数据集 -->
+      <!-- 版本级：只属于当前这一版，切版本时整组换掉 -->
       <div class="group-title">
-        本报表数据集
-        <el-tooltip content="只有当前报表能用，随报表一起删除/复制" placement="top">
+        {{ versionLabel }}数据集
+        <el-tooltip content="只属于当前这一版，别的版本看不见它；复制版本时跟着复制" placement="top">
+          <el-icon class="group-hint"><InfoFilled /></el-icon>
+        </el-tooltip>
+      </div>
+      <div v-if="!versionDatasets.length" class="group-empty text-muted">
+        暂无，点右上角
+        <el-icon><Plus /></el-icon>
+        新建只属于这一版的数据集
+      </div>
+      <el-collapse v-model="activeVersion" class="dataset-collapse">
+        <el-collapse-item v-for="ds in versionDatasets" :key="ds.id || ds.code" :name="ds.id || ds.code">
+          <template #title>
+            <el-tooltip :content="primaryTip(ds)" placement="top">
+              <el-button
+                class="ds-star"
+                link
+                :type="ds.code === primaryDataset ? 'success' : 'info'"
+                :icon="ds.code === primaryDataset ? StarFilled : Star"
+                size="small"
+                @click.stop="$emit('set-primary', ds)"
+              />
+            </el-tooltip>
+            <span class="ds-title" :title="`${ds.name}（${ds.code}）`">
+              {{ ds.name }} <span class="text-muted">({{ ds.code }})</span>
+            </span>
+            <el-tag v-if="ds.resultType === 'page'" class="ds-tag" size="small" type="warning" effect="plain">
+              分页
+            </el-tag>
+            <span class="ds-actions">
+              <el-tooltip content="编辑数据集" placement="top">
+                <el-button link :icon="Edit" size="small" @click.stop="$emit('edit', ds)" />
+              </el-tooltip>
+              <el-tooltip content="删除数据集" placement="top">
+                <el-button link type="danger" :icon="Delete" size="small" @click.stop="$emit('remove', ds)" />
+              </el-tooltip>
+            </span>
+          </template>
+
+          <div class="ds-body-actions">
+            <el-tooltip content="将全部字段插入当前选中单元格所在行" placement="top">
+              <el-button link type="primary" size="small" @click="$emit('insert-all', ds)">插入全部</el-button>
+            </el-tooltip>
+          </div>
+          <FieldList :dataset="ds" />
+        </el-collapse-item>
+      </el-collapse>
+
+      <!-- 报表级：全版本共用 -->
+      <div class="group-title">
+        本报表数据集（全版本共用）
+        <el-tooltip content="本报表每一版都能用，改它会同时影响所有版本；随报表一起删除/复制" placement="top">
           <el-icon class="group-hint"><InfoFilled /></el-icon>
         </el-tooltip>
       </div>
@@ -170,7 +224,9 @@ const props = defineProps({
   /** 当前报表的主接口 code（content.primaryDataset），空 = 没设 */
   primaryDataset: { type: String, default: '' },
   /** 父子关联 content.datasetLinks: [{name,master,child,mappings}] */
-  links: { type: Array, default: () => [] }
+  links: { type: Array, default: () => [] },
+  /** 顶栏那个版本名，用在第一组的标题里（「v2 数据集」） */
+  versionLabel: { type: String, default: '本版本' }
 })
 
 defineEmits([
@@ -187,7 +243,8 @@ defineEmits([
 
 const router = useRouter()
 const keyword = ref('')
-// 两组各自记展开项：共用一个 v-model 的话，展开一组会把另一组折起来
+// 三组各自记展开项：共用一个 v-model 的话，展开一组会把另外两组折起来
+const activeVersion = ref([])
 const activeInternal = ref([])
 const activePublic = ref([])
 
@@ -206,7 +263,9 @@ const filteredDatasets = computed(() => {
     .filter((ds) => ds.fields.length || ds.name.toLowerCase().includes(kw))
 })
 
-const internalDatasets = computed(() => filteredDatasets.value.filter((ds) => ds.reportId))
+// 后端只会回「公共 + 本报表全版本共用 + 当前这一版」三类，所以 versionId 非空的必是当前版本那批
+const versionDatasets = computed(() => filteredDatasets.value.filter((ds) => ds.reportId && ds.versionId))
+const internalDatasets = computed(() => filteredDatasets.value.filter((ds) => ds.reportId && !ds.versionId))
 const publicDatasets = computed(() => filteredDatasets.value.filter((ds) => !ds.reportId))
 
 /**

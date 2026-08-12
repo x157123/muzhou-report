@@ -6,6 +6,7 @@ import com.muzhou.report.entity.MzReportVersion;
 import com.muzhou.report.version.ReportVersionResolver;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * 报表版本管理。见 docs/CONTRACT.md §3.3。
@@ -70,8 +71,13 @@ public interface ReportVersionService extends IService<MzReportVersion> {
     /** 报表被删除时，它的版本行跟着逻辑删除。 */
     void removeByReport(String reportId);
 
-    /** 报表被复制时，**所有版本行一起复制**（新 id，保留 versionNo / 生效区间 / status / isDefault）。 */
-    void copyToReport(String fromReportId, String toReportId);
+    /**
+     * 报表被复制时，**所有版本行一起复制**（新 id，保留 versionNo / 生效区间 / status / isDefault）。
+     *
+     * @return 源版本 id → 副本版本 id。版本级数据集要照它安家，所以复制报表时
+     *         **先复制版本、再复制数据集**（见 {@code DatasetService#copyToReport}）
+     */
+    Map<String, String> copyToReport(String fromReportId, String toReportId);
 
     /**
      * 用这一批版式**整体替换**某报表现有的版本（导入报表包时调用）。
@@ -83,7 +89,7 @@ public interface ReportVersionService extends IService<MzReportVersion> {
      * <p>这里刻意绕过 {@link #removeVersion} 的「默认版本 / 最后一个启用版本不许删」两道拦截：
      * 那是防手滑删版本的，而导入是「整份换成包里这份」，换完由本方法保证仍恰好一条默认版本。
      */
-    void replaceVersions(String reportId, List<MzReportVersion> versions);
+    Map<Integer, String> replaceVersions(String reportId, List<MzReportVersion> versions);
 
     /**
      * 体检某一版：数据集不随版本走（跨版本共用），所以改 SQL 会同时影响所有版本，

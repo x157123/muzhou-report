@@ -44,11 +44,13 @@ public class DatasetController {
     /**
      * 含字段与参数，供设计器左侧字段树使用。
      *
-     * @param reportId 当前报表 id：公共数据集 + 该报表的内部数据集；不传则只有公共数据集
+     * @param reportId  当前报表 id：公共数据集 + 该报表的内部数据集；不传则只有公共数据集
+     * @param versionId 当前正在设计哪一版：带上它才拿得到这一版自己的数据集（别的版本的不会返回）
      */
     @GetMapping("/list")
-    public Result<List<DatasetDetailDTO>> list(@RequestParam(required = false) String reportId) {
-        return Result.ok(datasetService.listForReport(reportId));
+    public Result<List<DatasetDetailDTO>> list(@RequestParam(required = false) String reportId,
+                                               @RequestParam(required = false) String versionId) {
+        return Result.ok(datasetService.listForReport(reportId, versionId));
     }
 
     @GetMapping("/{id}")

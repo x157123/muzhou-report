@@ -225,6 +225,10 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
         copy.setRemark("从 " + label(source) + " 复制");
         copy.setCreateBy(source.getCreateBy());
         save(copy);
+        // 源版本自己那些数据集跟着复制一份挂到新版本上 —— 不复制的话新版本里那些
+        // #{code.字段} 会掉到报表级/公共那一层去取数，「从这一版派生」就断了。
+        // 全版本共用的与公共的不动，它们本来就照样看得见
+        datasetService.copyToVersion(reportId, source.getId(), copy.getId());
         return copy.getId();
     }
 
@@ -294,6 +298,9 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
                 throw new BizException("这是最后一个启用中的版本，删了就没有版式可用了");
             }
         }
+        // 这一版自己的数据集跟着删 —— 版本没了它们就是一堆谁也解析不到的孤儿行
+        // （同报表删除时 removeByReport 的道理）
+        datasetService.removeByVersion(v.getReportId(), versionId);
         return removeById(versionId);
     }
 
@@ -315,10 +322,11 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void copyToReport(String fromReportId, String toReportId) {
+    public Map<String, String> copyToReport(String fromReportId, String toReportId) {
         if (!StringUtils.hasText(fromReportId) || !StringUtils.hasText(toReportId)) {
-            return;
+            return Map.of();
         }
+        Map<String, String> idMap = new LinkedHashMap<>();
         List<MzReportVersion> sources = list(byReport(fromReportId).orderByAsc(MzReportVersion::getVersionNo));
         for (MzReportVersion s : sources) {
             MzReportVersion copy = new MzReportVersion();
@@ -335,15 +343,20 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
             copy.setRemark(s.getRemark());
             copy.setCreateBy(s.getCreateBy());
             save(copy);
+            idMap.put(s.getId(), copy.getId());
         }
+        return idMap;
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void replaceVersions(String reportId, List<MzReportVersion> incoming) {
+    public Map<Integer, String> replaceVersions(String reportId, List<MzReportVersion> incoming) {
         if (incoming == null || incoming.isEmpty()) {
             throw new BizException("导入的报表没有任何版式");
         }
+        // 包里的 versionNo → 目标环境这一版的 id：版本级数据集要照它安家。
+        // 记的是**包里那个号**而不是重新发出来的号，调用方手上只有前者
+        Map<Integer, String> idByPackageNo = new LinkedHashMap<>();
         Map<Integer, MzReportVersion> exist = new LinkedHashMap<>();
         for (MzReportVersion v : list(reportId)) {
             exist.put(v.getVersionNo(), v);
@@ -370,6 +383,7 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
                         .set(MzReportVersion::getRemark, src.getRemark())
                         .set(MzReportVersion::getUpdateTime, LocalDateTime.now()));
                 keep.add(old.getId());
+                idByPackageNo.put(src.getVersionNo(), old.getId());
                 continue;
             }
             MzReportVersion row = new MzReportVersion();
@@ -388,15 +402,21 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
             row.setRemark(src.getRemark());
             save(row);
             keep.add(row.getId());
+            if (src.getVersionNo() != null) {
+                idByPackageNo.put(src.getVersionNo(), row.getId());
+            }
         }
         // 包里没有的版本删掉：导入是「整份换成包里这份」，留着的话目标环境会多出几段
         // 谁也不认识的生效区间
         for (MzReportVersion old : exist.values()) {
             if (!keep.contains(old.getId())) {
+                // 这一版自己的数据集跟着走（同 removeVersion，只是绕开那两道拦截）
+                datasetService.removeByVersion(reportId, old.getId());
                 removeById(old.getId());
             }
         }
         normalizeDefault(reportId);
+        return idByPackageNo;
     }
 
     /**
@@ -425,7 +445,8 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
             return problems;
         }
 
-        // 一、这一版引用到的数据集 / 字段还在不在（数据集跨版本共用，改 SQL 会波及所有版本）。
+        // 一、这一版引用到的数据集 / 字段还在不在。解析按这一版来（版本级 → 报表级 → 公共），
+        // 改报表级/公共那份的 SQL 会同时波及所有没自己盖一份的版本。
         // 一张报表几百个单元格绑的往往是同两三个数据集，所以按 code 收敛：
         // 每个数据集只查一次、字段名只捞一次，别在单元格循环里打 N+1
         Map<String, Set<String>> fieldsByCode = new LinkedHashMap<>();
@@ -438,7 +459,8 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
             if (!StringUtils.hasText(code)) {
                 continue;
             }
-            Set<String> fields = fieldsByCode.computeIfAbsent(code, c -> loadFieldNames(reportId, c));
+            Set<String> fields = fieldsByCode.computeIfAbsent(code,
+                    c -> loadFieldNames(reportId, target.getId(), c));
             if (fields == null) {
                 // 数据集没了：这一句一张报表只说一次
                 if (reported.add(code)) {
@@ -459,7 +481,8 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
         if (!rules.isEmpty()) {
             String primary = content.getPrimaryDataset();
             Set<String> primaryFields = StringUtils.hasText(primary)
-                    ? fieldsByCode.computeIfAbsent(primary, c -> loadFieldNames(reportId, c)) : null;
+                    ? fieldsByCode.computeIfAbsent(primary, c -> loadFieldNames(reportId, target.getId(), c))
+                    : null;
             Set<String> paramNames = new LinkedHashSet<>();
             if (content.getParams() != null) {
                 content.getParams().forEach(p -> {
@@ -552,9 +575,14 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
         }
     }
 
-    /** 这个数据集的字段名（小写），数据集本身不存在时返回 null。 */
-    private Set<String> loadFieldNames(String reportId, String code) {
-        MzDataset ds = datasetService.getByCode(reportId, code);
+    /**
+     * 这个数据集的字段名（小写），数据集本身不存在时返回 null。
+     *
+     * <p>**必须按被体检的那一版解析**：同 code 的数据集三层里都可能有，v2 上盖着的那份
+     * 字段与报表级那份未必一样 —— 不带版本的话体检报的是别人家的字段。
+     */
+    private Set<String> loadFieldNames(String reportId, String versionId, String code) {
+        MzDataset ds = datasetService.getByCode(reportId, versionId, code);
         if (ds == null) {
             return null;
         }

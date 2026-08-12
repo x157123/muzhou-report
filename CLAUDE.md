@@ -351,15 +351,31 @@ Excel / Word 不需要这一刀 —— 它们按自己的字体折行，与估�
 
 ### 数据集与动态数据源
 
-数据集有**作用范围**：`mz_dataset.report_id` 为空串是公共数据集（所有报表可用，在数据集管理页建），
-非空则是那张报表的内部数据集（只有它能用，在设计器左侧面板里建）。空串而不是 NULL —— 唯一索引
-`uk_dataset_code_scope(code, report_id)` 里 NULL 是可以重复的，用 NULL 就拦不住公共集重名了。
-由此推出的三件事：**取数必须知道「谁在渲染」**（`fetchDataByCode(reportId, code, params)`，
-先找内部再找公共；引擎那个 `BiFunction` 签名没变，报表 id 是 `RenderServiceImpl#dataFetcher`
-绑进去的）；**免保存预览的请求体要带 `reportId`**（content 里没有 id）；**报表删除/复制时
-内部数据集要跟着删/跟着复制**（`ReportServiceImpl` 调 `DatasetService#removeByReport/copyToReport`，
-不复制的话副本里的 `#{code.字段}` 会全部取不到数）。code 只在同一作用范围内唯一，
-不同报表的内部集允许同名，所以任何按 code 查询的地方都得带上 report_id。
+数据集的**作用范围有两维**（`report_id` + `version_id`），解析时**由窄到宽**：
+`mz_dataset.report_id` 为空串是公共数据集（所有报表可用，在数据集管理页建），非空则是那张报表的
+内部数据集（在设计器左侧面板里建）；内部集再按 `version_id` 分两级 —— 空串 = 该报表**全版本共用**，
+非空 = **只属于那一版**。两处都是空串而不是 NULL —— 唯一索引
+`uk_dataset_code_scope_v(code, report_id, version_id)` 里 NULL 是可以重复的，用 NULL 就拦不住重名了。
+
+**版本级那一层就是「不同版本接口不一样」的出口**：在某一版下建一个**同 code** 的数据集，
+`getByCode` 按「版本级 → 报表级 → 公共」找，它把上层盖住，模板里的 `#{code.字段}` 一个字都不用改。
+所以**同 code 覆盖是特性不是错**，`validate` 里那条「不能与公共数据集重名」只拦报表级、
+放行版本级 —— 拦了等于把这个功能拦没了。
+
+由此推出的四件事：**取数必须知道「谁在渲染、渲染的是哪一版」**
+（`fetchDataByCode(reportId, versionId, code, params)`；引擎那个 `BiFunction` 签名没变，
+两个 id 都是 `RenderServiceImpl#dataFetcher` 绑进去的）；**免保存预览的请求体要带 `reportId`**
+（content 里没有 id）**与 `versionId`**（否则「在 v2 里改了接口，预览出来还是 v1 的数」）；
+**报表删除/复制时内部数据集要跟着删/跟着复制**（`ReportServiceImpl` 调
+`DatasetService#removeByReport/copyToReport`，不复制的话副本里的 `#{code.字段}` 会全部取不到数
+—— 复制时**必须先复制版本行再复制数据集**，版本级的那些要照 `versionId` 映射安家）；
+**版本删除/复制时那一版自己的数据集同样要跟着走**（`removeByVersion` / `copyToVersion`）。
+code 只在同一作用范围内唯一，不同报表、同报表不同版都允许同名，所以任何按 code 查询的地方
+都得带上 report_id 与 version_id。
+
+设计器左侧面板照这两维分**三组**（版本级 / 报表级 / 公共），**切版本时要重新拉一次列表**
+（`ReportDesigner#switchVersion` 里那句 `loadDatasets`）—— 漏了它，切到 v2 看到的还是 v1 那批接口。
+新建内部数据集**默认归当前版本**，弹窗里的「作用范围」可以改成全版本共用。
 
 `DynamicDatasourceRegistry` 运行时注册/切换数据源（dynamic-datasource），`JdbcExecutor` 执行查询。
 `SqlParamParser` 是安全边界：`${param}` 转成 JDBC `?` 顺序绑定；`$!{param}` 才是字符串拼接，
@@ -495,15 +511,23 @@ api 数据集接口地址里的 `${id}`（`DatasetServiceImpl#substituteUrl`，�
 `mz_param` 的唯一索引不带 deleted 条件，删掉再建同名参数会撞唯一键，
 所以新建/改名前先 `MzParamMapper#purgeDeletedByName`（同 `uk_dataset_code_scope` 那个坑）。
 
-### 报表版本：版本化的是「版式」，不是数据集
+### 报表版本：版本化的主体是「版式」
 
 一张报表可以有好几份版式（`mz_report_version`，每行一份完整的 `ReportContent`），
 用哪一份由**两维**决定：每一版自带的**匹配条件**（`match_rules`，见下）先筛、**生效时间**后推。
 时间那一维的判定值从哪来是**报表级**的一条规则（`mz_report.version_config`：依据主接口字段/
 报表参数/渲染当日 + 取不到时的兜底）。规则**不能放进 content** —— content 本身就是被版本化的
-那个东西，放进去就成了「每个版本各有一套怎么选自己」，逻辑成环。数据集**不随版本走**（跨版本共用）：
-数据集是「取数」，版本是「版式」；改 SQL 会同时影响所有版本，删字段会让老版本模板里的
-`#{code.field}` 取不到数（版本管理页的「校验」按钮扫这个）。
+那个东西，放进去就成了「每个版本各有一套怎么选自己」，逻辑成环。
+
+数据集**默认跨版本共用**（改公用那份的 SQL 会同时影响所有版本，删字段会让老版本模板里的
+`#{code.field}` 取不到数 —— 版本管理页的「校验」按钮扫这个，它**按被体检的那一版解析**数据集）。
+**但单个数据集可以分叉到某一版**（`mz_dataset.version_id`，见「数据集与动态数据源」一节）：
+「不同版本接口不一样」是真实存在的诉求，整套取数跟着版本走成本又太高，所以分叉是逐个选的。
+两条边界别破：**取数配置（`primaryDataset` / `splitMode` / `datasetLinks` / 参数）仍以基准版本为准**；
+**逐行选版本时取数恒按基准版本解析**（逐行换的只有模板与打印设置，一行一套接口的话
+父子关联与取数缓存都没法自圆其说）。整份定一版那条路上，定版后若那一版有自己的数据集，
+`RenderServiceImpl#rebind` 会把取数函数改绑过去并弃掉探测时那份缓存 —— 两版都没有版本级数据集时
+原样接着用，所以绝大多数报表的取数次数与从前一模一样。
 
 **`mz_report.content` 已废弃**，只在懒迁移时读一次（`ReportVersionService#ensureMigrated`：
 一条版本行都没有就用它建 v1，挂在 `getDetail` 与渲染入口上，靠 `uk_version_report_no` 兜幂等）。

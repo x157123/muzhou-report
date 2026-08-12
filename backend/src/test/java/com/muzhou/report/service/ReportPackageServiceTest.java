@@ -18,10 +18,13 @@ import org.mockito.ArgumentCaptor;
 import org.springframework.transaction.support.TransactionCallbackWithoutResult;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -92,8 +95,10 @@ class ReportPackageServiceTest {
         // 内部数据集：items（绑在 ds1 上）
         MzDataset items = dataset("D1", "items", "R1", "ds1");
         when(datasetService.listByReport("R1")).thenReturn(List.of(items));
-        when(datasetService.getByCode(isNull(), eq("orders"))).thenReturn(dataset("D2", "orders", "", "ds1"));
-        when(datasetService.getByCode(isNull(), eq("ship"))).thenReturn(dataset("D3", "ship", "", null));
+        when(datasetService.getByCode(isNull(), isNull(), eq("orders")))
+                .thenReturn(dataset("D2", "orders", "", "ds1"));
+        when(datasetService.getByCode(isNull(), isNull(), eq("ship")))
+                .thenReturn(dataset("D3", "ship", "", null));
         when(datasetService.listFields(any())).thenReturn(List.of(field("F1", "D1", "name")));
         when(datasetService.listParams(any())).thenReturn(List.of());
         when(datasourceService.getById("ds1")).thenReturn(datasource("ds1", "biz"));
@@ -118,6 +123,34 @@ class ReportPackageServiceTest {
         assertNull(item.getDatasets().get(0).getFields().get(0).getDatasetId());
     }
 
+    @Test
+    @DisplayName("导出：版本级数据集标出 versionNo，且不挡住同 code 的公共集进包")
+    void exportMarksVersionScopedDatasets() throws Exception {
+        MzReport report = report("R1", "sales", "销售单");
+        when(reportService.getById("R1")).thenReturn(report);
+        // 两版：v1 用公共的 orders，v2 自己盖了一份 orders
+        when(versionService.listWithContent("R1")).thenReturn(List.of(
+                version("V1", 1, "{\"primaryDataset\":\"orders\"}"),
+                version("V2", 2, "{\"primaryDataset\":\"orders\"}")));
+        MzDataset own = dataset("D1", "orders", "R1", "ds1");
+        own.setVersionId("V2");
+        when(datasetService.listByReport("R1")).thenReturn(List.of(own));
+        when(datasetService.getByCode(isNull(), isNull(), eq("orders")))
+                .thenReturn(dataset("D2", "orders", "", "ds1"));
+        when(datasetService.listFields(any())).thenReturn(List.of());
+        when(datasetService.listParams(any())).thenReturn(List.of());
+        when(datasourceService.getById("ds1")).thenReturn(datasource("ds1", "biz"));
+
+        ReportPackageDTO pkg = mapper.readValue(service.exportPackage(List.of("R1")), ReportPackageDTO.class);
+        List<ReportPackageDTO.Dataset> datasets = pkg.getReports().get(0).getDatasets();
+
+        assertEquals(2, datasets.size(), "v2 自己那份盖的只是 v2，v1 仍要用公共那份 —— 两份都得进包");
+        assertEquals(2, datasets.get(0).getVersionNo(), "版本级的按 versionNo 认亲（包里没有版本 id）");
+        assertFalse(datasets.get(0).getShared());
+        assertNull(datasets.get(1).getVersionNo(), "公共集不属于任何版本");
+        assertTrue(datasets.get(1).getShared());
+    }
+
     /* ------------------------------ 导入 ------------------------------ */
 
     @Test
@@ -138,7 +171,8 @@ class ReportPackageServiceTest {
     @DisplayName("导入 overwrite：报表 id 不变，版式与内部数据集整套替换；公共数据集已存在则只提示不覆盖")
     void importOverwritesInPlace() {
         when(reportService.getByCode("sales")).thenReturn(report("R9", "sales", "线上的销售单"));
-        when(datasetService.getByCode(isNull(), eq("orders"))).thenReturn(dataset("D9", "orders", "", "ds1"));
+        when(datasetService.getByCode(isNull(), isNull(), eq("orders")))
+                .thenReturn(dataset("D9", "orders", "", "ds1"));
         // 数据源在目标环境不存在 —— 不拦，只报 warning
         when(datasourceService.getByCode("biz")).thenReturn(null);
 
@@ -159,6 +193,27 @@ class ReportPackageServiceTest {
         assertEquals(2, warnings.size(), "一条数据源缺失 + 一条公共数据集沿用");
         assertTrue(warnings.stream().anyMatch(w -> w.contains("数据源[biz]")), warnings.toString());
         assertTrue(warnings.stream().anyMatch(w -> w.contains("公共数据集[orders]")), warnings.toString());
+    }
+
+    @Test
+    @DisplayName("导入：版本级数据集按 versionNo 落到目标环境那一版上，对不上号就退回全版本共用")
+    void importPlacesVersionScopedDatasets() {
+        when(reportService.getByCode("sales")).thenReturn(report("R9", "sales", "线上的销售单"));
+        // 目标环境把包里的 v2 重新发号成了 v7，但映射里记的仍是**包里那个号**
+        when(versionService.replaceVersions(eq("R9"), any())).thenReturn(Map.of(1, "NV1", 2, "NV7"));
+
+        ReportImportResultDTO result = service.importPackage(packWithVersionScoped(),
+                ReportPackageService.MODE_OVERWRITE);
+
+        ArgumentCaptor<List<DatasetSaveDTO>> captor = ArgumentCaptor.forClass(List.class);
+        verify(datasetService).replaceReportDatasets(eq("R9"), captor.capture());
+        Map<String, String> scopeByCode = new LinkedHashMap<>();
+        captor.getValue().forEach(d -> scopeByCode.put(d.getCode(), d.getVersionId()));
+        assertEquals("NV7", scopeByCode.get("orders"), "包里写着只属于 v2，要落到目标环境这一版的新 id 上");
+        assertNull(scopeByCode.get("items"), "没写 versionNo 的是全版本共用");
+        assertNull(scopeByCode.get("ghost"), "包里没有 v9，退回全版本共用而不是挂一个不存在的版本");
+        assertTrue(result.getItems().get(0).getWarnings().stream().anyMatch(w -> w.contains("ghost")),
+                result.getItems().get(0).getWarnings().toString());
     }
 
     @Test
@@ -214,6 +269,22 @@ class ReportPackageServiceTest {
                      "sqlText":"select 1","fields":[{"fieldName":"name"}],"params":[]},
                     {"name":"订单","code":"orders","shared":true,"datasourceCode":"biz","type":"sql",
                      "sqlText":"select 2","fields":[],"params":[]}
+                  ]}]}
+                """;
+        return json.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    /** 两版的报表：items 全版本共用、orders 只属于 v2、ghost 标着一个包里没有的 v9。 */
+    private byte[] packWithVersionScoped() {
+        String json = """
+                {"fileType":"muzhou-report-package","formatVersion":1,"reports":[{
+                  "name":"销售单","code":"sales","type":"sheet","status":1,
+                  "versions":[{"versionNo":1,"content":"{}","isDefault":1,"status":1},
+                              {"versionNo":2,"content":"{}","isDefault":0,"status":1}],
+                  "datasets":[
+                    {"name":"明细","code":"items","shared":false,"type":"sql","sqlText":"select 1"},
+                    {"name":"订单","code":"orders","shared":false,"versionNo":2,"type":"sql","sqlText":"select 2"},
+                    {"name":"孤儿","code":"ghost","shared":false,"versionNo":9,"type":"sql","sqlText":"select 3"}
                   ]}]}
                 """;
         return json.getBytes(java.nio.charset.StandardCharsets.UTF_8);

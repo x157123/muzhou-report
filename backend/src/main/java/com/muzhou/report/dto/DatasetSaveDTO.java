@@ -23,6 +23,13 @@ public class DatasetSaveDTO implements Serializable {
     /** 作用范围：空 = 公共数据集；非空 = 该报表的内部数据集。见 CONTRACT §3.2。 */
     private String reportId;
 
+    /**
+     * 作用范围的第二维：空 = 该报表全版本共用；非空 = 只属于那一版。见 CONTRACT §3.2。
+     *
+     * <p>{@code reportId} 为空（公共数据集）时这一项无意义，服务端会强制清掉。
+     */
+    private String versionId;
+
     private String datasourceId;
 
     /** sql / api / json。 */

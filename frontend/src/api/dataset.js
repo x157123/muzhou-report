@@ -5,9 +5,11 @@ export const pageDataset = (params) => request.get('/dataset/page', { params })
 /**
  * 含 fields，用于设计器左侧字段树。
  *
- * @param reportId 当前报表 id —— 传了才拿得到该报表的内部数据集，不传只有公共数据集
+ * @param reportId  当前报表 id —— 传了才拿得到该报表的内部数据集，不传只有公共数据集
+ * @param versionId 当前设计的是哪一版 —— 传了才拿得到这一版自己的数据集（别的版本的不会回）
  */
-export const listDataset = (reportId) => request.get('/dataset/list', { params: { reportId } })
+export const listDataset = (reportId, versionId) =>
+  request.get('/dataset/list', { params: { reportId, versionId } })
 export const getDataset = (id) => request.get(`/dataset/${id}`)
 export const createDataset = (data) => request.post('/dataset', data)
 export const updateDataset = (data) => request.put('/dataset', data)
