@@ -1,12 +1,12 @@
 /**
- * 给 @fortune-sheet/react 1.0.4 的「边框」下拉菜单打补丁。
+ * 给 @fortune-sheet/react 1.0.4 的工具栏打补丁。
  *
- * 边框颜色/线型这块 UI 全在 @fortune-sheet/react 的 Toolbar 里（内部组件 CustomBorder，
- * 既不导出也没有配置项），Vue 桥接层碰不到，官方 1.0.4 已是最新版、这几个毛病没修。
+ * 边框菜单、字号清单这些东西全写死在 @fortune-sheet/react 的 Toolbar 里（内部组件不导出、
+ * 也没有对应的 settings 项），Vue 桥接层碰不到，官方 1.0.4 已是最新版、这几个毛病没修。
  * 所以在**构建期改它的源码**：不动 node_modules（`npm ci` 之后照样生效），
  * 补丁本身在本仓库里看得见、改得动。
  *
- * 补丁只做三件事，都是纯 bug 修复，不改交互设计：
+ * ── 一、「边框」下拉菜单的三个 bug（纯修复，不改交互设计）
  *
  * ① **鼠标划到「边框颜色」「边框样式」上大概率不弹二级菜单**
  *    `showBorderSubMenu` 拿的是 `e.target`（指针实际落到的那个子元素）而不是 `e.currentTarget`
@@ -28,6 +28,14 @@
  *    `onPick(color, changeStyle)`，选线型时是 `onPick(changeColor, style)`，两个手都会把
  *    **另一维**的值一并写回 Toolbar；而重开后 `changeColor/changeStyle` 是复位过的默认值，
  *    于是「选完红色关掉菜单、重开再挑一种线型」得到的是黑色边框。② 把初值接上之后这条自然消失。
+ *
+ * ── 二、字号清单补上 6 / 7 / 8
+ *
+ * 工具栏字号下拉的那串数字是**写死在 JSX 里的字面量数组**（既不在 locale 里、也不是 settings 项，
+ * 所以不像字体清单那样能从 `utils/fontList.js` 那条路换掉），最小只到 9。报表上的备注、
+ * 落款、编号这类小字常要 6~8 号，只好把它一起打进来。`handleTextSize` 那边不做范围限制，
+ * 自动换行的行高（`utils/wrapHeight.js` 与 `ExcelExporter#applyWrapRowHeights`）也是按字号算的，
+ * 所以这一项只需要改清单本身。
  *
  * 补丁是按源码原文做的字符串替换，锚点找不到就**直接报错中断构建**（而不是静默跳过）——
  * 升级 @fortune-sheet/react 时会立刻暴露出来，比「装完发现边框菜单又坏了」强。
@@ -136,6 +144,11 @@ var CustomBorder = function CustomBorder(_ref) {
           borderColor: customColor,
           borderStyle: customStyle,
           onPick: function onPick(color, style) {`
+  },
+  {
+    name: '字号清单补上 6 / 7 / 8',
+    from: `[9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72].map(`,
+    to: `[6, 7, 8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72].map(`
   }
 ]
 
@@ -184,7 +197,7 @@ export function fortuneSheetPatchPlugin() {
  */
 export function fortuneSheetPatchEsbuildPlugin() {
   return {
-    name: 'mz-fortune-sheet-patch-v1',
+    name: 'mz-fortune-sheet-patch-v2',
     setup(build) {
       build.onLoad({ filter: /[\\/]@fortune-sheet[\\/]react[\\/]dist[\\/]index\.esm\.js$/ }, async (args) => {
         const { readFile } = await import('node:fs/promises')
