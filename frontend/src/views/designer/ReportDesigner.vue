@@ -445,8 +445,10 @@ const currentVersionText = computed(() => {
   const cur = versionRows.value.find((v) => v.id === store.versionId)
   if (!cur) return '版本'
   // 顶栏只有一行位置：有生效时间就说时间，否则说条件（只按条件选的版本说时间等于什么都没说）
-  if (cur.enabled && (cur.from || cur.to)) return `${cur.label} · ${cur.from || ''}起`
-  return cur.condition ? `${cur.label} · ${cur.condition}` : cur.label
+  // if (cur.enabled && (cur.from || cur.to)) return `${cur.label} · ${cur.from || ''}起`
+  // return cur.condition ? `${cur.label} · ${cur.condition}` : cur.label
+  // 直接返回版本
+  return cur.label
 })
 
 /**

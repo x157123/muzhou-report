@@ -60,10 +60,10 @@ export const parseExcelTemplate = (file) => {
 /** 版本列表（不含 content），按 versionNo 升序 */
 export const listVersion = (id) => request.get(`/report/${id}/version`)
 
-/** 从某一版复制出新版本（停用、无生效时间），返回新版本 id */
+/** 从某一版复制出新版本（停用、生效时间段清空），返回新版本 id */
 export const copyVersion = (id, versionId) => request.post(`/report/${id}/version/${versionId}/copy`)
 
-/** 改版本元信息 { id, name, effectiveFrom, status, remark } */
+/** 改版本元信息 { id, name, effectiveFrom, effectiveTo, matchRules, status, remark }；两端为 null = 不限 */
 export const updateVersion = (data) => request.put('/report/version', data)
 
 /** 设为默认（基准）版本 */

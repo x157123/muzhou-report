@@ -105,6 +105,10 @@ body,
   font-family: 'Cascadia Code', Consolas, Monaco, monospace;
 }
 
+.el-button+.el-button{
+  margin-left: 0;
+}
+
 /*
   图片单元格（utils/cellImage.js 摊出来的浮动图片）：图片等比例装进格子，不拉伸。
 

@@ -18,9 +18,11 @@ import java.time.LocalDateTime;
  * 分页 total、内部/公共作用域全要跟着分叉，而实际诉求（「5 月起单据换个抬头 / 加一列」）
  * 几乎都是版式。
  *
- * <p>每行只存**生效起始时刻**（{@link #effectiveFrom}），区间由排序推导，左闭右开；
- * 存两端（from + to）必然出现重叠和空洞，且改一处要改两处。**停用的版本不参与推导** ——
- * 把 v2 停掉，它那段自动被 v1 吞掉，这正是「临时回滚版式」想要的行为。
+ * <p>生效区间**两端都存**（{@link #effectiveFrom} / {@link #effectiveTo}，左闭右开，
+ * 两端都可为空 = 不限）。早先只存起点、右端靠排序推，说不了「这一版 8/1 到期，之后谁也不接」，
+ * 也表达不了两版共用同一段时间。**允许重叠**，重叠时起点更晚的赢（同起点则版本号大的赢）——
+ * 这与原先「取起点 ≤ 判定值的最后一个」是同一条规则，所以老数据（结束时刻全为空）行为不变。
+ * **停用的版本不参与自动选择**，它那段落回别的版本，这正是「临时回滚版式」想要的行为。
  */
 @Data
 @TableName("mz_report_version")
@@ -41,8 +43,11 @@ public class MzReportVersion implements Serializable {
     /** 这一版完整的 ReportContent，见 CONTRACT §4 */
     private String content;
 
-    /** 生效起始时刻；null = 最早的那一版（早于所有起点时的兜底） */
+    /** 生效起始时刻（闭端）；null = 不限，从最早算起 */
     private LocalDateTime effectiveFrom;
+
+    /** 生效结束时刻（**开端**，这一刻起不再生效）；null = 不限，一直有效 */
+    private LocalDateTime effectiveTo;
 
     /**
      * 匹配条件（{@code VersionMatchRuleDTO} 的 JSON 数组），空 = 无条件匹配。

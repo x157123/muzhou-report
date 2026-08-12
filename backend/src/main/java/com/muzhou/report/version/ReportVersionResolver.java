@@ -22,7 +22,8 @@ import java.util.function.BiFunction;
  * 渲染引擎完全不知道有版本这回事 —— 选中哪一版是在进引擎**之前**定好的。
  *
  * <p>判定分**两维**：版本自带的**匹配条件**（{@link VersionMatchRuleDTO}，类型/区域这类离散维度）
- * 与**生效时间**（{@code effectiveFrom} 推出来的左闭右开区间）。条件先筛、时间后推。
+ * 与**生效时间**（{@code effectiveFrom} ~ {@code effectiveTo} 这个左闭右开的区间，两端都可为空
+ * = 不限）。条件先筛、时间后判。
  *
  * <p>算法（见 docs/CONTRACT.md §4.1「版本」）：
  * <ol>
@@ -31,20 +32,25 @@ import java.util.function.BiFunction;
  *       绝大多数报表只有一版，不该为版本功能多打一次 SQL；</li>
  *   <li><b>条件筛选</b>：一个版本的条件要<b>全部</b>满足才算匹配（没配条件 = 无条件匹配）；
  *       匹配到的版本里只留<b>条件数最多</b>的那一批（特异度优先，见 {@link #decide}），
- *       后面的时间推导只在这一批里做；一个都不匹配 → {@code fallback}；</li>
+ *       后面的时间判定只在这一批里做；一个都不匹配 → {@code fallback}；</li>
  *   <li>取判定值：{@code field} 主接口第一行的该字段 / {@code param} 报表参数 / {@code now} 渲染当日；</li>
  *   <li>归一化成 {@link LocalDateTime}（见 {@link #toDateTime}），解析不了当作取不到；</li>
  *   <li>取不到 → {@code fallback}：{@code default} 用默认版本 / {@code error} 抛 {@link BizException}
  *       （消息里带上是哪个字段没取到）。<b>但条件已经把那一批筛成唯一一版时就用它</b> ——
  *       条件够定案了，不该再被时间这一维推翻；</li>
- *   <li>命中 = {@code effectiveFrom ≤ 判定值} 的最后一个（<b>左闭右开</b>）；一个都不满足
- *       （早于所有起点）→ {@code effectiveFrom} 为 null 的那一版；没有 null 版 → 默认版本
- *       （条件筛过的那一批则退回本批里最早的一版 —— 退回默认版本会违背已经命中的条件）。</li>
+ *   <li>命中 = 判定值落在 {@code [effectiveFrom, effectiveTo)} 里的版本。<b>允许多版重叠</b>，
+ *       重叠时<b>起点更晚的赢</b>（同起点则版本号大的赢，见 {@link #covers}）；一版都没盖住
+ *       （落在空洞里、或晚于所有结束时刻）→ 默认版本（条件筛过的那一批则退回本批里最早的一版
+ *       —— 退回默认版本会违背已经命中的条件）。</li>
  * </ol>
+ *
+ * <p><b>结束时刻是后加的</b>：早先只存起点、右端靠排序推，说不了「这一版 8/1 到期，之后谁也不接」，
+ * 也表达不了两版共用同一段时间。而「重叠时起点更晚的赢」与原先那条「取起点 ≤ 判定值的最后一个」
+ * 是同一条规则，所以**老数据（结束时刻全为空）行为一字不变**。
  *
  * <p><b>没配判定字段（只按条件选）时时间这一维直接不参与</b>，取匹配那批里生效最晚的一版。
  *
- * <p><b>停用的版本不参与推导</b>，它那段自动被前一版吞掉 —— 这正是「临时回滚版式」想要的行为。
+ * <p><b>停用的版本不参与推导</b>，它那段落回别的版本 —— 这正是「临时回滚版式」想要的行为。
  */
 public final class ReportVersionResolver {
 
@@ -61,10 +67,13 @@ public final class ReportVersionResolver {
     /**
      * 一个候选版本（只带选择用得到的字段，content 不进来 —— 选完才按 id 去捞那一份）。
      *
-     * @param rules 这一版的匹配条件（同一版内多条是 AND），空 = 无条件匹配
+     * @param effectiveFrom 生效起始（闭端），null = 不限
+     * @param effectiveTo   生效结束（<b>开端</b>），null = 不限
+     * @param rules         这一版的匹配条件（同一版内多条是 AND），空 = 无条件匹配
      */
     public record Candidate(String id, Integer versionNo, String name, LocalDateTime effectiveFrom,
-                            boolean isDefault, boolean enabled, List<VersionMatchRuleDTO> rules) {
+                            LocalDateTime effectiveTo, boolean isDefault, boolean enabled,
+                            List<VersionMatchRuleDTO> rules) {
 
         public Candidate {
             // 手写的 content 里 "matchRules": [null] 是可能的，List.copyOf 见到 null 元素会抛 NPE
@@ -72,10 +81,16 @@ public final class ReportVersionResolver {
                     : rules.stream().filter(java.util.Objects::nonNull).toList();
         }
 
-        /** 没有匹配条件的那种（老调用方与测试用这个）。 */
+        /** 只有起点、右端不限的那种（老数据与测试用这个）。 */
+        public Candidate(String id, Integer versionNo, String name, LocalDateTime effectiveFrom,
+                         boolean isDefault, boolean enabled, List<VersionMatchRuleDTO> rules) {
+            this(id, versionNo, name, effectiveFrom, null, isDefault, enabled, rules);
+        }
+
+        /** 没有匹配条件、右端也不限的那种。 */
         public Candidate(String id, Integer versionNo, String name, LocalDateTime effectiveFrom,
                          boolean isDefault, boolean enabled) {
-            this(id, versionNo, name, effectiveFrom, isDefault, enabled, List.of());
+            this(id, versionNo, name, effectiveFrom, null, isDefault, enabled, List.of());
         }
 
         /** 界面上的名字：没起名就是 v3。 */
@@ -222,6 +237,8 @@ public final class ReportVersionResolver {
             return new Resolution(fallbackVersion, null,
                     "没有版本的匹配条件满足，用默认版本 " + fallbackVersion.label());
         }
+        // 起点升序（null 排最前 = 不限左端），同起点按版本号升序：**排在后面的赢**，
+        // 于是「重叠时起点更晚的赢、同起点后配的赢」就是从头扫一遍留下最后一个命中的
         group.sort(Comparator
                 .comparing(Candidate::effectiveFrom, Comparator.nullsFirst(Comparator.<LocalDateTime>naturalOrder()))
                 .thenComparingInt(ReportVersionResolver::no));
@@ -250,14 +267,12 @@ public final class ReportVersionResolver {
                     "判定值[" + label + "]取不到，用默认版本 " + fallbackVersion.label());
         }
 
-        // 7. 命中 effectiveFrom ≤ value 的最后一个（左闭右开）
+        // 7. 命中 = 判定值落在 [effectiveFrom, effectiveTo) 里的版本。**允许重叠**，
+        //    group 已按「起点升序、同起点按版本号升序」排好，从头扫到尾留下的就是起点最晚的那一版
         Candidate hit = null;
         for (Candidate c : group) {
-            // effectiveFrom 为 null 的那一版是「最早的那一版」，恒命中（区间左端是 -∞）
-            if (c.effectiveFrom() == null || !c.effectiveFrom().isAfter(value)) {
+            if (covers(c, value)) {
                 hit = c;
-            } else {
-                break;
             }
         }
         if (hit == null) {
@@ -265,11 +280,12 @@ public final class ReportVersionResolver {
                 // 条件已经命中了这一批，退回默认版本等于把条件推翻 —— 用本批里最早的那一版
                 Candidate first = group.get(0);
                 return new Resolution(first, value, reason(first, value, label)
-                        + " 早于本批版本的生效时间，用其中最早的 " + first.label());
+                        + " 不在本批任何版本的生效区间内，用其中最早的 " + first.label());
             }
-            // 早于所有起点，又没有 null 起点的兜底版 —— 只能退回默认版本
+            // 落在空洞里（或早于/晚于所有区间），又没有一版是「全时段」的 —— 只能退回默认版本
             return new Resolution(fallbackVersion, value,
-                    label + "=" + format(value) + " 早于所有版本的生效时间，用默认版本 " + fallbackVersion.label());
+                    label + "=" + format(value) + " 不在任何版本的生效区间内，用默认版本 "
+                            + fallbackVersion.label());
         }
         return new Resolution(hit, value, reason(hit, value, label) + " 命中 " + hit.label());
     }
@@ -293,6 +309,19 @@ public final class ReportVersionResolver {
             }
         }
         return true;
+    }
+
+    /**
+     * 判定值在不在这一版的生效区间里：<b>左闭右开</b>，两端为 null 表示那一端不限。
+     *
+     * <p>两端都为 null = 全时段，恒命中（老数据、以及「只按条件选」的那些版本就是这种）。
+     * 区间是**可以重叠**的，谁赢由调用处的排序定（起点更晚的赢），这里只回答「盖没盖住」。
+     */
+    private static boolean covers(Candidate c, LocalDateTime value) {
+        if (c.effectiveFrom() != null && c.effectiveFrom().isAfter(value)) {
+            return false;
+        }
+        return c.effectiveTo() == null || c.effectiveTo().isAfter(value);
     }
 
     /** 时间这一维参不参与：{@code now} 恒参与，{@code field}/{@code param} 要配了字段名才算。 */

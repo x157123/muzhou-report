@@ -360,9 +360,14 @@
                     </span>
                   </template>
                 </el-table-column>
-                <el-table-column label="生效区间（左闭右开）" width="200">
+                <el-table-column label="生效时间段（左闭右开）" width="220">
                   <template #default="{ row }">
                     <span :class="{ 'text-muted': !row.enabled }">{{ intervalText(row) }}</span>
+                    <!-- 允许多版共用同一段时间，被盖住的那一版要说清楚，
+                         否则「配了却没生效」在这里看不出原因 -->
+                    <div v-if="row.coveredBy.length" class="text-muted cover-note">
+                      重叠段归 {{ row.coveredBy.join('、') }}
+                    </div>
                   </template>
                 </el-table-column>
                 <el-table-column label="" width="60">
@@ -698,6 +703,10 @@ function onConfirm() {
 }
 .version-table :deep(.el-tag) {
   margin-left: 6px;
+}
+.cover-note {
+  font-size: 12px;
+  line-height: 1.3;
 }
 .wm-preview {
   display: flex;

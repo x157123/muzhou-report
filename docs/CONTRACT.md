@@ -129,7 +129,8 @@ muzhou-report/
 | version_no | int | 报表内唯一（`uk_version_report_no(report_id, version_no)`），展示成 v1/v2/v3。**发号要含已逻辑删除的行**（唯一索引管着全部行），走 `MzReportVersionMapper#maxVersionNo` |
 | name | varchar(50) | 版本名，空则显示 `v{version_no}` |
 | content | clob/longtext | 这一版完整的 ReportContent，见 §4 |
-| effective_from | timestamp | **生效起始时刻**；NULL = 最早的那一版（区间左端 -∞） |
+| effective_from | timestamp | **生效起始时刻**（闭端）；NULL = 不限 |
+| effective_to | timestamp | **生效结束时刻**（**开端**，这一刻起不再生效）；NULL = 不限 |
 | match_rules | varchar(2000) | **匹配条件**（离散那一维：单据类型、区域…）的 JSON 数组，空 = 无条件匹配。见 §4.1 |
 | is_default | int | 基准版本，报表内恰好一条。判定值取不到时用它；不能停用、不能删除 |
 | status | int | 1 启用（参与自动选择）/ 0 停用（只能在设计器里显式打开） |
@@ -141,22 +142,30 @@ muzhou-report/
 数据集一旦分叉，主接口、父子关联、分页 total、内部/公共作用域全要跟着分叉，成本是版式版本化的
 好几倍，而实际诉求（「5 月起单据换个抬头 / 加一列」）几乎都是版式。
 
-**只存起点，区间靠排序推**（左闭右开）：存两端必然出现重叠和空洞，且改一处要改两处。
-**停用的版本不参与推导**，它那段自动被前一版吞掉 —— 这正是「临时回滚版式」想要的行为。
+**生效区间两端都存**（`[effective_from, effective_to)`，**左闭右开**，两端都可为 NULL = 不限）。
+早先只存起点、右端靠排序推，说不了「这一版 8/1 到期、之后谁也不接」（推导出来的右端必定被
+下一版接住，留不出空洞），也表达不了「两版共用同一段时间」。**停用的版本不参与自动选择**。
 
-| 版本 | `effective_from` | 推导区间 |
-|---|---|---|
-| v1 | `NULL` | `(-∞, 2026-05-01)` |
-| v2 | `2026-05-01` | `[2026-05-01, 2026-08-01)` |
-| v3 | `2026-08-01` | `[2026-08-01, +∞)` |
+**允许重叠**，重叠那一段归 **`effective_from` 更晚**的那一版（起点相同则 `version_no` 大的赢）。
+这条规则与早先那套「取起点 ≤ 判定值的最后一个」等价，所以**老数据（`effective_to` 全为 NULL）
+行为一字不变**：
 
-**区间只在 `match_rules` 相同的那几版之间推**（见 §4.1）：条件不同的版本压根不在同一条时间轴上
-竞争，混在一起推出来的右端是假的。前端 `utils/version.js#versionIntervals` 也按条件分组，
-两边必须一致。
+| 版本 | `effective_from` | `effective_to` | 实际生效 |
+|---|---|---|---|
+| v1 | `NULL` | `NULL` | `(-∞, 2026-05-01)` —— 5/1 起被 v2 盖过 |
+| v2 | `2026-05-01` | `NULL` | `[2026-05-01, 2026-08-01)` —— 8/1 起被 v3 盖过 |
+| v3 | `2026-08-01` | `NULL` | `[2026-08-01, +∞)` |
 
-**懒迁移**：报表一条版本行都没有时，用 `mz_report.content` 建 v1（默认、启用、`effective_from` 空），
+**重叠只在 `match_rules` 相同的那几版之间算**（见 §4.1）：条件不同的版本压根不在同一条时间轴上
+竞争，报它们重叠是误导。前端 `utils/version.js#versionIntervals` 也按条件分组，两边必须一致。
+
+单版自身的区间要求 `effective_to > effective_from`（相等 = 永远命中不了的空区间），
+`ReportVersionServiceImpl#checkRange` 拦掉；**版本之间的重叠不拦** —— 拦了就堵死了
+「两个类型共用同一段时间」这种正常配法。
+
+**懒迁移**：报表一条版本行都没有时，用 `mz_report.content` 建 v1（默认、启用、生效区间两端不限），
 挂在 `getDetail` 与渲染入口上（`ReportVersionService#ensureMigrated`），靠唯一索引兜幂等，老报表零感知。
-报表**删除时版本行跟着逻辑删除，复制时所有版本行一起复制**（保留 version_no / effective_from /
+报表**删除时版本行跟着逻辑删除，复制时所有版本行一起复制**（保留 version_no / 生效区间两端 /
 status / is_default）—— 漏了后者，副本会是一张没有版式的报表。
 
 ## 3. REST API（统一前缀 `/api`）
@@ -242,7 +251,8 @@ status / is_default）—— 漏了后者，副本会是一张没有版式的报
     "type": "sheet", "versionConfig": "...", "remark": "", "status": 1,
     "versions": [                          // 全部版式，按 versionNo 升序
       { "versionNo": 1, "name": null, "content": "{...}",
-        "effectiveFrom": null, "matchRules": null,   // 匹配条件跟着走，见 §4.1
+        "effectiveFrom": null, "effectiveTo": null,  // 生效区间两端，null = 那一端不限
+        "matchRules": null,                          // 匹配条件跟着走，见 §4.1
         "isDefault": 1, "status": 1, "remark": null }
     ],
     "datasets": [                          // 内部数据集 + 内容里引用到的公共数据集
@@ -295,8 +305,8 @@ status / is_default）—— 漏了后者，副本会是一张没有版式的报
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/{id}/version` | `List<MzReportVersion>`（**不含 content**，同 `/page` 不传大字段的规矩），按 `versionNo` 升序 |
-| POST | `/{id}/version/{versionId}/copy` | 从某版本复制新版本 → `String newId`（content 与 `matchRules` 原样，`status=0` 停用、`effectiveFrom` 空、不是默认版本） |
-| PUT | `/version` | `ReportVersionSaveDTO{id, name, effectiveFrom, matchRules, status, remark}` → `Boolean`。`effectiveFrom` / `matchRules` 传 null 分别表示「最早的那一版」「无条件匹配」，都能被显式清空；`matchRules` 是 JSON 数组串，存之前字段名空的条目会被丢掉，格式非法直接报错 |
+| POST | `/{id}/version/{versionId}/copy` | 从某版本复制新版本 → `String newId`（content 与 `matchRules` 原样，`status=0` 停用、生效区间两端清空、不是默认版本） |
+| PUT | `/version` | `ReportVersionSaveDTO{id, name, effectiveFrom, effectiveTo, matchRules, status, remark}` → `Boolean`。三者传 null 分别表示「左端不限」「右端不限」「无条件匹配」，都能被显式清空；两端都填时结束必须**严格晚于**开始（左闭右开，相等 = 永不生效），**版本之间的重叠不拦**；`matchRules` 是 JSON 数组串，存之前字段名空的条目会被丢掉，格式非法直接报错 |
 | POST | `/{id}/version/{versionId}/default` | 设为默认（停用中的会一并启用） → `Boolean` |
 | DELETE | `/version/{versionId}` | `Boolean`。**默认版本、最后一个启用版本不许删** |
 | GET | `/{id}/version/{versionId}/check` | `List<String>` 体检：这一版引用的数据集/字段是否还在、**匹配条件引用的字段/参数是否还在**（字段名写错时这一版只是永远匹配不上，渲染既不报错也没有别的痕迹），以及主接口 / 输出方式 / 父子关联与默认版本是否一致（不一致时以默认版本为准，只提示不拦） |
@@ -686,8 +696,8 @@ xlsx 读回来（`getRowBreaks()`），**别在各条路上再造一份**。前�
 ## 4.1 版本（`mz_report.version_config` + `mz_report_version.match_rules`）
 
 一张报表可以有好几份**版式**（见 §2 `mz_report_version`），用哪一份由**两维**决定：
-每一版自带的**匹配条件**（离散维度：单据类型、区域…）先筛，再在筛出来的那几版里按**生效时间**
-推区间。时间那一维的判定值从哪来由这条**报表级**规则说了算：
+每一版自带的**匹配条件**（离散维度：单据类型、区域…）先筛，再在筛出来的那几版里按**生效时间段**
+（`[effective_from, effective_to)`，见 §2）判。时间那一维的判定值从哪来由这条**报表级**规则说了算：
 
 ```jsonc
 {
@@ -740,8 +750,9 @@ xlsx 读回来（`getRowBreaks()`），**别在各条路上再造一份**。前�
    解析不了当作取不到；
 6. 取不到 → `fallback`：`default` 用默认版本 / `error` 抛 `BizException`（消息里带字段名）。
    **但条件已经把那一批筛成唯一一版时就用它** —— 条件够定案了，不该再被时间这一维推翻；
-7. 命中 = 该批里 `effective_from ≤ 判定值` 的最后一个（**左闭右开**）；一个都不满足
-   （早于所有起点）→ `effective_from` 为 NULL 的那一版；没有 NULL 版 → 默认版本
+7. 命中 = 该批里判定值落在 `[effective_from, effective_to)` 内的版本（两端为 NULL = 那一端不限）。
+   **允许多版同时盖住同一刻**，此时 `effective_from` 更晚的赢（起点相同则 `version_no` 大的赢）；
+   一版都没盖住（落在空洞里、或晚于所有结束时刻）→ 默认版本
    （**条件筛过的那一批则退回本批里最早的一版** —— 退回默认版本等于把已经命中的条件推翻）。
 
 **`field` 留空（只按条件选）时时间这一维直接不参与**，取匹配那批里生效最晚的一版。

@@ -18,7 +18,7 @@ public interface ReportVersionService extends IService<MzReportVersion> {
 
     /**
      * 懒迁移：这张报表一条版本行都没有时，用 {@code mz_report.content} 建 v1
-     * （默认、启用、{@code effectiveFrom} 空）。老报表零感知。
+     * （默认、启用、生效区间两端不限）。老报表零感知。
      *
      * <p>挂在 {@code getDetail} 和渲染入口上；靠唯一索引 {@code uk_version_report_no} 兜幂等。
      * 迁移之后 {@code mz_report.content} 不再读写（**不做双写** —— 双写必然漂移）。
@@ -48,14 +48,14 @@ public interface ReportVersionService extends IService<MzReportVersion> {
     List<ReportVersionResolver.Candidate> candidates(String reportId);
 
     /**
-     * 从某一版复制出新版本：content 原样，{@code status=0} 停用、{@code effectiveFrom} 空、
+     * 从某一版复制出新版本：content 原样，{@code status=0} 停用、生效区间清空、
      * 不是默认版本 —— 复制出来先是一份草稿，设计好、配好生效时间再启用。
      *
      * @return 新版本 id
      */
     String copyVersion(String reportId, String versionId);
 
-    /** 改版本元信息（name / effectiveFrom / status / remark）。 */
+    /** 改版本元信息（name / effectiveFrom / effectiveTo / matchRules / status / remark）。 */
     boolean updateMeta(ReportVersionSaveDTO dto);
 
     /** 设为默认（基准）版本，报表内恰好一条。 */
@@ -70,7 +70,7 @@ public interface ReportVersionService extends IService<MzReportVersion> {
     /** 报表被删除时，它的版本行跟着逻辑删除。 */
     void removeByReport(String reportId);
 
-    /** 报表被复制时，**所有版本行一起复制**（新 id，保留 versionNo / effectiveFrom / status / isDefault）。 */
+    /** 报表被复制时，**所有版本行一起复制**（新 id，保留 versionNo / 生效区间 / status / isDefault）。 */
     void copyToReport(String fromReportId, String toReportId);
 
     /**

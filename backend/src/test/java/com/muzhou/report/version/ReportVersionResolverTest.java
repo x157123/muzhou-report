@@ -25,12 +25,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * 版本选择算法的纯 POJO 测试（照 {@code RenderEngineTest} 的路子，不启动 Spring）。
  *
- * <p>用的是设计文档里那张表：
+ * <p>用的是设计文档里那张表 —— 三版都<b>只配了起点</b>（结束时刻为空 = 右端不限），
+ * 也就是老数据的样子。区间互相盖着，靠「重叠时起点更晚的赢」定案，效果与早先那套
+ * 「取起点 ≤ 判定值的最后一个」一模一样：
  * <pre>
- * v1  effectiveFrom = null        (-∞, 2026-05-01)
- * v2  effectiveFrom = 2026-05-01  [2026-05-01, 2026-08-01)
- * v3  effectiveFrom = 2026-08-01  [2026-08-01, +∞)
+ * v1  [null, null)  全时段          实际生效 (-∞, 2026-05-01)  —— 5/1 起被 v2 盖过
+ * v2  [2026-05-01, null)            实际生效 [2026-05-01, 2026-08-01)
+ * v3  [2026-08-01, null)            实际生效 [2026-08-01, +∞)
  * </pre>
+ *
+ * <p>显式结束时刻与「多版共用同一段时间」的用例在最后一组
+ * （{@link #explicitEndCreatesAGap} 起）。
  */
 class ReportVersionResolverTest {
 
@@ -92,13 +97,13 @@ class ReportVersionResolverTest {
     }
 
     @Test
-    @DisplayName("早于所有起点 -> effectiveFrom 为 null 的那一版")
+    @DisplayName("早于所有起点 -> 左端不限的那一版（它是唯一盖住这一刻的）")
     void earlierThanEverythingFallsToTheNullVersion() {
         assertEquals("v1", pick(three(), LocalDate.of(2020, 1, 1)));
     }
 
     @Test
-    @DisplayName("早于所有起点、又没有 null 版 -> 默认版本")
+    @DisplayName("早于所有起点、又没有左端不限的版本 -> 默认版本")
     void earlierThanEverythingWithoutNullVersionUsesDefault() {
         List<Candidate> list = new ArrayList<>();
         list.add(v("v2", 2, MAY, false, true));
@@ -417,6 +422,82 @@ class ReportVersionResolverTest {
         // v2 等价于「无条件」，于是仍是纯时间那一套
         assertEquals("v2", pickRow(list, Map.of("order_date", "2026-06-01")));
         assertEquals("v1", pickRow(list, Map.of("order_date", "2026-01-01")));
+    }
+
+    /* ---------------------- 生效区间的两端（结束时刻 + 重叠） ---------------------- */
+
+    /** 两端都给的候选版本 */
+    private Candidate v(String id, int no, LocalDateTime from, LocalDateTime to,
+                        boolean isDefault, boolean enabled, VersionMatchRuleDTO... rules) {
+        return new Candidate(id, no, null, from, to, isDefault, enabled, List.of(rules));
+    }
+
+    @Test
+    @DisplayName("显式结束时刻：到期之后落回默认版本（这是「只存起点」表达不了的空洞）")
+    void explicitEndCreatesAGap() {
+        List<Candidate> list = new ArrayList<>();
+        list.add(v("兜底", 1, null, null, true, true));
+        // 促销版式只在 5/1 ~ 8/1 这一段用，8/1 起到期
+        list.add(v("促销", 2, MAY, AUG, false, true));
+        assertEquals("促销", pick(list, LocalDate.of(2026, 6, 1)));
+        // 右端是开的：8/1 那一刻已经不归它了
+        assertEquals("兜底", pick(list, AUG));
+        assertEquals("兜底", pick(list, LocalDate.of(2026, 4, 1)));
+    }
+
+    @Test
+    @DisplayName("两版之间留出的真空段落回默认版本（只存起点时这一段必被前一版吞掉）")
+    void gapBetweenTwoRangesFallsBackToDefault() {
+        List<Candidate> list = new ArrayList<>();
+        list.add(v("旧", 1, null, MAY, true, true));
+        list.add(v("新", 2, AUG, null, false, true));
+        // 5/1 ~ 8/1 是个真空段，退回默认版本「旧」
+        assertEquals("旧", pick(list, LocalDate.of(2026, 6, 1)));
+        assertEquals("新", pick(list, LocalDate.of(2026, 9, 1)));
+        assertEquals("旧", pick(list, LocalDate.of(2026, 4, 1)));
+    }
+
+    @Test
+    @DisplayName("允许多版共用同一段时间：重叠时起点更晚的赢，起点相同则版本号大的赢")
+    void overlappingRangesPickTheLatestStart() {
+        List<Candidate> list = new ArrayList<>();
+        // 全年通用的一版，5 月单独压一版上去
+        list.add(v("全年", 1, null, null, true, true));
+        list.add(v("五月", 2, MAY, AUG, false, true));
+        assertEquals("五月", pick(list, LocalDate.of(2026, 6, 1)));
+        assertEquals("全年", pick(list, LocalDate.of(2026, 9, 1)));
+
+        // 起点、终点完全一样的两版（界面上现在允许这么配）：后建的那个赢
+        List<Candidate> same = new ArrayList<>();
+        same.add(v("先建", 1, MAY, AUG, true, true));
+        same.add(v("后建", 2, MAY, AUG, false, true));
+        assertEquals("后建", pick(same, LocalDate.of(2026, 6, 1)));
+    }
+
+    @Test
+    @DisplayName("重叠的那一版停用后，这一段落回被它盖住的那一版")
+    void disablingTheOverlayFallsBackToTheCoveredOne() {
+        List<Candidate> list = new ArrayList<>();
+        list.add(v("全年", 1, null, null, true, true));
+        list.add(v("五月", 2, MAY, AUG, false, false));
+        assertEquals("全年", pick(list, LocalDate.of(2026, 6, 1)));
+    }
+
+    @Test
+    @DisplayName("条件 + 两端区间：条件先筛，再在那一批里按区间判，两批各走各的时间轴")
+    void rulesThenExplicitRange() {
+        List<Candidate> list = new ArrayList<>();
+        list.add(v("兜底", 1, null, null, true, true));
+        list.add(v("A促销", 2, MAY, AUG, false, true, rule("order_type", "eq", "A")));
+        list.add(v("A常规", 3, null, null, false, true, rule("order_type", "eq", "A")));
+        list.add(v("B版", 4, MAY, AUG, false, true, rule("order_type", "eq", "B")));
+
+        assertEquals("A促销", pickRow(list, Map.of("order_type", "A", "order_date", "2026-06-01")));
+        assertEquals("A常规", pickRow(list, Map.of("order_type", "A", "order_date", "2026-09-01")));
+        // 类型 B 那一批只有一版，9 月的数据落在它的区间外面 —— 条件已经命中，
+        // 退回默认版本会把条件推翻，所以用本批里最早的那一版
+        assertEquals("B版", pickRow(list, Map.of("order_type", "B", "order_date", "2026-09-01")));
+        assertEquals("兜底", pickRow(list, Map.of("order_type", "C", "order_date", "2026-06-01")));
     }
 
     /** 记一笔调用次数的假取数函数，只有 orders 会还一行数据。 */

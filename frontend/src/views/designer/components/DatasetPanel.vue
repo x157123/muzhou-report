@@ -10,10 +10,10 @@
     <div class="mz-panel-title">
       数据集
       <span class="title-actions">
-        <el-tooltip content="为当前报表新建内部数据集" placement="top">
+        <el-tooltip content="新增" placement="bottom">
           <el-button link :icon="Plus" size="small" @click="$emit('create')" />
         </el-tooltip>
-        <el-tooltip content="刷新数据集列表" placement="top">
+        <el-tooltip content="刷新" placement="bottom">
           <el-button link :icon="Refresh" size="small" @click="$emit('refresh')" />
         </el-tooltip>
       </span>

@@ -2,24 +2,24 @@
   版本管理弹窗：一张报表的几份**版式**（content）在这里管。
 
   版本化的是版式，不是数据集 —— 数据集是「取数」，跨版本共用。所以这里能改的是
-  「哪一版从什么时候起生效」「哪一版是兜底的默认版本」，改 SQL 请去数据集面板。
+  「哪一版在什么时间段生效」「哪一版是兜底的默认版本」，改 SQL 请去数据集面板。
 
-  用户配的是**起点**，脑子里想的是**区间**，所以每一行都把推导出来的区间摆出来
-  （左闭右开，停用的版本不参与推导，被前一版吞掉）。
+  生效时间段两端都由用户填（左闭右开，两端可空 = 不限），**允许多版共用同一段时间**，
+  所以每一行还要提示「这一段是不是被别人盖住了」—— 配得出重叠，就得看得见重叠。
 -->
 <template>
   <el-dialog v-model="visible" title="版本管理" width="1100px" :close-on-click-modal="false" destroy-on-close>
     <div class="tips">
       版本化的是<b>版式</b>：每一版持有一份完整的报表内容。用哪一版由<b>匹配条件</b>（类型/区域这类维度）
-      加<b>生效时间</b>两维决定 —— 条件先筛、时间后推，判定值从哪来在「打印设置 → 版本」里配。
+      加<b>生效时间段</b>两维决定 —— 条件先筛、时间后判，判定值从哪来在「打印设置 → 版本」里配。
       改<b>数据集</b>会同时影响所有版本（数据集不随版本走）。
     </div>
 
     <el-table :data="rows" size="small" v-loading="loading" border>
-      <el-table-column label="版本" width="120">
+      <el-table-column label="版本" width="50">
         <template #default="{ row }">
-          <span class="mono">{{ row.label }}</span>
-          <el-tag v-if="row.id === currentId" size="small" type="primary" effect="plain">当前</el-tag>
+          <span class="mono" v-if="row.id !== currentId">{{ row.label }}</span>
+          <span class="mono select-version" v-if="row.id === currentId" >{{ row.label }}</span>
         </template>
       </el-table-column>
 
@@ -32,23 +32,34 @@
         </template>
       </el-table-column>
 
-      <el-table-column label="生效起始" width="190">
+      <!--
+        两个独立的日期框而不是一个 datetimerange：range 选择器只能整段填或整段清，
+        配不出「从 5/1 起、右端不限」这种最常见的写法。
+      -->
+      <el-table-column label="生效时间段" width="300">
         <template #default="{ row }">
-          <el-date-picker
-            :model-value="row.effectiveFrom"
-            type="datetime"
-            size="small"
-            style="width: 100%"
-            placeholder="留空 = 最早的那一版"
-            value-format="YYYY-MM-DD HH:mm:ss"
-            @update:model-value="(v) => saveMeta(row, { effectiveFrom: v || null })"
-          />
-        </template>
-      </el-table-column>
-
-      <el-table-column label="生效区间（推导）" width="200">
-        <template #default="{ row }">
-          <span :class="{ 'text-muted': !row.enabled }">{{ intervalText(row) }}</span>
+          <div class="range">
+            <el-date-picker
+              :model-value="row.effectiveFrom"
+              type="datetime"
+              size="small"
+              placeholder="开始（空=不限）"
+              value-format="YYYY-MM-DD HH:mm:ss"
+              @update:model-value="(v) => saveMeta(row, { effectiveFrom: v || null })"
+            />
+            <span class="sep">~</span>
+            <el-date-picker
+              :model-value="row.effectiveTo"
+              type="datetime"
+              size="small"
+              placeholder="结束（空=不限）"
+              value-format="YYYY-MM-DD HH:mm:ss"
+              @update:model-value="(v) => saveMeta(row, { effectiveTo: v || null })"
+            />
+          </div>
+<!--          <div v-if="!row.enabled" class="hint text-muted">{{ row.note }}</div>-->
+<!--          <div v-else-if="row.coveredBy.length" class="hint warn">{{ row.note }}</div>-->
+<!--          <div v-else class="hint text-muted">{{ intervalText(row) }}</div>-->
         </template>
       </el-table-column>
 
@@ -63,23 +74,23 @@
         </template>
       </el-table-column>
 
-      <el-table-column label="状态" width="150">
+      <el-table-column label="状态" width="70">
         <template #default="{ row }">
+
           <el-switch
-            :model-value="row.enabled"
-            :disabled="row.isDefault"
-            active-text="启用"
-            inactive-text="停用"
-            inline-prompt
-            @update:model-value="(v) => saveMeta(row, { status: v ? 1 : 0 })"
+              :model-value="row.enabled"
+              :disabled="row.isDefault"
+              active-text="启用"
+              inactive-text="停用"
+              inline-prompt
+              @update:model-value="(v) => saveMeta(row, { status: v ? 1 : 0 })"
           />
-          <el-tag v-if="row.isDefault" size="small" type="success" effect="plain">默认</el-tag>
         </template>
       </el-table-column>
 
-      <el-table-column label="更新时间" width="160" prop="updateTime" />
+<!--      <el-table-column label="更新时间" width="160" prop="updateTime" />-->
 
-      <el-table-column label="操作" width="230" fixed="right">
+      <el-table-column label="操作" width="180" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click="emitOpen(row)">打开</el-button>
           <el-button link type="primary" size="small" @click="doCopy(row)">复制</el-button>
@@ -92,7 +103,7 @@
           >
             设为默认
           </el-button>
-          <el-button link type="primary" size="small" @click="doCheck(row)">校验</el-button>
+<!--          <el-button link type="primary" size="small" @click="doCheck(row)">校验</el-button>-->
           <el-button link type="danger" size="small" :disabled="row.isDefault" @click="doRemove(row)">
             删除
           </el-button>
@@ -102,12 +113,16 @@
 
     <div class="tips foot">
       <p>
-        <b>区间是推导出来的</b>：只存起点，右端是下一个启用版本的起点，<b>左闭右开</b> ——
-        5 月 1 号那天走的是「从 5/1 起」的那一版。<b>只在匹配条件相同的几版之间推</b>：
-        条件不同的版本不在同一条时间轴上竞争。
+        <b>生效时间段两端都可以留空</b>（= 那一端不限），区间<b>左闭右开</b> ——
+        结束填 8/1 表示 7/31 当天还用它、8/1 起不再用。两端都空 = 全时段。
       </p>
       <p>
+        <b>允许多版共用同一段时间</b>：重叠那一段归<b>起点更晚</b>的那一版（起点相同则版本号大的赢），
+        表格里会标出来。判断只在<b>匹配条件相同</b>的几版之间做 —— 条件不同的版本压根不竞争。
         多版同时匹配时<b>条件更具体的赢</b>；一条条件都没配的那一版是所有版本都不匹配时的兜底。
+      </p>
+      <p>
+        谁也没盖住的那一段（比如某一版到期后没有下一版接上）落回<b>默认版本</b>。
       </p>
       <p>
         <b>停用</b>不参与自动选择，它那段会被前一版吞掉（临时回滚版式就靠这个）；
@@ -187,13 +202,14 @@ function onRulesConfirm(matchRules) {
   if (editing.value) saveMeta(editing.value, { matchRules })
 }
 
-/** 改元信息：几个字段一起提交（后端走 set()，effectiveFrom / matchRules 才清得掉） */
+/** 改元信息：几个字段一起提交（后端走 set()，生效区间两端 / matchRules 才清得掉） */
 async function saveMeta(row, patch) {
   try {
     await updateVersion({
       id: row.id,
       name: row.name,
       effectiveFrom: row.effectiveFrom,
+      effectiveTo: row.effectiveTo,
       matchRules: row.matchRules,
       status: row.enabled ? 1 : 0,
       remark: row.remark,
@@ -277,6 +293,32 @@ function emitOpen(row) {
 }
 .mono {
   margin-right: 6px;
+}
+
+.select-version {
+  color: #0350ea;
+}
+
+/* 两个日期框挤在一列里：各占一半，中间留一个 ~ */
+.range {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.range :deep(.el-date-editor) {
+  flex: 1;
+  min-width: 0;
+}
+.sep {
+  color: var(--el-text-color-secondary);
+}
+.hint {
+  font-size: 12px;
+  line-height: 1.4;
+  margin-top: 2px;
+}
+.hint.warn {
+  color: var(--el-color-warning);
 }
 /* 条件可能挺长，允许换行显示（默认的 el-button 是不换行的） */
 .cond {

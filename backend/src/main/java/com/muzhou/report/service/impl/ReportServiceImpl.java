@@ -214,7 +214,7 @@ public class ReportServiceImpl extends ServiceImpl<MzReportMapper, MzReport> imp
         save(copy);
         // content 里的 #{code.字段} 原样复制过来了，内部数据集不跟着复制的话副本会取不到数
         datasetService.copyToReport(id, copy.getId());
-        // **所有版本行一起复制**（保留 versionNo / effectiveFrom / status / isDefault）——
+        // **所有版本行一起复制**（保留 versionNo / 生效区间 / status / isDefault）——
         // 漏了这条，副本会是一张没有版式的报表
         versionService.copyToReport(id, copy.getId());
         return copy.getId();

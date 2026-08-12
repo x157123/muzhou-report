@@ -125,8 +125,8 @@ ALTER TABLE public.mz_report ADD COLUMN IF NOT EXISTS version_config character v
 -- public.mz_report_version 定义
 --
 -- 一张报表的一份**版式**（content）。版本化的是版式，不是数据集 —— 数据集是「取数」，
--- 跨版本共用（见 CONTRACT §2）。每行只存**生效起始时刻**，区间由排序推导（左闭右开），
--- 存两端必然出现重叠和空洞。
+-- 跨版本共用（见 CONTRACT §2）。生效区间**两端都存**（左闭右开），两端都可为空 = 不限；
+-- 允许多版重叠，重叠时起点更晚的赢（见 CONTRACT §4.1）。
 
 CREATE TABLE IF NOT EXISTS public.mz_report_version (
                                   id character varying(32) NOT NULL,
@@ -135,6 +135,7 @@ CREATE TABLE IF NOT EXISTS public.mz_report_version (
                                   name character varying(50),
                                   content character large object,
                                   effective_from timestamp,
+                                  effective_to timestamp,
                                   match_rules character varying(2000),
                                   is_default integer DEFAULT 0,
                                   status integer DEFAULT 1,
@@ -153,6 +154,11 @@ CREATE INDEX IF NOT EXISTS idx_version_report ON public.mz_report_version (repor
 -- [{"source":"field","field":"order_type","op":"eq","value":"A"}]
 -- 老库里这一列不存在，所以照 version_config 那条的样子补一句 ADD COLUMN IF NOT EXISTS
 ALTER TABLE public.mz_report_version ADD COLUMN IF NOT EXISTS match_rules character varying(2000);
+-- 生效**结束**时刻（左闭右开的右端），NULL = 不限。早先只存起点、右端靠排序推，
+-- 推出来的右端说不了「这一版 8/1 就到期，之后谁也不接」，也表达不了两版共用同一段时间。
+-- 老库里这一列同样不存在：补上之后全是 NULL = 右端不限，推导出来的老区间原样成立
+-- （重叠时起点更晚的赢，正好等于原先「取 effective_from ≤ 判定值的最后一个」）
+ALTER TABLE public.mz_report_version ADD COLUMN IF NOT EXISTS effective_to timestamp;
 
 
 -- public.mz_param 定义

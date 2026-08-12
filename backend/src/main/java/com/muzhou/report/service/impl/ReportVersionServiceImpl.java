@@ -79,7 +79,7 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
         MzReportVersion v = new MzReportVersion();
         v.setReportId(reportId);
         v.setVersionNo(1);
-        // 老报表的那份版式原样搬过来当 v1：默认、启用、生效起始为空（区间左端 -∞）
+        // 老报表的那份版式原样搬过来当 v1：默认、启用、生效区间两端都不限（全时段）
         v.setContent(report.getContent());
         v.setEffectiveFrom(null);
         v.setIsDefault(1);
@@ -139,8 +139,8 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
         List<ReportVersionResolver.Candidate> out = new ArrayList<>();
         for (MzReportVersion v : list(reportId)) {
             out.add(new ReportVersionResolver.Candidate(v.getId(), v.getVersionNo(), v.getName(),
-                    v.getEffectiveFrom(), isDefault(v), v.getStatus() == null || v.getStatus() == 1,
-                    parseRules(v.getMatchRules())));
+                    v.getEffectiveFrom(), v.getEffectiveTo(), isDefault(v),
+                    v.getStatus() == null || v.getStatus() == 1, parseRules(v.getMatchRules())));
         }
         return out;
     }
@@ -220,6 +220,7 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
         // 一复制就参与自动选择的话，会立刻把某一段区间抢过去
         copy.setStatus(0);
         copy.setEffectiveFrom(null);
+        copy.setEffectiveTo(null);
         copy.setIsDefault(0);
         copy.setRemark("从 " + label(source) + " 复制");
         copy.setCreateBy(source.getCreateBy());
@@ -239,14 +240,16 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
         if (isDefault(old) && dto.getStatus() != null && dto.getStatus() == 0) {
             throw new BizException("默认版本不能停用 —— 判定值取不到时要靠它兜底");
         }
-        // 走 set() 而不是 updateById：effectiveFrom / matchRules 置空表示「最早的那一版」
-        // 与「无条件匹配」，MyBatis-Plus 默认跳过 null 字段，用 updateById 永远清不掉。
+        checkRange(dto.getEffectiveFrom(), dto.getEffectiveTo());
+        // 走 set() 而不是 updateById：effectiveFrom / effectiveTo / matchRules 置空分别表示
+        // 「左端不限」「右端不限」「无条件匹配」，MyBatis-Plus 默认跳过 null 字段，用 updateById 永远清不掉。
         // 代价是**自动填充不生效**（update(Wrapper) 没有实体，MetaObjectHandler 不介入），
         // update_time 得自己写 —— 版本管理页上那一列否则永远停在创建时间
         LambdaUpdateWrapper<MzReportVersion> w = new LambdaUpdateWrapper<>();
         w.eq(MzReportVersion::getId, dto.getId())
                 .set(MzReportVersion::getName, trimToNull(dto.getName()))
                 .set(MzReportVersion::getEffectiveFrom, dto.getEffectiveFrom())
+                .set(MzReportVersion::getEffectiveTo, dto.getEffectiveTo())
                 .set(MzReportVersion::getMatchRules, normalizeRules(dto.getMatchRules()))
                 .set(MzReportVersion::getRemark, trimToNull(dto.getRemark()))
                 .set(MzReportVersion::getUpdateTime, LocalDateTime.now());
@@ -325,6 +328,7 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
             copy.setName(s.getName());
             copy.setContent(s.getContent());
             copy.setEffectiveFrom(s.getEffectiveFrom());
+            copy.setEffectiveTo(s.getEffectiveTo());
             copy.setMatchRules(s.getMatchRules());
             copy.setIsDefault(s.getIsDefault());
             copy.setStatus(s.getStatus());
@@ -352,13 +356,14 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
         for (MzReportVersion src : sorted) {
             MzReportVersion old = src.getVersionNo() == null ? null : exist.get(src.getVersionNo());
             if (old != null) {
-                // 原地更新。走 set() 而不是 updateById：effectiveFrom 为空表示「最早的那一版」，
+                // 原地更新。走 set() 而不是 updateById：生效区间两端为空表示「不限」，
                 // 得能被清空（同 updateMeta，连带 update_time 自己写）
                 update(new LambdaUpdateWrapper<MzReportVersion>()
                         .eq(MzReportVersion::getId, old.getId())
                         .set(MzReportVersion::getName, src.getName())
                         .set(MzReportVersion::getContent, src.getContent())
                         .set(MzReportVersion::getEffectiveFrom, src.getEffectiveFrom())
+                        .set(MzReportVersion::getEffectiveTo, src.getEffectiveTo())
                         .set(MzReportVersion::getMatchRules, src.getMatchRules())
                         .set(MzReportVersion::getIsDefault, src.getIsDefault() == null ? 0 : src.getIsDefault())
                         .set(MzReportVersion::getStatus, src.getStatus() == null ? 1 : src.getStatus())
@@ -376,6 +381,7 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
             row.setName(src.getName());
             row.setContent(src.getContent());
             row.setEffectiveFrom(src.getEffectiveFrom());
+            row.setEffectiveTo(src.getEffectiveTo());
             row.setMatchRules(src.getMatchRules());
             row.setIsDefault(src.getIsDefault() == null ? 0 : src.getIsDefault());
             row.setStatus(src.getStatus() == null ? 1 : src.getStatus());
@@ -519,6 +525,18 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
 
     private String trimToNull(String s) {
         return StringUtils.hasText(s) ? s.trim() : null;
+    }
+
+    /**
+     * 生效区间的合法性：左闭右开，所以结束**必须严格晚于**起始，相等就是一段永远命中不了的空区间。
+     *
+     * <p>只管这一版自己 —— **版本之间重叠是允许的**（重叠时起点更晚的赢，见
+     * {@link ReportVersionResolver}），拦掉重叠反而堵死了「两个类型共用同一段时间」这种正常配法。
+     */
+    private void checkRange(LocalDateTime from, LocalDateTime to) {
+        if (from != null && to != null && !to.isAfter(from)) {
+            throw new BizException("生效结束时间必须晚于开始时间（区间左闭右开，相等等于永不生效）");
+        }
     }
 
     private ReportContentDTO parse(String json, List<String> problems) {

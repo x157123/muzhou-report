@@ -185,7 +185,7 @@ public class ReportController {
         return Result.ok(versionService.copyVersion(id, versionId));
     }
 
-    /** 改版本元信息（name / effectiveFrom / status / remark）。 */
+    /** 改版本元信息（name / effectiveFrom / effectiveTo / matchRules / status / remark）。 */
     @PutMapping("/version")
     public Result<Boolean> updateVersion(@RequestBody ReportVersionSaveDTO dto) {
         return Result.ok(versionService.updateMeta(dto));

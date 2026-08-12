@@ -1,14 +1,15 @@
 /**
- * 报表版本的小工具：显示名、匹配条件、「生效区间」的推导。
+ * 报表版本的小工具：显示名、匹配条件、生效区间与重叠提示。
  *
- * 用户配的是**起点**（这一版从哪天起生效），脑子里想的却是**区间**。区间由排序推出来，
- * 左闭右开 —— 存两端必然出现重叠和空洞，且改一处要改两处。这份推导必须和后端
- * `ReportVersionResolver` 一致：**停用的版本不参与**（它那段被前一版吞掉），
- * `effectiveFrom` 为空的那一版是「最早的那一版」（区间左端 -∞）。
+ * 生效区间**两端都由用户填**（`effectiveFrom` ~ `effectiveTo`，左闭右开，两端都可空 = 不限），
+ * 所以这里不再推导右端。**允许多版共用同一段时间**，重叠时的胜负规则必须和后端
+ * `ReportVersionResolver#covers` 一致：**起点更晚的赢，起点相同则版本号大的赢**；
+ * **停用的版本不参与**。这份规则在界面上只用来提示「这一段其实归谁」——
+ * 用户配得出重叠，就得看得见重叠。
  *
- * 版本还有**匹配条件**这一维（类型/区域这类离散维度，见 CONTRACT §4.1）：条件先筛、时间后推。
- * 所以**区间只在「条件相同的那几版」之间推**（`versionIntervals` 按条件分组）——
- * 把「类型 A 的 5 月版」和「类型 B 的 8 月版」排进同一条时间轴上是错的，它们根本不竞争。
+ * 版本还有**匹配条件**这一维（类型/区域这类离散维度，见 CONTRACT §4.1）：条件先筛、时间后判。
+ * 所以**重叠只在「条件相同的那几版」之间算**（`versionIntervals` 按条件分组）——
+ * 「类型 A 的 5 月版」和「类型 B 的 5 月版」时间上叠着，却根本不竞争，报重叠是误导。
  */
 
 /** 条件的比较方式，与后端 `VersionMatchRuleDTO` 的 op 一一对应 */
@@ -62,7 +63,7 @@ export function rulesText(rules) {
     .join(' 且 ')
 }
 
-/** 条件的指纹：条件相同的版本才在同一条时间轴上竞争 */
+/** 条件的指纹：条件相同的版本才在同一条时间轴上竞争（重叠也只在这几版之间算） */
 function ruleKey(version) {
   return validRules(version.matchRules)
     .map((r) => `${r.source || 'field'}|${r.field}|${r.op || 'eq'}|${r.value ?? ''}`)
@@ -82,19 +83,42 @@ export function shortTime(t) {
   return s.endsWith(' 00:00:00') ? s.slice(0, 10) : s
 }
 
+/** 两个左闭右开区间叠着没有（两端空 = 那一端不限） */
+function overlaps(a, b) {
+  const aFrom = a.effectiveFrom || ''
+  const aTo = a.effectiveTo || ''
+  const bFrom = b.effectiveFrom || ''
+  const bTo = b.effectiveTo || ''
+  if (aTo && bFrom && aTo <= bFrom) return false
+  if (bTo && aFrom && bTo <= aFrom) return false
+  return true
+}
+
+/** 重叠时谁赢：起点更晚的赢，起点相同则版本号大的赢（同后端 `decide` 的排序） */
+function beats(a, b) {
+  const av = a.effectiveFrom || ''
+  const bv = b.effectiveFrom || ''
+  if (av !== bv) {
+    if (!av) return false
+    if (!bv) return true
+    return av > bv
+  }
+  return (a.versionNo || 0) > (b.versionNo || 0)
+}
+
 /**
- * 推导每一版的生效区间。
+ * 给每一版算出界面上要显示的那几样：区间、条件、以及**被谁盖住了**。
  *
- * **区间按「匹配条件相同」分组推**：条件不同的版本压根不在同一条时间轴上竞争
- * （后端是先按条件筛出一批、再在那批里推区间），混在一起推出来的右端是假的。
+ * 区间不再推导（两端都是用户填的），这里做的是**重叠提示**：允许多版共用同一段时间，
+ * 那就得告诉用户重叠那一段实际归谁。判断只在「匹配条件相同」的那几版之间做 ——
+ * 条件不同的版本压根不竞争（后端也是先按条件筛出一批再在那批里判）。
  *
  * @param versions 版本列表（后端 /report/{id}/version 的返回）
- * @returns [{ ...version, label, from, to, enabled, isDefault, rules, condition, note }]，顺序同传入
- *          `from` / `to` 是字符串（`to` 为空表示 +∞），停用的版本 note 说明它不参与
+ * @returns [{ ...version, label, from, to, enabled, isDefault, rules, condition, coveredBy, note }]，
+ *          顺序同传入。`from` / `to` 是字符串（空 = 那一端不限），`coveredBy` 是盖住它的版本名
  */
 export function versionIntervals(versions) {
   const list = Array.isArray(versions) ? versions : []
-  const to = {}
   const groups = new Map()
   list
     .filter((v) => v.status !== 0)
@@ -104,27 +128,21 @@ export function versionIntervals(versions) {
       groups.get(key).push(v)
     })
 
+  // 每一版被同组里哪几版盖过（重叠且对方赢）
+  const covered = {}
   groups.forEach((group) => {
-    // 排序规则同后端：effectiveFrom 空的排最前，其次按时间，再按版本号
-    const sorted = group.slice().sort((a, b) => {
-      const av = a.effectiveFrom || ''
-      const bv = b.effectiveFrom || ''
-      if (av !== bv) {
-        if (!av) return -1
-        if (!bv) return 1
-        return av < bv ? -1 : 1
-      }
-      return (a.versionNo || 0) - (b.versionNo || 0)
-    })
-    sorted.forEach((v, i) => {
-      // 区间右端 = 同组下一个启用版本的起点（左闭右开），最后一个是 +∞
-      to[v.id] = sorted[i + 1]?.effectiveFrom || ''
+    group.forEach((v) => {
+      const winners = group
+        .filter((o) => o.id !== v.id && overlaps(v, o) && beats(o, v))
+        .map(versionLabel)
+      if (winners.length) covered[v.id] = winners
     })
   })
 
   return list.map((v) => {
     const isEnabled = v.status !== 0
     const rules = validRules(v.matchRules)
+    const winners = isEnabled ? covered[v.id] : null
     return {
       ...v,
       label: versionLabel(v),
@@ -132,9 +150,14 @@ export function versionIntervals(versions) {
       isDefault: v.isDefault === 1,
       rules,
       condition: rulesText(rules),
-      from: isEnabled ? shortTime(v.effectiveFrom) : '',
-      to: isEnabled ? shortTime(to[v.id]) : '',
-      note: isEnabled ? '' : '已停用，不参与自动选择'
+      from: shortTime(v.effectiveFrom),
+      to: shortTime(v.effectiveTo),
+      coveredBy: winners || [],
+      note: isEnabled
+        ? winners
+          ? `重叠段被 ${winners.join('、')} 盖过（起点更晚的赢）`
+          : ''
+        : '已停用，不参与自动选择'
     }
   })
 }
