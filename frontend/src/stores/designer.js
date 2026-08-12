@@ -212,12 +212,6 @@ export const useDesignerStore = defineStore('designer', {
       // 删掉格子内容不会通知业务层（FortuneSheet 只是把格子置成 {}），绑定只能在这里
       // 对着最新的 sheets 回收 —— 否则格子空了数据照样渲染出来
       this.content.cellConfigs = pruneEmptyCellConfigs(this.content.cellConfigs, next)
-      // 老报表存着的 perRow（「每条数据一个 sheet」，已下线）在设计器里一律迁成 perRowPage：
-      // 拆分方式本来就是同一套，只是出口从「N 张 sheet」换成「拼回一张、按页分开」。
-      // 尤其是多 sheet 模板 —— perRow 会出 M×N 张、同一条数据的几张单据被打散，正是下线的原因
-      if (this.content.splitMode === 'perRow') {
-        this.content.splitMode = 'perRowPage'
-      }
       this.dirty = true
     },
 
@@ -435,22 +429,23 @@ export const useDesignerStore = defineStore('designer', {
     },
 
     /**
-     * 输出方式：单 sheet 输出 / 多 sheet 输出（`perRowPage`：按主接口每条数据拆一份、一份一页，
-     * 含单据名取哪个字段）。
+     * 输出方式（含单据名取哪个字段）：
+     * - `single` 单 sheet 输出；
+     * - `perRowPage`「多 sheet 输出」：按主接口每条数据拆一份，**首尾相接拼回同一张 sheet**、
+     *   每份开头打一个行分页符 —— Excel 里是一张连续的表，打印时一条数据一页；
+     * - `perRow`「每条数据一个 sheet」：**同一套拆分不拼接**，直接出 M×N 张 sheet
+     *   （M = 模板张数），导出的 Excel 里就是 M×N 个标签页。
      *
      * 跟打印设置一起在打印设置弹窗里配，但它是**报表级**的 —— 决定的是整个工作簿有几张 sheet，
      * 不是某一张 sheet 怎么出纸，所以不进 pageConfigs。
      *
-     * **`perRow`（「每条数据一个 sheet」）已下线**，设计器里选不到了：它与 `perRowPage` 是
-     * 同一套拆分的两个出口，功能重叠，而它出的 M×N 张 sheet 会把同一条数据的几张单据打散在
-     * 整个工作簿里。传进来的 `perRow`（老报表 / 手写 content）在这里迁成 `perRowPage`。
-     * 引擎那边仍认得 `perRow`，没在设计器里存过盘的老报表照旧按老样子渲染。
+     * 两个拆分模式共用 `sheetNameField`，只是那个值落在哪儿不一样：`perRow` 拿它当 sheet 名，
+     * `perRowPage` 拼成一张之后 sheet 名说不了话（整张只有一个名字），它改落在 `mzDocNames` 上
+     * 当页头页尾里 `${sheet}` 的值（每张纸印自己那一份的单号）。`single` 用不上，清掉。
      */
     setSheetSplit({ splitMode, sheetNameField }) {
-      const mode = ['perRow', 'perRowPage'].includes(splitMode) ? 'perRowPage' : 'single'
+      const mode = ['perRow', 'perRowPage'].includes(splitMode) ? splitMode : 'single'
       this.content.splitMode = mode
-      // 拼回一张之后 sheet 名说不了话（整张只有一个名字），这个字段拿来当页头页尾里 ${sheet}
-      // 的值（每张纸印自己那一份的单号）。single 用不上，清掉
       this.content.sheetNameField = mode === 'single' ? '' : sheetNameField || ''
       this.dirty = true
     },

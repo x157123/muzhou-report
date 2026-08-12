@@ -42,24 +42,26 @@ public class ReportContentDTO implements Serializable {
 
     /**
      * 输出方式：{@code single} 单 sheet 输出（默认）/ {@code perRowPage} 每条数据一页、
-     * 拼在同一张 sheet 里（<b>设计器界面上叫「多 sheet 输出」</b> —— 打印设置不同的相邻份
-     * 会断成几张 sheet）。
+     * 拼在同一张 sheet 里（<b>设计器界面上叫「多 sheet 输出」</b>）/ {@code perRow}
+     * 每条数据一个 sheet。
      *
      * <p>「一条数据一张单据」那种报表：模板整份复制 N 遍，第 i 份只喂主接口的第 i 行数据，
-     * 其它数据集每份都拿全量；再把那 N 份**首尾相接**拼回每个模板一张
-     * （{@code engine/SheetConcat}），并在每份的起始行打一个行分页符，保证打印时一条数据一页、
-     * 不会两条挤在同一张纸上。只对**集合型**主接口有意义 —— 分页型自己就分页了。
-     *
-     * <p><b>还有个已下线的 {@code perRow}</b>（每条数据一个 sheet）：同一段拆分代码的另一个出口，
-     * 不拼接、直接出 N×M 张 sheet。与 {@code perRowPage} 功能重叠，且会把同一条数据的几张单据
-     * 打散在整个工作簿里，**设计器里已经没有这个选项**（前端把它迁成 {@code perRowPage}）。
-     * 这里连同引擎那份实现一起留着，让没在新版设计器里存过盘的老报表照旧渲染。
+     * 其它数据集每份都拿全量。只对**集合型**主接口有意义 —— 分页型自己就分页了。
+     * <b>两个拆分模式共用这一段代码，区别只在出口</b>：
+     * <ul>
+     *   <li>{@code perRow} 不拼接，直接出 M×N 张 sheet（M = 模板张数），导出的 Excel 里
+     *       就是那么多标签页；顺序是行优先（一条数据的几张模板挨着）。</li>
+     *   <li>{@code perRowPage} 把那 N 份**首尾相接**拼回每个模板一张
+     *       （{@code engine/SheetConcat}），并在每份的起始行打一个行分页符，保证打印时
+     *       一条数据一页、不会两条挤在同一张纸上；<b>打印设置不同的相邻份才会断成几张 sheet</b>
+     *       ——「多 sheet 输出」这个名字说的是这件事，不是「一条数据一张工作表」。</li>
+     * </ul>
      */
     private String splitMode;
 
     /**
      * 单据名取主接口这一行的哪个字段（取不到值就退回「第 n 条」）：{@code perRowPage} 拿它当
-     * {@code mzDocNames}（页头页尾里的 {@code ${sheet}}），老的 {@code perRow} 拿它当 sheet 名。
+     * {@code mzDocNames}（页头页尾里的 {@code ${sheet}}），{@code perRow} 拿它当 sheet 名。
      */
     private String sheetNameField;
 

@@ -228,6 +228,7 @@
             <el-radio-group v-model="split.splitMode" :disabled="!canSplit">
               <el-radio-button value="single">单 sheet 输出</el-radio-button>
               <el-radio-button value="perRowPage">多 sheet 输出</el-radio-button>
+              <el-radio-button value="perRow">每条数据一个 sheet</el-radio-button>
             </el-radio-group>
           </el-form-item>
 
@@ -254,6 +255,12 @@
               <b>只有 PDF（含预览页的打印）逐份换名</b>，Excel / Word 里 <code>${sheet}</code> 恒是工作表名。
             </p>
           </div>
+          <div v-if="split.splitMode === 'perRow'" class="tips" style="margin-top: -8px">
+            <p>
+              「每条数据一个 sheet」拿这里配的名字<b>当工作表名</b>（重名自动挂 <code>(2)</code>，
+              多模板再补上模板名），页头页尾里的 <code>${sheet}</code> 三种格式都印得出来。
+            </p>
+          </div>
 
           <div class="tips">
             <p v-if="!primary">
@@ -271,7 +278,14 @@
               <b>「多 sheet 输出」</b>= 复制出来的 N 份<b>首尾相接拼回同一张 sheet</b>，
               并在每份的开头打一个分页符。Excel 里是一张连续的表（能整体滚动、筛选），
               打印/导出 PDF 时<b>一条数据占一页</b>，不会两条挤在同一张纸上。
-              打印设置不同的相邻份会断成几张 sheet，「多 sheet」由此而来。
+              打印设置不同的相邻份会断成几张 sheet，「多 sheet」由此而来 ——
+              <b>它不是「一条数据一张工作表」</b>，要那样请选右边那项。
+            </p>
+            <p v-if="split.splitMode === 'perRow'">
+              <b>「每条数据一个 sheet」</b>= 复制出来的 N 份<b>各自成一张工作表</b>，
+              导出的 Excel 里就是 N 个标签页。模板有 M 张 sheet 时一共出 <b>M×N 张</b>，
+              顺序是「数据1的模板1/2/3、数据2的模板1/2/3」—— 同一条数据的几张单据挨着，
+              但工作表一多就不好翻，只要「一条数据一页纸」的话选左边的「多 sheet 输出」更省事。
             </p>
             <p>
               打印设置按模板的 sheet 走：模板第 2 张设成横向，拆出来每一份的第 2 张都是横向。
@@ -449,7 +463,8 @@ const form = ref(normalizePageConfig(null))
 const scope = ref('sheet')
 /**
  * 输出方式（报表级，不按 sheet 分）：单 sheet / 多 sheet 输出（`perRowPage`，按主接口每条数据
- * 拆一份、一份一页）。
+ * 拆一份、拼回同一张 sheet、一份一页）/ 每条数据一个 sheet（`perRow`，同一套拆分不拼接，
+ * 直接出 M×N 张 sheet）。
  * 和打印设置一样，编辑的是副本，点确定才写回 store。
  */
 const split = ref({ splitMode: 'single', sheetNameField: '' })
@@ -477,12 +492,11 @@ watch(visible, (v) => {
   if (!v) return
   // 深拷 header / footer / watermark：浅拷会让弹窗里的输入直接改到 store 上，取消也撤不回来
   form.value = normalizePageConfig(JSON.parse(JSON.stringify(store.pageConfig)))
-  // 「每条数据一个 sheet」（perRow）已下线 —— 与「多 sheet 输出」是同一套拆分、两个出口，
-  // 功能重叠。老报表里存着的 perRow 在这里迁成 perRowPage（拆分行为不变，只是出口拼回一张），
-  // 点确定就写成新值；不迁的话单选框对不上存的值
+  // 认不得的值（老报表写坏的、手写 content）退回 single —— 不退的话单选框一个都不亮，
+  // 用户看着像「没设过」，点确定却又把那个野值原样存回去
   const stored = store.content.splitMode
   split.value = {
-    splitMode: ['perRow', 'perRowPage'].includes(stored) ? 'perRowPage' : 'single',
+    splitMode: ['perRow', 'perRowPage'].includes(stored) ? stored : 'single',
     sheetNameField: store.content.sheetNameField || ''
   }
   version.value = store.versionConfigOf()

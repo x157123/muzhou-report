@@ -393,10 +393,12 @@ Excel / Word 不需要这一刀 —— 它们按自己的字体折行，与估�
 重新渲染整张报表。
 
 主接口还管第二件事：`content.splitMode`（打印设置弹窗的「输出」页签）非 `single` 时
-**按主接口的每一行拆**，一条数据一张单据。`perRow`（拆成 N 张 sheet）**已从设计器下线**
-——它和下面的 `perRowPage` 是同一套拆分的两个出口，功能重叠，而 M×N 张 sheet 会把同一条数据的
-几张单据打散在整个工作簿里；`stores/designer.js#setSheetSplit` 把它一律迁成 `perRowPage`。
-**引擎这一份实现要留着**（老报表照旧渲染），下面讲的也仍是它。
+**按主接口的每一行拆**，一条数据一张单据。两个值是**同一套拆分的两个出口**
+（`splitByRow()` 共用，区别只在拼不拼）：`perRow`（界面上叫「每条数据一个 sheet」）不拼接、
+直接出 M×N 张 sheet，`perRowPage`（界面上叫「多 sheet 输出」）拼回一张。
+**「多 sheet 输出」这个名字指的是「打印设置不同的相邻份会断成几张 sheet」，不是
+「一条数据一张工作表」** —— 模板设置都一样时它只出一张，「配了多 sheet 输出导出的 Excel
+里还是一个标签页」是照这个设计来的、不是 bug（问过一次）。要一条数据一个标签页得选 `perRow`。
 实现在 `ReportRenderEngine#renderPerRow`：
 不是改扩展逻辑，而是**换掉取数函数** —— 第 i 遍渲染时主接口只返回第 i 行，其它数据集返回全量
 且缓存复用（否则 N 条数据会把从表接口打 N 遍）。拆出来的 sheet 必须重编 `id`/`order`/`status`，
@@ -406,10 +408,8 @@ Excel / Word 不需要这一刀 —— 它们按自己的字体折行，与估�
 所以导出和预览取打印设置一律走 `pageConfigOfRendered`（`renderedIndex % 模板张数`），
 后端 `ReportContentDTO` 与前端 `utils/print.js` 各一份，改一处要改另一处。
 
-`splitMode` 的另一个值 `perRowPage`（每条数据一页，**设计器界面上叫「多 sheet 输出」**，
-现在只有它和 `single`）：
-拆分**完全复用上面那段代码**
-（`splitByRow()` 两种模式共用），只在 `renderPerRow` 的**出口**多一道拼接
+`perRowPage`（每条数据一页，**设计器界面上叫「多 sheet 输出」**）
+拆分**完全复用上面那段代码**，只在 `renderPerRow` 的**出口**多一道拼接
 （`engine/SheetConcat`）—— 渲染出来的那一摞**按原顺序**首尾相接摞成一张，Excel 里是一张
 连续的表，打印时靠行分页符保证一份一页。要偏移的有五样：`celldata[].r`、`v.mc.r`、`v.f` 里的
 原生公式引用（`A1RefUtils.shiftFormula`）、`config.merge`/`rowlen`、`borderInfo[].range[].row`，
