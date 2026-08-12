@@ -96,7 +96,9 @@ export function defaultCellConfig(sheetIndex, r, c) {
     aggregate: 'none',
     formatType: 'text',
     formatPattern: '',
-    expression: ''
+    expression: '',
+    /** 图片格没出成图时改用哪个字段的值当文字显示，空 = 出空白 */
+    fallbackField: ''
   }
 }
 

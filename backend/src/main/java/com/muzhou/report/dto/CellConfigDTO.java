@@ -61,6 +61,18 @@ public class CellConfigDTO implements Serializable {
     private boolean barcodeText = true;
 
     /**
+     * 图片单元格没出成图时改用哪个字段的值当**文字**写（同一数据集、同一行）。空 = 不兜底，出空白。
+     *
+     * <p>签字栏是典型场景：`base64` 绑的那个字段没值（这单还没签）时，格子整块空白，纸上看不出
+     * 「是没签，还是这张表压根没这一项」。配上签字人姓名字段，至少还印得出「张三」。
+     *
+     * <p>「没出成图」指**渲染时**就知道的那几种：字段值为空、base64 是空串、条码编不出来
+     * （位数/字符不合码制）。`img` 的地址取不回来是**导出时**才知道的
+     * （`export/ImageLoader`），那条路上兜不了底 —— 见 docs/CONTRACT.md §4。
+     */
+    private String fallbackField = "";
+
+    /**
      * 是否「值取自数据集的某个字段」。
      *
      * <p>图片单元格（{@code img} / {@code base64} / {@code barcode} / {@code qrcode}）的取数方式与

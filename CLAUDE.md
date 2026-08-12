@@ -62,6 +62,12 @@ npm run build
   **不铺满**——格子的宽高比几乎不可能等于图片的，铺满就是把图片拉变形。这条规则在
   `export/ImageFit#contain` 一处，三条输出路共用；预览那边靠 `object-fit: contain`（见下）。
   分组合并只对 `data` 生效：图片格的值已经是空串，按值比对会把整列合成一格。
+  **出不了图时可以退回文字**（`cellConfig.fallbackField`，`ExpandProcessor#applyImageFallback`）：
+  签字栏那个 base64 字段没值时整格空白，纸上分不清「是没签」还是「这张表没这一项」，
+  配上签字人姓名字段至少还印得出「张三」。做法是在 `buildCell` **之后**把那一格重新填成普通文字格
+  （不挂 `v.mzImg`），于是预览与三条导出路一处都不用改。只兜**渲染时就知道**的那几种
+  ——字段值为空、条码编不出码；`img` 的地址下载不回来是导出时（`ImageLoader`）才知道的，
+  那时该格早已按「有图」处理，兜不了底，设计器的提示里写明了这条。
 - **条码（`barcode` / `qrcode`）是 base64 图片格的延长线，不是第四条导出路**：
   `engine/BarcodeGenerator`（ZXing core，纯 Java）在**渲染时**把那串字编成 PNG、归一化成
   `data:` URI 交回 `CellImage`，于是预览、Excel、PDF、Word 拿到的是同一张图，下游一处都不用改。

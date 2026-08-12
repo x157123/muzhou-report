@@ -65,6 +65,26 @@
               <el-option v-for="t in EXPAND_TYPES" :key="t.value" :label="t.label" :value="t.value" />
             </el-select>
           </el-form-item>
+          <!-- 出不了图时的兜底：改用同一行另一个字段的值当文字写，别让格子整块空白 -->
+          <template v-if="isImage">
+            <el-form-item label="兜底字段">
+              <el-select
+                :model-value="config?.fallbackField || ''"
+                placeholder="不兜底（出空白）"
+                clearable
+                style="width: 100%"
+                @change="onChange('fallbackField', $event || '')"
+              >
+                <el-option
+                  v-for="f in fallbackFields"
+                  :key="f.fieldName"
+                  :label="f.fieldText || f.fieldName"
+                  :value="f.fieldName"
+                />
+              </el-select>
+            </el-form-item>
+            <div class="text-muted format-hint">{{ fallbackHint }}</div>
+          </template>
           <!-- 分组合并按「值相同」判定，图片格没有文字值，后端也不给它做合并 -->
           <el-form-item v-if="!isImage" label="分组方式">
             <el-select :model-value="config?.groupType" style="width: 100%" @change="onChange('groupType', $event)">
@@ -278,6 +298,23 @@ const currentFields = computed(() => {
   return ds ? ds.fields : []
 })
 
+/** 兜底字段取自同一数据集的同一行，绑图的那个字段自己排除掉（它没值才轮得到兜底） */
+const fallbackFields = computed(() =>
+  currentFields.value.filter((f) => f.fieldName !== props.config?.field)
+)
+
+/**
+ * `img` 的兜底只在「字段本身没值」时管用：地址取不回来是导出时（服务端下载）才知道的，
+ * 渲染时那一格已经当成有图处理了。这条差别要在界面上说清楚，否则就是「配了兜底却没出来」的报障。
+ */
+const fallbackHint = computed(() =>
+  props.config?.type === 'img'
+    ? '字段值为空时改印这个字段的文字。注意：地址填了但图片下载不下来时兜不了底（那是导出时才知道的）'
+    : props.config?.type === 'base64'
+      ? '字段值为空（如这单还没签字）时，改印这个字段的文字，例如签字人姓名'
+      : '字段值为空、或这串字编不出码时，改印这个字段的文字'
+)
+
 const isCurrency = computed(() => props.config?.formatType === 'currency')
 const isDate = computed(() => props.config?.formatType === 'date')
 const isChineseUpper = computed(() => props.config?.formatPattern === CN_UPPER_PATTERN)
@@ -291,6 +328,7 @@ function onChange(field, value) {
  *
  * 条形码与二维码各有一套码制名，留着 `CODE_128` 切到二维码就是「下拉框空着、后端照旧出一维码」。
  * 清成空串而不是填上新默认值 —— 空串的语义就是「按类型给默认」（见 CellConfigDTO#barcodeFormat）。
+ * 兜底字段同理：换成非图片类型之后它在界面上就没了，留着只会在下次换回图片格时冒出来。
  */
 function onTypeChange(value) {
   const patch = { type: value }
@@ -298,6 +336,9 @@ function onTypeChange(value) {
   const current = props.config?.barcodeFormat
   if (current && !formats.some((f) => f.value === current)) {
     patch.barcodeFormat = ''
+  }
+  if (!IMAGE_TYPES.includes(value) && props.config?.fallbackField) {
+    patch.fallbackField = ''
   }
   emit('update', patch)
 }

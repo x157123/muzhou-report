@@ -142,8 +142,10 @@ public class ExpandProcessor {
                 for (int j = 0; j < n; j++) {
                     Map<String, Object> row = j < rows.size() ? rows.get(j) : null;
                     Object v = row == null ? null : row.get(cfg.getField());
-                    grid.put(buildCell(outRow, outC + j, v, tc, cfg,
-                            affixedText(tc, cfg, v, row, datasets, params)));
+                    GridCell cell = buildCell(outRow, outC + j, v, tc, cfg,
+                            affixedText(tc, cfg, v, row, datasets, params));
+                    applyImageFallback(cell, cfg, row, datasets);
+                    grid.put(cell);
                 }
                 grid.getColMapping().putIfAbsent(tc.getC(), outC);
                 colOffset += n - 1;
@@ -163,6 +165,7 @@ public class ExpandProcessor {
 
             GridCell cell = buildCell(outRow, outC, value, tc, cfg,
                     affixedText(tc, cfg, value, rowData, datasets, params));
+            applyImageFallback(cell, cfg, rowData, datasets);
             if (tc.getFormula() != null) {
                 cell.setFormula(tc.getFormula());
                 nativeFormulaCells.add(new int[]{outRow, outC, tc.getR(), tc.getC()});
@@ -190,15 +193,7 @@ public class ExpandProcessor {
 
         // 图片单元格（img / base64 / barcode / qrcode）取值方式与 data 完全一致，区别只在 buildCell 里当图片画
         if (cfg.isDataBound() && notBlank(cfg.getField())) {
-            if (rowData != null) {
-                return rowData.get(cfg.getField());
-            }
-            if ("none".equals(cfg.getExpandType())) {
-                // 不扩展的数据格取数据集第一行
-                List<Map<String, Object>> rows = datasets.getOrDefault(cfg.getDatasetCode(), List.of());
-                return rows.isEmpty() ? null : rows.get(0).get(cfg.getField());
-            }
-            return null;
+            return boundValue(cfg, cfg.getField(), rowData, datasets);
         }
 
         // 文本 / 参数：替换 ${param}，并支持文本中内联 #{ds.field}
@@ -212,6 +207,54 @@ public class ExpandProcessor {
             return replaced;
         }
         return tc.getRawValue() != null ? tc.getRawValue() : text;
+    }
+
+    /**
+     * 按「单元格绑的那个数据集 + 指定字段」取当前行的值。
+     *
+     * <p>字段单独收而不是直接取 {@code cfg.getField()}：{@link #applyImageFallback} 要在同一行上
+     * 取另一个字段（兜底字段），取法与主字段必须是同一套（含「不扩展的格子取第一行」这条）。
+     */
+    private Object boundValue(CellConfigDTO cfg, String field, Map<String, Object> rowData,
+                              Map<String, List<Map<String, Object>>> datasets) {
+        if (rowData != null) {
+            return rowData.get(field);
+        }
+        if ("none".equals(cfg.getExpandType())) {
+            // 不扩展的数据格取数据集第一行
+            List<Map<String, Object>> rows = datasets.getOrDefault(cfg.getDatasetCode(), List.of());
+            return rows.isEmpty() ? null : rows.get(0).get(field);
+        }
+        return null;
+    }
+
+    /**
+     * 图片单元格没出成图时的兜底：改用 {@code fallbackField} 那个字段的值当**普通文字**写
+     * （见 {@link CellConfigDTO#getFallbackField()}）。
+     *
+     * <p>放在 {@link #buildCell} 之后而不是里面：图片格在 buildCell 里被清成「空值 + 空显示文本」，
+     * 这里把它当普通文字格重新填一遍就行，三条导出路与前端预览都认不出区别
+     * （{@code v.mzImg} 没挂上，自然就是一个文字格）。
+     *
+     * <p>兜底文本**不按 cfg 格式化**：图片格的 formatType 在设计器里压根不给配（留着的是上一个
+     * 类型的模板），照它格式化会把姓名之流套进数字格式里。
+     */
+    private void applyImageFallback(GridCell cell, CellConfigDTO cfg, Map<String, Object> rowData,
+                                    Map<String, List<Map<String, Object>>> datasets) {
+        if (cfg == null || !cfg.isImage() || !notBlank(cfg.getFallbackField())) {
+            return;
+        }
+        if (cell.getImage() != null && !cell.getImage().isBlank()) {
+            return;
+        }
+        Object v = boundValue(cfg, cfg.getFallbackField(), rowData, datasets);
+        if (v == null || String.valueOf(v).isBlank()) {
+            return;
+        }
+        CellFormatter.Formatted f = formatter.format(v, null);
+        cell.setValue(v);
+        cell.setDisplay(f.display());
+        cell.setCt(f.ct());
     }
 
     /**

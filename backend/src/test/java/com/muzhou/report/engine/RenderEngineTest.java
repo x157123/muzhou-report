@@ -479,6 +479,59 @@ class RenderEngineTest {
     }
 
     @Test
+    @DisplayName("图片格出不了图时退回 fallbackField 的文字：同一行取另一个字段，出成普通文字格")
+    void imageCellFallsBackToAnotherField() {
+        Map<String, CellConfigDTO> cfgs = new LinkedHashMap<>();
+        CellConfigDTO cfg = imageCfg("base64", "pic", "down");
+        cfg.setFallbackField("name");
+        cfgs.put("0_0_0", cfg);
+        // 第一条签过字（有 base64），第二条没签
+        RenderGrid grid = renderRow(
+                List.of(picRow("张三", "iVBORw0KGgoAAAA"), picRow("李四", "")),
+                cfgs, "#{emp.pic}");
+
+        // 有图的那一格照旧只出图、不出文字
+        assertEquals("data:image/png;base64,iVBORw0KGgoAAAA", grid.get(0, 0).getImage());
+        assertEquals("", grid.get(0, 0).getDisplay());
+
+        // 没签的那一格：不挂 mzImg，出的是兜底字段的文字 —— 于是预览与三条导出路都当普通文字格处理
+        assertNull(grid.get(1, 0).getImage());
+        assertEquals("李四", grid.get(1, 0).getValue());
+        assertEquals("李四", grid.get(1, 0).getDisplay());
+        assertFalse(grid.get(1, 0).toCellValue().containsKey("mzImg"));
+
+        // 兜底字段本身也没值时照旧留空白，别写进一个 "null"
+        RenderGrid blank = renderRow(List.of(picRow("", "")), cfgs, "#{emp.pic}");
+        assertNull(blank.get(0, 0).getImage());
+        assertEquals("", blank.get(0, 0).getDisplay());
+
+        // 没配兜底字段的（老报表）行为不变
+        Map<String, CellConfigDTO> plain = new LinkedHashMap<>();
+        plain.put("0_0_0", imageCfg("base64", "pic", "down"));
+        RenderGrid old = renderRow(List.of(picRow("李四", "")), plain, "#{emp.pic}");
+        assertNull(old.get(0, 0).getImage());
+        assertEquals("", old.get(0, 0).getDisplay());
+    }
+
+    @Test
+    @DisplayName("条码编不出来时也走兜底：那一格出原文，不是空白")
+    void barcodeFallsBackWhenNotEncodable() {
+        Map<String, CellConfigDTO> cfgs = new LinkedHashMap<>();
+        CellConfigDTO cfg = imageCfg("barcode", "pic", "down");
+        cfg.setBarcodeFormat("EAN_13");
+        cfg.setFallbackField("name");
+        cfgs.put("0_0_0", cfg);
+        RenderGrid grid = renderRow(
+                List.of(picRow("张三", "6901234567892"), picRow("李四", "位数不够")),
+                cfgs, "#{emp.pic}");
+
+        assertNotNull(grid.get(0, 0).getImage());
+        assertEquals("", grid.get(0, 0).getDisplay());
+        assertNull(grid.get(1, 0).getImage());
+        assertEquals("李四", grid.get(1, 0).getDisplay());
+    }
+
+    @Test
     @DisplayName("边框跟着行带偏移：区域拉长，rangeType=cell 的逐格边框复制成每行一条")
     @SuppressWarnings("unchecked")
     void bordersFollowTheExpandedBand() {
