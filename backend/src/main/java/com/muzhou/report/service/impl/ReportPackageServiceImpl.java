@@ -140,6 +140,7 @@ public class ReportPackageServiceImpl implements ReportPackageService {
             out.setName(v.getName());
             out.setContent(v.getContent());
             out.setEffectiveFrom(v.getEffectiveFrom());
+            out.setMatchRules(v.getMatchRules());
             out.setIsDefault(v.getIsDefault());
             out.setStatus(v.getStatus());
             out.setRemark(v.getRemark());
@@ -368,6 +369,7 @@ public class ReportPackageServiceImpl implements ReportPackageService {
             row.setName(v.getName());
             row.setContent(v.getContent());
             row.setEffectiveFrom(v.getEffectiveFrom());
+            row.setMatchRules(v.getMatchRules());
             row.setIsDefault(v.getIsDefault());
             row.setStatus(v.getStatus());
             row.setRemark(v.getRemark());

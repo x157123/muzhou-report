@@ -71,7 +71,7 @@
                   :class="{ 'is-current': v.id === store.versionId }"
                 >
                   <span class="v-label">{{ v.label }}</span>
-                  <span class="v-range">{{ intervalText(v) }}</span>
+                  <span class="v-range">{{ scopeText(v) }}</span>
                   <span class="v-flag">
                     <template v-if="v.isDefault">默认</template>
                     <template v-else-if="v.id === store.versionId">● 当前</template>
@@ -268,7 +268,7 @@ import {
 } from '@/utils/print'
 import { computeWrapRowHeights } from '@/utils/wrapHeight'
 import { queryParams, queryVersionId } from '@/utils/params'
-import { versionIntervals, intervalText } from '@/utils/version'
+import { versionIntervals, scopeText } from '@/utils/version'
 
 const route = useRoute()
 const router = useRouter()
@@ -444,8 +444,9 @@ const versionRows = computed(() => versionIntervals(store.versions))
 const currentVersionText = computed(() => {
   const cur = versionRows.value.find((v) => v.id === store.versionId)
   if (!cur) return '版本'
-  const range = cur.enabled && (cur.from || cur.to) ? ` · ${cur.from || ''}起` : ''
-  return `${cur.label}${range}`
+  // 顶栏只有一行位置：有生效时间就说时间，否则说条件（只按条件选的版本说时间等于什么都没说）
+  if (cur.enabled && (cur.from || cur.to)) return `${cur.label} · ${cur.from || ''}起`
+  return cur.condition ? `${cur.label} · ${cur.condition}` : cur.label
 })
 
 /**

@@ -9,6 +9,7 @@ import com.muzhou.report.dto.ReportContentDTO;
 import com.muzhou.report.dto.ReportParamDTO;
 import com.muzhou.report.dto.RenderResultDTO;
 import com.muzhou.report.dto.VersionConfigDTO;
+import com.muzhou.report.dto.VersionMatchRuleDTO;
 import com.muzhou.report.engine.CachingDataFetcher;
 import com.muzhou.report.engine.ReportRenderEngine;
 import com.muzhou.report.entity.MzReport;
@@ -29,8 +30,10 @@ import org.springframework.util.StringUtils;
 
 import java.io.IOException;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
@@ -348,17 +351,18 @@ public class RenderServiceImpl implements RenderService {
 
         RenderResultDTO result;
         ReportContentDTO content;
+        // 探测取数用的参数要和引擎随后 mergeParams 出来的那份**一致**，否则缓存 key 对不上，
+        // 主接口会被打第二遍。逐行那条路上 source=param 的匹配条件也从这份取值
+        Map<String, Object> probeParams = renderEngine.mergeParams(base.getParams(), params);
         if (perRowVersioning(base, config, candidates, versionId)) {
-            // 逐行选版本：整份报表不定版，每条数据按自己的判定值挑一份版式
+            // 逐行选版本：整份报表不定版，每条数据按自己的判定值/匹配条件挑一份版式
             content = base;
             Function<Map<String, Object>, ReportContentDTO> picker =
-                    perRowPicker(reportId, report.getVersionId(), base, config, candidates);
+                    perRowPicker(reportId, report.getVersionId(), base, config, candidates, probeParams);
             result = renderEngine.render(content, params, fetcher, picker);
-            result.setVersionMatch("按每条数据的[" + config.getField() + "]逐行选版式");
+            result.setVersionMatch("按每条数据的[" + perRowBasis(config, candidates) + "]逐行选版式");
         } else {
-            // 整份报表选一版。探测取数用的参数要和引擎随后 mergeParams 出来的那份**一致**，
-            // 否则缓存 key 对不上，主接口会被打第二遍
-            Map<String, Object> probeParams = renderEngine.mergeParams(base.getParams(), params);
+            // 整份报表选一版
             ReportVersionResolver.Resolution resolution = ReportVersionResolver.resolve(
                     candidates, versionId, config, base.getPrimaryDataset(), probeParams, fetcher);
             content = contentOf(reportId, resolution.version().id(), report.getVersionId(), base);
@@ -373,44 +377,68 @@ public class RenderServiceImpl implements RenderService {
     }
 
     /**
-     * 要不要**逐行**选版本：「打印 3 月到 9 月的一批单据，每张按自己的下单日期用对应版式」。
+     * 要不要**逐行**选版本：「打印 3 月到 9 月的一批单据，每张按自己的下单日期（或单据类型）
+     * 用对应版式」。
      *
-     * <p>四个条件缺一不可：按条拆分（一条数据一张单据，整份定一版就没意义了）、判定依据是
-     * 主接口字段（参数/当日对每一行都一样，逐行选是徒劳）、确实有得选（多个启用版本）、
-     * 没有显式指定版本（设计器点开哪一版就是哪一版，不许再逐行换）。
+     * <p>四个条件缺一不可：按条拆分（一条数据一张单据，整份定一版就没意义了）、判定确实**跟着行走**
+     * （时间判定依据是主接口字段，或哪一版的匹配条件取主接口字段 —— 全是参数/当日的话每一行
+     * 结果都一样，逐行选是徒劳）、确实有得选（多个启用版本）、没有显式指定版本（设计器点开哪一版
+     * 就是哪一版，不许再逐行换）。
      */
     private boolean perRowVersioning(ReportContentDTO base, VersionConfigDTO config,
                                      List<ReportVersionResolver.Candidate> candidates, String versionId) {
         if (StringUtils.hasText(versionId) || !base.splitByRow()) {
             return false;
         }
-        if (!VersionConfigDTO.SOURCE_FIELD.equals(config.getSource())
-                || !StringUtils.hasText(config.getField())) {
+        if (!rowDriven(config, candidates)) {
             return false;
         }
         return candidates.stream().filter(ReportVersionResolver.Candidate::enabled).count() > 1;
     }
 
+    /** 判定值里有没有「一行一个样」的那一维（主接口字段）。 */
+    private boolean rowDriven(VersionConfigDTO config, List<ReportVersionResolver.Candidate> candidates) {
+        if (VersionConfigDTO.SOURCE_FIELD.equals(config.getSource())
+                && StringUtils.hasText(config.getField())) {
+            return true;
+        }
+        return candidates.stream().filter(ReportVersionResolver.Candidate::enabled)
+                .flatMap(c -> c.rules().stream())
+                .anyMatch(VersionMatchRuleDTO::isFieldSourced);
+    }
+
+    /** `versionMatch` 里那句话说的「按每条数据的什么」：判定字段 + 各版条件用到的字段。 */
+    private String perRowBasis(VersionConfigDTO config, List<ReportVersionResolver.Candidate> candidates) {
+        Set<String> names = new LinkedHashSet<>();
+        if (VersionConfigDTO.SOURCE_FIELD.equals(config.getSource())
+                && StringUtils.hasText(config.getField())) {
+            names.add(config.getField());
+        }
+        candidates.stream().filter(ReportVersionResolver.Candidate::enabled)
+                .flatMap(c -> c.rules().stream())
+                .filter(VersionMatchRuleDTO::isFieldSourced)
+                .forEach(r -> names.add(r.getField()));
+        return String.join(" + ", names);
+    }
+
     /**
-     * 逐行选版本用的那个 picker：拿这一行的判定字段值去选版本，再把那一版的 content 给引擎。
+     * 逐行选版本用的那个 picker：拿这一行去选版本（时间判定值与 {@code source=field} 的匹配条件
+     * 都从这一行取），再把那一版的 content 给引擎。
      *
      * <p>按版本 id 缓存已解析的 content —— 200 条单据只会解析出用到的那两三份。
      */
     private Function<Map<String, Object>, ReportContentDTO> perRowPicker(
             String reportId, String defaultVersionId, ReportContentDTO base,
-            VersionConfigDTO config, List<ReportVersionResolver.Candidate> candidates) {
+            VersionConfigDTO config, List<ReportVersionResolver.Candidate> candidates,
+            Map<String, Object> params) {
         Map<String, ReportContentDTO> cache = new HashMap<>();
         // 默认版本那份已经解析过了（就是 base），别再解析一遍
         if (StringUtils.hasText(defaultVersionId)) {
             cache.put(defaultVersionId, base);
         }
-        String field = config.getField();
         return row -> {
-            // 行数据的 key 统一是小写（见 DatasetServiceImpl），但字段名可能是用户按原样填的
-            Object raw = row == null ? null
-                    : row.containsKey(field) ? row.get(field) : row.get(field.toLowerCase());
             ReportVersionResolver.Resolution r =
-                    ReportVersionResolver.resolveByValue(candidates, raw, config);
+                    ReportVersionResolver.resolveByRow(candidates, config, row, params);
             return cache.computeIfAbsent(r.version().id(),
                     id -> parseContent(versionService.detail(reportId, id).getContent()));
         };

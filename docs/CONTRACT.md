@@ -130,6 +130,7 @@ muzhou-report/
 | name | varchar(50) | 版本名，空则显示 `v{version_no}` |
 | content | clob/longtext | 这一版完整的 ReportContent，见 §4 |
 | effective_from | timestamp | **生效起始时刻**；NULL = 最早的那一版（区间左端 -∞） |
+| match_rules | varchar(2000) | **匹配条件**（离散那一维：单据类型、区域…）的 JSON 数组，空 = 无条件匹配。见 §4.1 |
 | is_default | int | 基准版本，报表内恰好一条。判定值取不到时用它；不能停用、不能删除 |
 | status | int | 1 启用（参与自动选择）/ 0 停用（只能在设计器里显式打开） |
 | remark | varchar(500) | |
@@ -148,6 +149,10 @@ muzhou-report/
 | v1 | `NULL` | `(-∞, 2026-05-01)` |
 | v2 | `2026-05-01` | `[2026-05-01, 2026-08-01)` |
 | v3 | `2026-08-01` | `[2026-08-01, +∞)` |
+
+**区间只在 `match_rules` 相同的那几版之间推**（见 §4.1）：条件不同的版本压根不在同一条时间轴上
+竞争，混在一起推出来的右端是假的。前端 `utils/version.js#versionIntervals` 也按条件分组，
+两边必须一致。
 
 **懒迁移**：报表一条版本行都没有时，用 `mz_report.content` 建 v1（默认、启用、`effective_from` 空），
 挂在 `getDetail` 与渲染入口上（`ReportVersionService#ensureMigrated`），靠唯一索引兜幂等，老报表零感知。
@@ -237,7 +242,8 @@ status / is_default）—— 漏了后者，副本会是一张没有版式的报
     "type": "sheet", "versionConfig": "...", "remark": "", "status": 1,
     "versions": [                          // 全部版式，按 versionNo 升序
       { "versionNo": 1, "name": null, "content": "{...}",
-        "effectiveFrom": null, "isDefault": 1, "status": 1, "remark": null }
+        "effectiveFrom": null, "matchRules": null,   // 匹配条件跟着走，见 §4.1
+        "isDefault": 1, "status": 1, "remark": null }
     ],
     "datasets": [                          // 内部数据集 + 内容里引用到的公共数据集
       { "name": "明细", "code": "items", "shared": false,
@@ -289,11 +295,11 @@ status / is_default）—— 漏了后者，副本会是一张没有版式的报
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/{id}/version` | `List<MzReportVersion>`（**不含 content**，同 `/page` 不传大字段的规矩），按 `versionNo` 升序 |
-| POST | `/{id}/version/{versionId}/copy` | 从某版本复制新版本 → `String newId`（content 原样，`status=0` 停用、`effectiveFrom` 空、不是默认版本） |
-| PUT | `/version` | `ReportVersionSaveDTO{id, name, effectiveFrom, status, remark}` → `Boolean`。`effectiveFrom` 传 null 表示「最早的那一版」，能被显式清空 |
+| POST | `/{id}/version/{versionId}/copy` | 从某版本复制新版本 → `String newId`（content 与 `matchRules` 原样，`status=0` 停用、`effectiveFrom` 空、不是默认版本） |
+| PUT | `/version` | `ReportVersionSaveDTO{id, name, effectiveFrom, matchRules, status, remark}` → `Boolean`。`effectiveFrom` / `matchRules` 传 null 分别表示「最早的那一版」「无条件匹配」，都能被显式清空；`matchRules` 是 JSON 数组串，存之前字段名空的条目会被丢掉，格式非法直接报错 |
 | POST | `/{id}/version/{versionId}/default` | 设为默认（停用中的会一并启用） → `Boolean` |
 | DELETE | `/version/{versionId}` | `Boolean`。**默认版本、最后一个启用版本不许删** |
-| GET | `/{id}/version/{versionId}/check` | `List<String>` 体检：这一版引用的数据集/字段是否还在，以及主接口 / 输出方式 / 父子关联与默认版本是否一致（不一致时以默认版本为准，只提示不拦） |
+| GET | `/{id}/version/{versionId}/check` | `List<String>` 体检：这一版引用的数据集/字段是否还在、**匹配条件引用的字段/参数是否还在**（字段名写错时这一版只是永远匹配不上，渲染既不报错也没有别的痕迹），以及主接口 / 输出方式 / 父子关联与默认版本是否一致（不一致时以默认版本为准，只提示不拦） |
 
 ### 3.4 渲染 `/api/render`
 | POST | `/report/{id}` | `{params:{k:v}, versionId?}` → `RenderResult`（`params` 里的 `pageNo`/`pageSize` 驱动主接口翻页，见 §5） |
@@ -666,33 +672,75 @@ xlsx 读回来（`getRowBreaks()`），**别在各条路上再造一份**。前�
 下游取不到名字就退回工作表名。空串同样表示「退回工作表名」。
 一一对应的是**起始行**不是每一份：一条数据有 3 张模板时 3 份共用一个名字，只记一次。
 
-## 4.1 版本（`mz_report.version_config`）
+## 4.1 版本（`mz_report.version_config` + `mz_report_version.match_rules`）
 
-一张报表可以有好几份**版式**（见 §2 `mz_report_version`），用哪一份由这条**报表级**规则决定：
+一张报表可以有好几份**版式**（见 §2 `mz_report_version`），用哪一份由**两维**决定：
+每一版自带的**匹配条件**（离散维度：单据类型、区域…）先筛，再在筛出来的那几版里按**生效时间**
+推区间。时间那一维的判定值从哪来由这条**报表级**规则说了算：
 
 ```jsonc
 {
   // 判定值从哪来：field 主接口字段（默认）/ param 报表参数 / now 渲染当日
   "source": "field",
-  // 字段名或参数名；source=now 时无意义
+  // 字段名或参数名；source=now 时无意义。**留空 = 时间这一维不参与**（只按条件选）
   "field": "order_date",
   // 判定值取不到时：default 用默认版本（默认）/ error 直接报错
   "fallback": "default"
 }
 ```
 
+**匹配条件**（`mz_report_version.match_rules`，**按版本存**，同一版内多条是 AND）：
+
+```jsonc
+[
+  // 值从哪来：field 主接口字段（默认）/ param 报表参数
+  { "source": "field", "field": "order_type", "op": "eq", "value": "A" },
+  { "source": "field", "field": "area", "op": "in", "value": "华东,华南" }
+]
+```
+
+| `op` | 含义 |
+|---|---|
+| `eq` / `ne` | 等于 / 不等于 |
+| `in` / `notIn` | 属于 / 不属于（`value` 是逗号分隔的一串） |
+| `contains` | 包含子串（实际值为空时恒不满足） |
+| `empty` / `notEmpty` | 为空 / 不为空（`value` 无意义） |
+
+值比较**忽略大小写与首尾空格**，两边都是数字时按数值比（`1` 与 `1.0` 相等）——
+判定值来自数据库/接口，同一个类型码大小写不一致的比比皆是。注意这与「按字段名取值大小写敏感」
+不是一回事：字段名照旧先按原样取、取不到再试小写。
+
+**规则为什么挂在版本行上而不是报表级**：报表级只放得下一套判定依据，放不下「每一版各自适用于
+什么」。老版本没有 `match_rules` = 无条件匹配，所以这一维加上来对老报表零影响。
+
 **选择算法**（`version/ReportVersionResolver`，纯 POJO，不依赖 Spring）：
 
 1. 显式 `versionId`（设计器/预览指定）→ 直接用它，**含停用版本**，不走下面的规则；
 2. 启用版本 ≤ 1 个 → 就是它（或默认版本）——**这一条同时省掉了下面那次探测取数**，
    绝大多数报表只有一版，不该为版本功能多打一次 SQL；
-3. 取判定值：`field` 主接口**第一行**的该字段 / `param` 报表参数 / `now` 渲染当日；
-4. 归一化成 `LocalDateTime`：`java.sql.Date/Timestamp`、`LocalDate(Time)`、`java.util.Date`、
+3. **条件筛选**：一个版本的条件要**全部**满足才算匹配（没配条件 = 无条件匹配）；匹配到的版本里
+   只留**条件数最多**的那一批（**特异度优先**：「类型=A 且 区域=华东」压过「类型=A」，
+   都压过无条件的那一版 —— 没有这一条的话配了条件的版本会跟兜底版平起平坐，谁赢要看生效时间，
+   配条件这件事就白做了）。一批都不匹配（每一版都带条件而这次数据一条也不满足）→ `fallback`；
+4. 取时间判定值：`field` 主接口**第一行**的该字段（拆分报表是**这一条数据**的该字段）/
+   `param` 报表参数 / `now` 渲染当日；
+5. 归一化成 `LocalDateTime`：`java.sql.Date/Timestamp`、`LocalDate(Time)`、`java.util.Date`、
    epoch 毫秒（数字或纯数字串）、字符串 `yyyy-MM-dd[ HH:mm[:ss]]`（也认 ISO 的 `T` 与毫秒尾巴）。
    解析不了当作取不到；
-5. 取不到 → `fallback`：`default` 用默认版本 / `error` 抛 `BizException`（消息里带字段名）；
-6. 命中 = `effective_from ≤ 判定值` 的最后一个（**左闭右开**）；一个都不满足（早于所有起点）
-   → `effective_from` 为 NULL 的那一版；没有 NULL 版 → 默认版本。
+6. 取不到 → `fallback`：`default` 用默认版本 / `error` 抛 `BizException`（消息里带字段名）。
+   **但条件已经把那一批筛成唯一一版时就用它** —— 条件够定案了，不该再被时间这一维推翻；
+7. 命中 = 该批里 `effective_from ≤ 判定值` 的最后一个（**左闭右开**）；一个都不满足
+   （早于所有起点）→ `effective_from` 为 NULL 的那一版；没有 NULL 版 → 默认版本
+   （**条件筛过的那一批则退回本批里最早的一版** —— 退回默认版本等于把已经命中的条件推翻）。
+
+**`field` 留空（只按条件选）时时间这一维直接不参与**，取匹配那批里生效最晚的一版。
+只有条件、没有时间是完全合法的配法。
+
+**探测取数的时机跟着两维走**：时间判定值取自主接口字段、**或哪一版的条件取自主接口字段**时才探
+（`ReportVersionResolver#needsRow`）。条件全取自参数、判定依据是 `param`/`now` 时一次都不探。
+
+`versionMatch` 那句话会把命中的条件一并写上：
+`条件[order_type=B 且 area∈华东,华南] + order_date=2026-06-01 命中 v3`。
 
 **先有鸡还是先有蛋**：判定值来自数据，而模板由判定值决定 —— 探测这一次取数不能白取。
 `RenderServiceImpl` 给取数函数包了一层按 `(code, params)` 记忆的 `engine/CachingDataFetcher`
@@ -701,8 +749,10 @@ xlsx 读回来（`getRowBreaks()`），**别在各条路上再造一份**。前�
 「主表每行查一次子表」会全部串成第一行的明细。`LinkedDataFetcher` / `perRowFetcher`
 仍然包在它外面，行为不变。
 
-**`splitMode=perRow` / `perRowPage` 时版本是逐行选的**（判定依据为主接口字段、没有显式指定版本、
-且确实有多个启用版本时）：「打印 3 月到 9 月的一批单据，每张按自己的下单日期用对应版式」。
+**`splitMode=perRow` / `perRowPage` 时版本是逐行选的**（判定**跟着行走** —— 时间判定依据是主接口
+字段，或哪一版的匹配条件取主接口字段；且没有显式指定版本、确实有多个启用版本）：
+「打印 3 月到 9 月的一批单据，每张按自己的下单日期用对应版式」「一批单据里类型 A 和类型 B
+各出各的版式」。
 做法照旧是**换函数** —— `ReportRenderEngine#render` 多收一个
 `Function<row, ReportContentDTO> versionPicker`（默认 null = 全用同一份），每行用它换模板；
 基准 content（决定 `splitMode` / `primaryDataset` / `datasetLinks` / 参数）恒取默认版本，

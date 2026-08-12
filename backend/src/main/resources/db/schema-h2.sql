@@ -135,6 +135,7 @@ CREATE TABLE IF NOT EXISTS public.mz_report_version (
                                   name character varying(50),
                                   content character large object,
                                   effective_from timestamp,
+                                  match_rules character varying(2000),
                                   is_default integer DEFAULT 0,
                                   status integer DEFAULT 1,
                                   remark character varying(500),
@@ -148,6 +149,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS "PRIMARY_KEY_V" ON public.mz_report_version (i
 -- version_no 必须按「含已删行的 max+1」发号，否则删掉 v3 再建一个就撞车
 CREATE UNIQUE INDEX IF NOT EXISTS uk_version_report_no ON public.mz_report_version (report_id,version_no);
 CREATE INDEX IF NOT EXISTS idx_version_report ON public.mz_report_version (report_id);
+-- 版本的匹配条件（离散那一维：类型/区域…），见 CONTRACT §4.1：
+-- [{"source":"field","field":"order_type","op":"eq","value":"A"}]
+-- 老库里这一列不存在，所以照 version_config 那条的样子补一句 ADD COLUMN IF NOT EXISTS
+ALTER TABLE public.mz_report_version ADD COLUMN IF NOT EXISTS match_rules character varying(2000);
 
 
 -- public.mz_param 定义

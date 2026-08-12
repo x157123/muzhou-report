@@ -8,9 +8,10 @@
   （左闭右开，停用的版本不参与推导，被前一版吞掉）。
 -->
 <template>
-  <el-dialog v-model="visible" title="版本管理" width="900px" :close-on-click-modal="false" destroy-on-close>
+  <el-dialog v-model="visible" title="版本管理" width="1100px" :close-on-click-modal="false" destroy-on-close>
     <div class="tips">
-      版本化的是<b>版式</b>：每一版持有一份完整的报表内容。用哪一版由「打印设置 → 版本」里配的规则决定，
+      版本化的是<b>版式</b>：每一版持有一份完整的报表内容。用哪一版由<b>匹配条件</b>（类型/区域这类维度）
+      加<b>生效时间</b>两维决定 —— 条件先筛、时间后推，判定值从哪来在「打印设置 → 版本」里配。
       改<b>数据集</b>会同时影响所有版本（数据集不随版本走）。
     </div>
 
@@ -19,6 +20,15 @@
         <template #default="{ row }">
           <span class="mono">{{ row.label }}</span>
           <el-tag v-if="row.id === currentId" size="small" type="primary" effect="plain">当前</el-tag>
+        </template>
+      </el-table-column>
+
+      <el-table-column label="匹配条件" min-width="200">
+        <template #default="{ row }">
+          <el-button link type="primary" size="small" @click="editRules(row)">
+            <span v-if="row.condition" class="cond">{{ row.condition }}</span>
+            <span v-else class="text-muted">无条件（兜底）</span>
+          </el-button>
         </template>
       </el-table-column>
 
@@ -93,7 +103,11 @@
     <div class="tips foot">
       <p>
         <b>区间是推导出来的</b>：只存起点，右端是下一个启用版本的起点，<b>左闭右开</b> ——
-        5 月 1 号那天走的是「从 5/1 起」的那一版。
+        5 月 1 号那天走的是「从 5/1 起」的那一版。<b>只在匹配条件相同的几版之间推</b>：
+        条件不同的版本不在同一条时间轴上竞争。
+      </p>
+      <p>
+        多版同时匹配时<b>条件更具体的赢</b>；一条条件都没配的那一版是所有版本都不匹配时的兜底。
       </p>
       <p>
         <b>停用</b>不参与自动选择，它那段会被前一版吞掉（临时回滚版式就靠这个）；
@@ -104,6 +118,8 @@
     <template #footer>
       <el-button @click="visible = false">关闭</el-button>
     </template>
+
+    <VersionRulesDialog v-model="rulesVisible" :version="editing" @confirm="onRulesConfirm" />
   </el-dialog>
 </template>
 
@@ -119,6 +135,7 @@ import {
   checkVersion
 } from '@/api/report'
 import { versionIntervals, intervalText } from '@/utils/version'
+import VersionRulesDialog from './VersionRulesDialog.vue'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -156,13 +173,28 @@ async function load() {
   }
 }
 
-/** 改元信息：三个字段一起提交（后端走 set()，effectiveFrom 才清得掉） */
+/** 正在编辑匹配条件的那一行 */
+const rulesVisible = ref(false)
+const editing = ref(null)
+
+function editRules(row) {
+  editing.value = row
+  rulesVisible.value = true
+}
+
+/** 条件弹窗点确定：空串 = 无条件（后端 set() 会把这一列清掉） */
+function onRulesConfirm(matchRules) {
+  if (editing.value) saveMeta(editing.value, { matchRules })
+}
+
+/** 改元信息：几个字段一起提交（后端走 set()，effectiveFrom / matchRules 才清得掉） */
 async function saveMeta(row, patch) {
   try {
     await updateVersion({
       id: row.id,
       name: row.name,
       effectiveFrom: row.effectiveFrom,
+      matchRules: row.matchRules,
       status: row.enabled ? 1 : 0,
       remark: row.remark,
       ...patch
@@ -245,6 +277,12 @@ function emitOpen(row) {
 }
 .mono {
   margin-right: 6px;
+}
+/* 条件可能挺长，允许换行显示（默认的 el-button 是不换行的） */
+.cond {
+  white-space: normal;
+  text-align: left;
+  line-height: 1.4;
 }
 </style>
 

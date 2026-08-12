@@ -3,12 +3,14 @@ package com.muzhou.report.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.muzhou.report.common.BizException;
 import com.muzhou.report.dto.CellConfigDTO;
 import com.muzhou.report.dto.DatasetLinkDTO;
 import com.muzhou.report.dto.ReportContentDTO;
 import com.muzhou.report.dto.ReportVersionSaveDTO;
+import com.muzhou.report.dto.VersionMatchRuleDTO;
 import com.muzhou.report.entity.MzDataset;
 import com.muzhou.report.entity.MzDatasetField;
 import com.muzhou.report.entity.MzReport;
@@ -45,6 +47,9 @@ import java.util.Set;
 @Service
 public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper, MzReportVersion>
         implements ReportVersionService {
+
+    /** `match_rules` 列的宽度，见 db/schema-h2.sql */
+    private static final int MAX_RULES_LENGTH = 2000;
 
     private final MzReportMapper reportMapper;
 
@@ -134,9 +139,69 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
         List<ReportVersionResolver.Candidate> out = new ArrayList<>();
         for (MzReportVersion v : list(reportId)) {
             out.add(new ReportVersionResolver.Candidate(v.getId(), v.getVersionNo(), v.getName(),
-                    v.getEffectiveFrom(), isDefault(v), v.getStatus() == null || v.getStatus() == 1));
+                    v.getEffectiveFrom(), isDefault(v), v.getStatus() == null || v.getStatus() == 1,
+                    parseRules(v.getMatchRules())));
         }
         return out;
+    }
+
+    /**
+     * 匹配条件的 JSON 串 → 对象。**解析不了当作没配条件**（一版的条件写坏了不该让整张报表打不开），
+     * 只记一条 warn —— 同 {@code BarcodeGenerator} 对坏数据的态度。
+     *
+     * <p>解析放在这里而不是 {@link ReportVersionResolver}：那边是纯 POJO，不该认识 Jackson。
+     */
+    private List<VersionMatchRuleDTO> parseRules(String json) {
+        if (!StringUtils.hasText(json)) {
+            return List.of();
+        }
+        try {
+            return objectMapper.readValue(json, new TypeReference<List<VersionMatchRuleDTO>>() {
+            });
+        } catch (Exception e) {
+            log.warn("版本的匹配条件解析不了，当作无条件匹配: {}", json, e);
+            return List.of();
+        }
+    }
+
+    /**
+     * 存进库之前把匹配条件规整一遍：字段名空的那几行（界面上没填完的）丢掉，一条不剩就存 null
+     * （= 无条件匹配）。
+     *
+     * <p>读的时候是宽容的（解析不了当无条件、只记 warn），**写的时候必须严** —— 拦在这里才拦得住，
+     * 放过去就是渲染时才发现某一版的条件从来没生效过。
+     */
+    private String normalizeRules(String json) {
+        if (!StringUtils.hasText(json)) {
+            return null;
+        }
+        List<VersionMatchRuleDTO> rules;
+        try {
+            rules = objectMapper.readValue(json, new TypeReference<List<VersionMatchRuleDTO>>() {
+            });
+        } catch (Exception e) {
+            throw new BizException("匹配条件格式非法: " + e.getMessage());
+        }
+        List<VersionMatchRuleDTO> keep = new ArrayList<>();
+        for (VersionMatchRuleDTO r : rules) {
+            if (r != null && r.isValid()) {
+                keep.add(r);
+            }
+        }
+        if (keep.isEmpty()) {
+            return null;
+        }
+        try {
+            String out = objectMapper.writeValueAsString(keep);
+            if (out.length() > MAX_RULES_LENGTH) {
+                throw new BizException("匹配条件太多，装不下（上限 " + MAX_RULES_LENGTH + " 字符）");
+            }
+            return out;
+        } catch (BizException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new BizException("匹配条件序列化失败: " + e.getMessage());
+        }
     }
 
     @Override
@@ -147,6 +212,10 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
         copy.setReportId(reportId);
         copy.setVersionNo(nextVersionNo(reportId));
         copy.setContent(source.getContent());
+        // 匹配条件跟着复制：复制的语义是「从这一版派生」，「类型 A 的 5 月版」派生出
+        // 「类型 A 的 9 月版」是最常见的用法，清掉等于每次都要重配一遍。
+        // 撞车不必担心 —— 复制出来是停用的，不参与自动选择
+        copy.setMatchRules(source.getMatchRules());
         // 复制出来先是一份草稿：停用、没有生效时间、不是默认版本 ——
         // 一复制就参与自动选择的话，会立刻把某一段区间抢过去
         copy.setStatus(0);
@@ -170,14 +239,15 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
         if (isDefault(old) && dto.getStatus() != null && dto.getStatus() == 0) {
             throw new BizException("默认版本不能停用 —— 判定值取不到时要靠它兜底");
         }
-        // 走 set() 而不是 updateById：effectiveFrom 置空表示「最早的那一版」，
-        // MyBatis-Plus 默认跳过 null 字段，用 updateById 永远清不掉。
+        // 走 set() 而不是 updateById：effectiveFrom / matchRules 置空表示「最早的那一版」
+        // 与「无条件匹配」，MyBatis-Plus 默认跳过 null 字段，用 updateById 永远清不掉。
         // 代价是**自动填充不生效**（update(Wrapper) 没有实体，MetaObjectHandler 不介入），
         // update_time 得自己写 —— 版本管理页上那一列否则永远停在创建时间
         LambdaUpdateWrapper<MzReportVersion> w = new LambdaUpdateWrapper<>();
         w.eq(MzReportVersion::getId, dto.getId())
                 .set(MzReportVersion::getName, trimToNull(dto.getName()))
                 .set(MzReportVersion::getEffectiveFrom, dto.getEffectiveFrom())
+                .set(MzReportVersion::getMatchRules, normalizeRules(dto.getMatchRules()))
                 .set(MzReportVersion::getRemark, trimToNull(dto.getRemark()))
                 .set(MzReportVersion::getUpdateTime, LocalDateTime.now());
         if (dto.getStatus() != null) {
@@ -255,6 +325,7 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
             copy.setName(s.getName());
             copy.setContent(s.getContent());
             copy.setEffectiveFrom(s.getEffectiveFrom());
+            copy.setMatchRules(s.getMatchRules());
             copy.setIsDefault(s.getIsDefault());
             copy.setStatus(s.getStatus());
             copy.setRemark(s.getRemark());
@@ -288,6 +359,7 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
                         .set(MzReportVersion::getName, src.getName())
                         .set(MzReportVersion::getContent, src.getContent())
                         .set(MzReportVersion::getEffectiveFrom, src.getEffectiveFrom())
+                        .set(MzReportVersion::getMatchRules, src.getMatchRules())
                         .set(MzReportVersion::getIsDefault, src.getIsDefault() == null ? 0 : src.getIsDefault())
                         .set(MzReportVersion::getStatus, src.getStatus() == null ? 1 : src.getStatus())
                         .set(MzReportVersion::getRemark, src.getRemark())
@@ -304,6 +376,7 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
             row.setName(src.getName());
             row.setContent(src.getContent());
             row.setEffectiveFrom(src.getEffectiveFrom());
+            row.setMatchRules(src.getMatchRules());
             row.setIsDefault(src.getIsDefault() == null ? 0 : src.getIsDefault());
             row.setStatus(src.getStatus() == null ? 1 : src.getStatus());
             row.setRemark(src.getRemark());
@@ -374,7 +447,39 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
             }
         }
 
-        // 二、与默认版本之间那几项「按默认版本为准」的设置是否一致 ——
+        // 二、匹配条件引用的字段/参数还在不在。这一项**必须体检** —— 字段名写错时这一版只是
+        // 永远匹配不上，渲染既不报错也没有别的痕迹，是这块最难查的一种错
+        List<VersionMatchRuleDTO> rules = parseRules(target.getMatchRules());
+        if (!rules.isEmpty()) {
+            String primary = content.getPrimaryDataset();
+            Set<String> primaryFields = StringUtils.hasText(primary)
+                    ? fieldsByCode.computeIfAbsent(primary, c -> loadFieldNames(reportId, c)) : null;
+            Set<String> paramNames = new LinkedHashSet<>();
+            if (content.getParams() != null) {
+                content.getParams().forEach(p -> {
+                    if (p != null && p.getName() != null) {
+                        paramNames.add(p.getName().toLowerCase());
+                    }
+                });
+            }
+            for (VersionMatchRuleDTO r : rules) {
+                String field = r.getField().toLowerCase();
+                if (VersionMatchRuleDTO.SOURCE_PARAM.equals(r.getSource())) {
+                    // 全局参数不在 content 里，所以只在「确实声明过一批参数」时才说话，免得误报
+                    if (!paramNames.isEmpty() && !paramNames.contains(field)) {
+                        problems.add("匹配条件[" + r.describe() + "]用的参数[" + r.getField()
+                                + "]不在这一版的报表参数里 —— 若它是全局参数或地址透传的参数可以忽略");
+                    }
+                } else if (!StringUtils.hasText(primary)) {
+                    problems.add("匹配条件[" + r.describe() + "]要取主接口字段，但这一版没设主接口");
+                } else if (primaryFields != null && !primaryFields.contains(field)) {
+                    problems.add("主接口[" + primary + "]里没有字段[" + r.getField()
+                            + "]了，匹配条件[" + r.describe() + "]永远不会满足");
+                }
+            }
+        }
+
+        // 三、与默认版本之间那几项「按默认版本为准」的设置是否一致 ——
         // 不一致不是错，但这一版上配的那份不会生效，得让人知道
         MzReportVersion base = detail(reportId, null);
         if (!Objects.equals(base.getId(), target.getId())) {

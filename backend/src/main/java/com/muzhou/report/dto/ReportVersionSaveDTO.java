@@ -29,6 +29,13 @@ public class ReportVersionSaveDTO implements Serializable {
      */
     private LocalDateTime effectiveFrom;
 
+    /**
+     * 匹配条件（{@link VersionMatchRuleDTO} 的 JSON 数组串），见 CONTRACT §4.1。
+     *
+     * <p>同 {@link #effectiveFrom}：空串/空数组表示「无条件匹配」，必须能被显式清空。
+     */
+    private String matchRules;
+
     /** 1 启用（参与自动选择）/ 0 停用 */
     private Integer status;
 

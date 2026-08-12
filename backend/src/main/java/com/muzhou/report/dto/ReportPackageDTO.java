@@ -77,6 +77,9 @@ public class ReportPackageDTO implements Serializable {
         /** 生效起始时刻；null = 最早的那一版。 */
         private LocalDateTime effectiveFrom;
 
+        /** 匹配条件的 JSON 数组串（离散那一维），见 CONTRACT §4.1。 */
+        private String matchRules;
+
         private Integer isDefault;
 
         private Integer status;
