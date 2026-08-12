@@ -12,16 +12,30 @@
  * 「类型 A 的 5 月版」和「类型 B 的 5 月版」时间上叠着，却根本不竞争，报重叠是误导。
  */
 
-/** 条件的比较方式，与后端 `VersionMatchRuleDTO` 的 op 一一对应 */
+/**
+ * 条件的比较方式，与后端 `VersionMatchRuleDTO` 的 op 一一对应。
+ *
+ * `numeric` 那四个（大于/大于等于/小于/小于等于）**只认数字**：两边任一不是数字时后端
+ * 跳过这一条（视为满足），界面上的说明也要照这个讲。
+ */
 export const RULE_OPS = [
   { value: 'eq', label: '等于', symbol: '=', needValue: true },
   { value: 'ne', label: '不等于', symbol: '≠', needValue: true },
   { value: 'in', label: '属于（逗号分隔）', symbol: '∈', needValue: true },
   { value: 'notIn', label: '不属于（逗号分隔）', symbol: '∉', needValue: true },
   { value: 'contains', label: '包含', symbol: '包含', needValue: true },
+  { value: 'gt', label: '大于（数字）', symbol: '>', needValue: true, numeric: true },
+  { value: 'ge', label: '大于等于（数字）', symbol: '≥', needValue: true, numeric: true },
+  { value: 'lt', label: '小于（数字）', symbol: '<', needValue: true, numeric: true },
+  { value: 'le', label: '小于等于（数字）', symbol: '≤', needValue: true, numeric: true },
   { value: 'empty', label: '为空', symbol: '为空', needValue: false },
   { value: 'notEmpty', label: '不为空', symbol: '不为空', needValue: false }
 ]
+
+/** 这个 op 是不是只认数字的那四个（界面上的提示与占位符按它分岔） */
+export function isNumericOp(op) {
+  return !!(RULE_OPS.find((o) => o.value === op) || {}).numeric
+}
 
 /** 条件里那个值从哪来 */
 export const RULE_SOURCES = [

@@ -45,7 +45,8 @@
         </template>
       </el-table-column>
 
-      <el-table-column label="比较" width="160">
+      <!-- 「大于等于（数字）」这几项比原来的长，窄了会被省略号截掉 -->
+      <el-table-column label="比较" width="180">
         <template #default="{ row }">
           <el-select v-model="row.op" size="small">
             <el-option v-for="o in RULE_OPS" :key="o.value" :label="o.label" :value="o.value" />
@@ -83,6 +84,11 @@
         <code>1.0</code> 相等）；<b>属于/不属于</b>的值写成 <code>华东,华南</code> 这样一串。
       </p>
       <p>
+        <b>大于 / 大于等于 / 小于 / 小于等于</b>只认数字（金额、数量这类阈值分版）；
+        取到的值<b>不是数字</b>（为空、是文本）时<b>跳过这一条</b>，那一版就由别的条件与生效时间定，
+        不会因此整版落空。
+      </p>
+      <p>
         多版同时匹配时<b>条件更具体的赢</b>（「类型=A 且 区域=华东」压过「类型=A」，都压过无条件的那版）；
         条件一样的几版之间才按<b>生效时间</b>分先后。
       </p>
@@ -101,7 +107,22 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
 import { useDesignerStore } from '@/stores/designer'
-import { RULE_OPS, RULE_SOURCES, parseRules, rulesText, versionLabel } from '@/utils/version'
+import { ElMessage } from 'element-plus'
+import {
+  RULE_OPS,
+  RULE_SOURCES,
+  isNumericOp,
+  parseRules,
+  ruleText,
+  rulesText,
+  versionLabel
+} from '@/utils/version'
+
+/** 「一百」这种填错的值：那条条件渲染时会被整个跳过，得在确定时就说 */
+function isNumber(v) {
+  const s = String(v ?? '').trim()
+  return s !== '' && !Number.isNaN(Number(s))
+}
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -151,7 +172,9 @@ function needValue(row) {
 }
 
 function placeholderOf(row) {
-  return ['in', 'notIn'].includes(row.op) ? '多个值用逗号分隔，如 华东,华南' : '要比对的值'
+  if (['in', 'notIn'].includes(row.op)) return '多个值用逗号分隔，如 华东,华南'
+  if (isNumericOp(row.op)) return '一个数字，如 100000'
+  return '要比对的值'
 }
 
 function add() {
@@ -164,6 +187,12 @@ function onConfirm() {
   const keep = rules.value
     .filter((r) => r.field && r.field.trim())
     .map((r) => ({ source: r.source || 'field', field: r.field.trim(), op: r.op || 'eq', value: r.value || '' }))
+  // 大小比较配了个不是数字的值：那条在渲染时会被整个跳过、从来不生效（后端也拦，这里先说一声）
+  const bad = keep.find((r) => isNumericOp(r.op) && !isNumber(r.value))
+  if (bad) {
+    ElMessage.warning(`条件「${ruleText(bad)}」的值不是数字，大于/小于这几个只能跟数字比`)
+    return
+  }
   emit('confirm', keep.length ? JSON.stringify(keep) : '')
   visible.value = false
 }

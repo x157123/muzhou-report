@@ -184,9 +184,16 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
         }
         List<VersionMatchRuleDTO> keep = new ArrayList<>();
         for (VersionMatchRuleDTO r : rules) {
-            if (r != null && r.isValid()) {
-                keep.add(r);
+            if (r == null || !r.isValid()) {
+                continue;
             }
+            // 大小比较配了个不是数字的值：渲染时这条会被整个跳过、从来不生效，
+            // 而界面上明明配着 —— 拦在这里才拦得住
+            if (r.isNumericOp() && !r.hasNumericValue()) {
+                throw new BizException("匹配条件[" + r.describe() + "]的值不是数字，"
+                        + "大于/大于等于/小于/小于等于只能跟数字比");
+            }
+            keep.add(r);
         }
         if (keep.isEmpty()) {
             return null;
@@ -493,6 +500,11 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
             }
             for (VersionMatchRuleDTO r : rules) {
                 String field = r.getField().toLowerCase();
+                // 大小比较配了个不是数字的值：同「字段名写错」一样没有痕迹 —— 那一条会被整个跳过。
+                // 本机保存时 normalizeRules 已经拦掉了，这里是给导入进来的包体检的
+                if (r.isNumericOp() && !r.hasNumericValue()) {
+                    problems.add("匹配条件[" + r.describe() + "]的值不是数字，这一条渲染时会被整个跳过");
+                }
                 if (VersionMatchRuleDTO.SOURCE_PARAM.equals(r.getSource())) {
                     // 全局参数不在 content 里，所以只在「确实声明过一批参数」时才说话，免得误报
                     if (!paramNames.isEmpty() && !paramNames.contains(field)) {

@@ -23,6 +23,14 @@ import java.util.Locale;
  * <p><b>值比较一律按文本、忽略大小写与首尾空格</b>（两边都是数字时按数值比，免得 {@code 1} 与
  * {@code 1.0} 判成不等）—— 判定值来自数据库/接口，同一个类型码大小写不一致的比比皆是。
  * 注意这跟「按字段名取值大小写敏感」不是一回事（见 CLAUDE.md「数据集与动态数据源」）。
+ *
+ * <p><b>四个大小比较（{@code gt}/{@code ge}/{@code lt}/{@code le}）只认数字</b>：金额、数量这类
+ * 阈值分版（「10 万以上走大额版式」）用它。两边任一不是数字（空值、文本、日期串）时
+ * <b>跳过这一条</b>（视为满足），而不是判成不满足 —— 阈值条件说的是「数字大到某个程度时换版式」，
+ * 拿不到数字就该由同一版里别的条件与生效时间去定案，不该因此把整版否掉。
+ * <b>但特异度照算</b>（跳过的是判断、不是这条条件的存在），否则同一份数据在
+ * 「有数字」与「没数字」两种情况下会落进不同的特异度批次，前端 {@code utils/version.js} 按
+ * 条件指纹分组的重叠提示也就跟着对不上了。
  */
 @Data
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -42,6 +50,15 @@ public class VersionMatchRuleDTO implements Serializable {
     public static final String OP_EMPTY = "empty";
     public static final String OP_NOT_EMPTY = "notEmpty";
 
+    /** 大于 —— 下面四个只认数字，两边任一不是数字就跳过这一条 */
+    public static final String OP_GT = "gt";
+    /** 大于等于 */
+    public static final String OP_GE = "ge";
+    /** 小于 */
+    public static final String OP_LT = "lt";
+    /** 小于等于 */
+    public static final String OP_LE = "le";
+
     /** 多值运算符（{@code in} / {@code notIn}）的分隔符 */
     private static final String SEPARATOR = ",";
 
@@ -51,15 +68,35 @@ public class VersionMatchRuleDTO implements Serializable {
     /** 字段名或参数名 */
     private String field;
 
-    /** 比较方式：{@code eq}(默认) / {@code ne} / {@code in} / {@code notIn} / {@code contains} / {@code empty} / {@code notEmpty} */
+    /**
+     * 比较方式：{@code eq}(默认) / {@code ne} / {@code in} / {@code notIn} / {@code contains} /
+     * {@code empty} / {@code notEmpty} / {@code gt} / {@code ge} / {@code lt} / {@code le}
+     */
     private String op = OP_EQ;
 
-    /** 比较用的那个值；{@code in} / {@code notIn} 写成逗号分隔的一串；{@code empty} / {@code notEmpty} 时无意义 */
+    /**
+     * 比较用的那个值；{@code in} / {@code notIn} 写成逗号分隔的一串；
+     * {@code gt}/{@code ge}/{@code lt}/{@code le} 要是个数字（不是数字这条就整个跳过）；
+     * {@code empty} / {@code notEmpty} 时无意义
+     */
     private String value;
 
     /** 字段名空的条目是界面上那一行还没填完，一律忽略（不参与匹配、也不算进特异度）。 */
     public boolean isValid() {
         return field != null && !field.isBlank();
+    }
+
+    /** 是不是四个只认数字的大小比较之一。 */
+    public boolean isNumericOp() {
+        return OP_GT.equals(op) || OP_GE.equals(op) || OP_LT.equals(op) || OP_LE.equals(op);
+    }
+
+    /**
+     * 大小比较配的那个值是不是个数字。存进库之前要拦一道（见 {@code ReportVersionServiceImpl#normalizeRules}）
+     * —— 值写成「一百」的话这条条件在渲染时会被整个跳过，从来不生效，而用户看着界面上明明配着。
+     */
+    public boolean hasNumericValue() {
+        return number(text(value)) != null;
     }
 
     /** 值要不要去主接口那一行取 —— 有一条这样的条件就得探一次主接口。 */
@@ -80,6 +117,7 @@ public class VersionMatchRuleDTO implements Serializable {
                     && lower(actual).contains(lower(expect));
             case OP_EMPTY -> actual == null || actual.isEmpty();
             case OP_NOT_EMPTY -> actual != null && !actual.isEmpty();
+            case OP_GT, OP_GE, OP_LT, OP_LE -> compare(actual, expect, op);
             default -> eq(actual, expect);
         };
     }
@@ -94,6 +132,10 @@ public class VersionMatchRuleDTO implements Serializable {
             case OP_CONTAINS -> f + "包含" + show();
             case OP_EMPTY -> f + "为空";
             case OP_NOT_EMPTY -> f + "不为空";
+            case OP_GT -> f + ">" + show();
+            case OP_GE -> f + "≥" + show();
+            case OP_LT -> f + "<" + show();
+            case OP_LE -> f + "≤" + show();
             default -> f + "=" + show();
         };
     }
@@ -158,7 +200,34 @@ public class VersionMatchRuleDTO implements Serializable {
         return a.equalsIgnoreCase(b);
     }
 
+    /**
+     * 大小比较（只认数字）。两边任一不是数字 —— 值为空、是文本、是日期串 —— <b>跳过这一条</b>，
+     * 也就是返回 true 让它不参与 AND，而不是判成不满足。
+     *
+     * <p>阈值条件说的是「这个数大到/小到某个程度时换版式」，拿不到数字时它无从表态，
+     * 该由同一版里别的条件与生效时间去定案；判成不满足的话，一条数据只要该字段为空就会
+     * 整版落空、掉到兜底版上去。
+     */
+    private static boolean compare(String actual, String expect, String op) {
+        BigDecimal a = number(actual);
+        BigDecimal b = number(expect);
+        if (a == null || b == null) {
+            return true;
+        }
+        int c = a.compareTo(b);
+        return switch (op) {
+            case OP_GT -> c > 0;
+            case OP_GE -> c >= 0;
+            case OP_LT -> c < 0;
+            default -> c <= 0;
+        };
+    }
+
+    /** 解析成数字，不是数字（含 null / 空串）就返回 null。 */
     private static BigDecimal number(String s) {
+        if (s == null || s.isEmpty()) {
+            return null;
+        }
         try {
             return new BigDecimal(s);
         } catch (NumberFormatException e) {

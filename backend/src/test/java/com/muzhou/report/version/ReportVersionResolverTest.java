@@ -356,6 +356,47 @@ class ReportVersionResolverTest {
     }
 
     @Test
+    @DisplayName("数字大小比较：gt / ge / lt / le 只认数字，两边任一不是数字就跳过这一条")
+    void numericOperators() {
+        assertTrue(rule("f", "gt", "100").test(101));
+        assertFalse(rule("f", "gt", "100").test(100));
+        assertTrue(rule("f", "ge", "100").test("100.00"), "1 与 1.0 同一个值，这里也一样");
+        assertTrue(rule("f", "lt", "100").test(-1));
+        assertFalse(rule("f", "lt", "100").test(100));
+        assertTrue(rule("f", "le", "100").test("100"));
+        assertFalse(rule("f", "le", "100").test("100.01"));
+        // 两头的空格、科学计数法照收（数据库/接口还回来的常是这些形态）
+        assertTrue(rule("f", "gt", "100").test(" 1e3 "));
+
+        // 取到的值不是数字（缺失、空串、文本、日期串）—— **跳过这一条**，不是判成不满足
+        assertTrue(rule("f", "ge", "100").test(null));
+        assertTrue(rule("f", "ge", "100").test("  "));
+        assertTrue(rule("f", "ge", "100").test("待定"));
+        assertTrue(rule("f", "ge", "100").test("2026-05-01"));
+        // 配的那个值不是数字（用户填错了）同样跳过，而不是把整版否掉
+        assertTrue(rule("f", "ge", "一百").test(1));
+    }
+
+    @Test
+    @DisplayName("阈值分版：金额 ≥ 10 万走大额版式；金额取不到时那一条跳过，剩下的条件与时间照判")
+    void thresholdVersioning() {
+        List<Candidate> list = new ArrayList<>();
+        list.add(v("普通", 1, null, true, true));
+        list.add(v("大额", 2, null, false, true, rule("amount", "ge", "100000")));
+        assertEquals("大额", pickRow(list, Map.of("amount", 120000)));
+        assertEquals("大额", pickRow(list, Map.of("amount", "100000.00")));
+        assertEquals("普通", pickRow(list, Map.of("amount", 9999)));
+
+        // 同一版里再挂一条离散条件：金额那条跳过了，类型那条照旧要满足
+        List<Candidate> both = new ArrayList<>();
+        both.add(v("普通", 1, null, true, true));
+        both.add(v("大额", 2, null, false, true,
+                rule("order_type", "eq", "A"), rule("amount", "ge", "100000")));
+        assertEquals("大额", pickRow(both, Map.of("order_type", "A", "amount", "—")));
+        assertEquals("普通", pickRow(both, Map.of("order_type", "B", "amount", 120000)));
+    }
+
+    @Test
     @DisplayName("条件的值也可以取自报表参数")
     void ruleCanReadParams() {
         List<Candidate> list = new ArrayList<>();
