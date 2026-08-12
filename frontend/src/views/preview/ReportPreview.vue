@@ -14,19 +14,19 @@
 <template>
   <div class="report-preview">
     <div class="preview-header no-print">
-      <el-button link :icon="ArrowLeft" @click="goBack">返回</el-button>
+<!--      <el-button link :icon="ArrowLeft" @click="goBack">返回</el-button>-->
       <div class="report-title" :title="reportName">{{ reportName || '报表预览' }}</div>
       <!-- 用哪一版是后端按版本切换规则选的，这里把结果和理由摆出来，省得「怎么和我看到的不一样」 -->
-      <el-tag v-if="versionText" size="small" type="info" effect="plain" :title="versionMatch">
-        {{ versionText }}
-      </el-tag>
-      <el-divider direction="vertical" />
+<!--      <el-tag v-if="versionText" size="small" type="info" effect="plain" :title="versionMatch">-->
+<!--        {{ versionText }}-->
+<!--      </el-tag>-->
+<!--      <el-divider direction="vertical" />-->
 
-      <ParamForm ref="paramFormRef" :params="params" v-model="paramValues">
-        <template #actions>
-          <el-button type="primary" :icon="Search" :loading="loading" @click="handleQuery">查询</el-button>
-        </template>
-      </ParamForm>
+<!--      <ParamForm ref="paramFormRef" :params="params" v-model="paramValues">-->
+<!--        <template #actions>-->
+<!--          <el-button type="primary" :icon="Search" :loading="loading" @click="handleQuery">刷新</el-button>-->
+<!--        </template>-->
+<!--      </ParamForm>-->
 
       <div class="flex-spacer"></div>
       <el-radio-group v-model="viewMode" size="small">
