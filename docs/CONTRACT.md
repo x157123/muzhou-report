@@ -110,6 +110,55 @@ muzhou-report/
 
 参数值怎么跟报表参数合并、谁覆盖谁，见 §5「参数值从哪来」。
 
+### mz_font
+
+**上传字体**：一份系统级的字体，所有报表共用，在「字体管理」页维护。
+
+| 列 | 类型 | 说明 |
+|---|---|---|
+| id | varchar(32) PK | |
+| font_name | varchar(64) | 字体名，**就是单元格样式里 `ff` 存的那个字符串**；全局唯一（`uk_font_name`） |
+| file_name | varchar(255) | 上传时的原始文件名，只用于显示 |
+| file_data | blob（MySQL `LONGBLOB`） | **字体文件本身**。实体上挂着 `select = false`，列表/清单查询不会把它捎出来 |
+| font_format | varchar(10) | ttf / otf / ttc |
+| ttc_index | int | .ttc 字体集里用第几款，非 ttc 恒 0 |
+| file_size | bigint | |
+| remark | varchar(500) | |
+| status | int | 1 启用 0 停用。**停用 = 字体清单里不再出现**，用了它的格子退回默认字体 |
+| deleted / create_time / update_time | | |
+
+**字体文件的正本存在库里，本地磁盘只是缓存**。这一条是**多节点部署**逼出来的：库是各节点唯一
+共享的东西，把文件存在上传那个节点的磁盘上的话，A 节点传的字体在 B 节点导出时找不到、
+**静默退回默认字体** —— 「同一张报表导两次字体不一样」，还是最难往字体上想的那种。
+所以各节点第一次用到某款字体时，才把它从库里落一份到 `muzhou.report.font.dir`
+（按 `{id}.{后缀}` 命名；PDF 引擎要的是一个路径而不是一段字节），之后一直命中本地文件、不再读库。
+落文件走「先写临时文件再原子改名」（`FontServiceImpl#write`）：同一节点上两次导出可能同时发现
+本地还没有这款字体，直接往目标文件上写的话后一个会读到写了一半的内容。
+**缓存目录删了不丢东西**，下次用到自动重新落；各节点各配各的，不需要共享存储。
+
+由此推出两件事：**多节点必须切 MySQL**（默认那个内嵌 H2 是单节点的），
+以及 `file_data` 在实体上挂着 `@TableField(select = false)` —— 一款中文字体十几 MB，
+列表页一页十行就是上百 MB，而列表、`/font/list`、按名字找路径全都只要元信息，
+真要字节时走 `MzFontMapper#selectData` 单独取一次。
+
+**为什么要有这张表**：设计器能选的字体是一份内置清单（`utils/fontList.js`），而三条出纸的路
+各要各的东西 —— 画布要**浏览器**有这款字体、xlsx / docx 里只写得进**字体名**（打开文件的机器
+得有它）、**PDF 必须把字体文件本身内嵌进去**。所以服务器上没有的字体（Linux 上几乎没有楷体、
+仿宋）从前在 PDF 里印不出来，而**预览页默认看到的就是后端出的那份 PDF** —— 画布上是楷体、
+点开预览变成雅黑。三条路各自怎么用这张表，见 §4 的能力表。
+
+**唯一索引不带 `deleted` 条件**，删掉再传同名字体会撞唯一键 —— 新建/改名前先物理清掉同名的
+已删除行（`MzFontMapper#purgeDeletedByName`），同 `uk_param_name` 那个坑。
+
+**一个 id 的内容一经写入就不再变**：改字体名不动磁盘，换文件走「删掉重传」（新 id = 新缓存文件、
+新下载地址）。`PdfExporter` 那份「路径 → 已解析字体」的常驻缓存、各节点的本地缓存文件、
+以及接口上那个 30 天的 `Cache-Control`，三处都是踩着这一条来的 ——
+允许原地换文件的话，三处都得跟着做失效，而其中两处根本没法跨节点通知。
+
+**删除只删得掉本节点的缓存文件**，别的节点上那份是孤儿。不必管：解析一律先查库
+（`FontServiceImpl#pathOf`），行没了就再也不会去碰那个文件；重新传一个同名字体拿到的是新 id、
+新文件名，绝不会读到旧内容。留下的只是一点磁盘占用。
+
 ### mz_report
 `id, name, code(unique), type(默认 'sheet'), content(clob/longtext), version_config(varchar(500)), remark, status, create_by, create_time, update_time`
 
@@ -370,6 +419,41 @@ status / is_default）—— 漏了后者，副本会是一张没有版式的报
 参数名重复、为空、或不合 `[A-Za-z_][A-Za-z0-9_]*` 一律 `BizException` 拦下 ——
 它要进 SQL 的 `${}` 与接口地址，名字随便起会在取数那头才炸。
 
+### 3.6 上传字体 `/api/font`
+
+系统级字体（表 `mz_font`），所有报表共用，同样没有 `reportId` 这一维。
+
+| 方法 | 路径 | 入参 | 出参 |
+|---|---|---|---|
+| GET | `/page?pageNo&pageSize&name` | | `PageResult<MzFont>`（`name` 按字体名模糊匹配） |
+| GET | `/list` | | `List<MzFont>`（**只返回启用的**，按字体名排序） |
+| GET | `/{id}` | | `MzFont` |
+| POST | `/upload?fontName&ttcIndex&remark` | multipart `file` | `String id` |
+| PUT | `` | MzFont | `Boolean`（只改名字/备注/状态，**换不了文件**） |
+| DELETE | `/{id}` | | `Boolean`（库里逻辑删除，磁盘上的文件真删掉） |
+| GET | `/{id}/file` | | **字节流**，不包 `Result` |
+
+- **只收 `.ttf` / `.otf` / `.ttc`**，上限 `muzhou.report.font.max-bytes`（默认 30MB）。
+  woff / woff2 只有浏览器认，内嵌不进 PDF，所以不收。
+- **真用 PDF 引擎加载一遍才收**：能不能印出来只有真要用它的那个引擎说了算，后缀是 `.otf`
+  不代表它读得了。校验放在上传这一刻，用户当场就知道；放过去的话要等到某天有人导出那张报表
+  才发现字体没生效。ttf / otf **直接拿字节校验、不落盘**（`PdfFonts#probe`）——
+  `BaseFont.createFont` 失败时文件句柄不一定收得回来（内存映射读的，JDK 9 之后 iText 那套
+  `sun.misc.Cleaner` 反射清理早失效了），Windows 下随后就删不掉，于是每传一次坏字体
+  就在缓存目录里留一个孤儿。`.ttc` 没法从字节校验（要按「路径,序号」取第几款），只能先落盘。
+- **两类失败要分开说**：字体文件本身读不了是一回事，**字体声明了不允许嵌入**是另一回事。
+  TTF 的 `OS/2` 表里有个 `fsType` 位，是字体厂商写在文件里的嵌入许可声明，取值 2
+  （Restricted License embedding）时 OpenPDF 拒绝内嵌 —— 而 PDF 里的中文走 Identity-H 编码
+  **必须内嵌**，绕不过去，所以这种字体只能拒收。商业中文字体常常这么设（方正的部分字体就是）。
+  `PdfFonts#embeddingRestricted` 单独认出这一类，为的是给一句说得通的提示：
+  对它说「换一份 .ttf」毫无意义，文件本身好好的。
+- `/{id}/file` 是给浏览器的 `@font-face` 用的，**不经过 axios**（前端拦截器只对 JSON 解包）。
+  挂了 30 天 `Cache-Control`：每开一个页面都会拉一遍，而字体文件动辄十几 MB；内容不会变，
+  见 §2 `mz_font`。**这一条被负载均衡打到哪个节点都一样**（本节点没缓存过就先从库里落一份），
+  所以不需要会话粘滞。
+- 字体名要同时当 CSS 的 `font-family`、xlsx 的字体名和单元格的 `ff` 用，所以 `"' , < > \ / ; { }`
+  一律不收（前后端各拦一道），长度 ≤ 32。
+
 ## 4. 报表内容 JSON（`mz_report.content`）
 
 ```jsonc
@@ -598,13 +682,13 @@ sheet 的下标只打那一张。打出来与「导出 PDF」的文件逐页一�
 
 **各输出通道支持的范围**（不是所有通道都做得到）：
 
-| | 页头页尾 | 水印 | 顶端标题行（`titleRows`） | 行分页符（`mzRowBreaks`） | 按单据编页码（`mzDocBreaks`） | 按单据取名（`mzDocNames`） | 跳过不印页码的 sheet | 超高行续行（`rowOverflow=split`） |
-|---|---|---|---|---|---|---|---|---|
-| Excel (.xlsx) | ✅ 写进 sheet 的页眉页脚 | ❌ Excel 没有水印这个概念 | ✅ `_xlnm.Print_Titles`（**只此一处写**） | ✅ 手动行分页符 | ⚠️ 只到 sheet 级：起始页号钉成 1；`&N` 恒是整个打印任务的页数 | ⚠️ 只到 sheet 级：`&A` 就是工作表名，`perRowPage` 拼成一张后整张同名 | ⚠️ 起始页号钉在**每份单据里第一张印页码**的 sheet 上（`&P` 对了，见 `pagePins`）；`&N` 仍是整本页数 | ❌ xlsx 里一行就是一行，「把一行拆成两行」表达不了（Excel 自己也是把超高行硬切开跨页印的） |
-| PDF（OpenPDF） | ✅ | ✅ 压在内容之上 | ✅ 标题行不参与分页，每页顶部重画一遍 | ✅ 读 xlsx 里那份 | ✅ 逐页自己画，页码/总页数都按本单据 | ✅ 逐页换名 | ✅ 整张跳过，两个数都对 | ✅ 切口对到两行文字之间，每页上都是边框闭合的完整格子 |
-| Word（POI） | ✅ 页码是 `PAGE` 域 | ✅ 页眉里的 VML 艺术字，**在正文下面** | ✅ `w:tblHeader`，Word 自己重画 | ✅ 落成行首格的 `pageBreakBefore` | ⚠️ 只到节级：`w:pgNumType` 重编 + `SECTIONPAGES`；`perRowPage` 做不到 | ⚠️ 只到节级（一张 sheet 一节）：`perRowPage` 全在同一节里，做不到 | ❌ 页眉页脚整份只有一套、跟**第一张** sheet，封面没设就等于整份都没有 | ⚠️ 真的多出一行（`w:cantSplit`），但切在哪儿是**估**的（字宽/行距按 `RowSpill#wrapEstimate` 算），与 Word 自己排出来的会差一两行 |
-| 预览页（默认 PDF 视图 / 「打印」按钮） | ✅ 看的打的都是后端 PDF | ✅ 同 PDF | ✅ 同 PDF | ✅ 同 PDF | ✅ 同 PDF | ✅ 同 PDF | ✅ 同 PDF | ✅ 同 PDF |
-| 预览页浏览器直接打印（Ctrl+P，只在表格视图下） | ❌ 见下 | ✅ `position:fixed` 每页重画 | ❌ FortuneSheet 是一整张 canvas | ❌ FortuneSheet 是一整张 canvas | ❌ 连页码都给不出来 | ❌ 同左 | ❌ 同左 | ❌ 同左 |
+| | 页头页尾 | 水印 | 顶端标题行（`titleRows`） | 行分页符（`mzRowBreaks`） | 按单据编页码（`mzDocBreaks`） | 按单据取名（`mzDocNames`） | 跳过不印页码的 sheet | 超高行续行（`rowOverflow=split`） | 单元格字体（`ff`，含上传字体） |
+|---|---|---|---|---|---|---|---|---|---|
+| Excel (.xlsx) | ✅ 写进 sheet 的页眉页脚 | ❌ Excel 没有水印这个概念 | ✅ `_xlnm.Print_Titles`（**只此一处写**） | ✅ 手动行分页符 | ⚠️ 只到 sheet 级：起始页号钉成 1；`&N` 恒是整个打印任务的页数 | ⚠️ 只到 sheet 级：`&A` 就是工作表名，`perRowPage` 拼成一张后整张同名 | ⚠️ 起始页号钉在**每份单据里第一张印页码**的 sheet 上（`&P` 对了，见 `pagePins`）；`&N` 仍是整本页数 | ❌ xlsx 里一行就是一行，「把一行拆成两行」表达不了（Excel 自己也是把超高行硬切开跨页印的） | ⚠️ 只写得进**字体名**（`font.setFontName`）：**打开文件的那台机器装了它**才显示得出来 |
+| PDF（OpenPDF） | ✅ | ✅ 压在内容之上 | ✅ 标题行不参与分页，每页顶部重画一遍 | ✅ 读 xlsx 里那份 | ✅ 逐页自己画，页码/总页数都按本单据 | ✅ 逐页换名 | ✅ 整张跳过，两个数都对 | ✅ 切口对到两行文字之间，每页上都是边框闭合的完整格子 | ✅ 逐格解析并**内嵌字体子集**（`PdfFonts`：上传字体 → 系统别名 → 兜底），出纸就是那款字体 |
+| Word（POI） | ✅ 页码是 `PAGE` 域 | ✅ 页眉里的 VML 艺术字，**在正文下面** | ✅ `w:tblHeader`，Word 自己重画 | ✅ 落成行首格的 `pageBreakBefore` | ⚠️ 只到节级：`w:pgNumType` 重编 + `SECTIONPAGES`；`perRowPage` 做不到 | ⚠️ 只到节级（一张 sheet 一节）：`perRowPage` 全在同一节里，做不到 | ❌ 页眉页脚整份只有一套、跟**第一张** sheet，封面没设就等于整份都没有 | ⚠️ 真的多出一行（`w:cantSplit`），但切在哪儿是**估**的（字宽/行距按 `RowSpill#wrapEstimate` 算），与 Word 自己排出来的会差一两行 | ⚠️ 同 xlsx，只写字体名（从 xlsx 读回来 `run.setFontFamily`） |
+| 预览页（默认 PDF 视图 / 「打印」按钮） | ✅ 看的打的都是后端 PDF | ✅ 同 PDF | ✅ 同 PDF | ✅ 同 PDF | ✅ 同 PDF | ✅ 同 PDF | ✅ 同 PDF | ✅ 同 PDF | ✅ 同 PDF |
+| 预览页浏览器直接打印（Ctrl+P，只在表格视图下） | ❌ 见下 | ✅ `position:fixed` 每页重画 | ❌ FortuneSheet 是一整张 canvas | ❌ FortuneSheet 是一整张 canvas | ❌ 连页码都给不出来 | ❌ 同左 | ❌ 同左 | ❌ 同左 | ⚠️ 靠 `@font-face`（上传字体）或**本机装了**这款字体；`.ttc` 浏览器不收 |
 
 页头页尾**在浏览器打印里做不到**：要每页出现只能用 `position:fixed`，而它定位的是页边距**以内**
 的区域，画不进页边距；画在里面就会压住表格（表格是一整张 canvas，没法像 `<thead>` 那样每页留白），
