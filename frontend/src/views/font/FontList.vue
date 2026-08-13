@@ -87,44 +87,89 @@
       @current-change="loadData"
     />
 
-    <!-- 上传：文件与字体名一起提交，字体名默认取文件名（去掉后缀） -->
-    <el-dialog v-model="uploadVisible" title="上传字体" width="560px" destroy-on-close>
-      <el-form ref="uploadFormRef" :model="uploadForm" :rules="rules" label-width="90px">
-        <el-form-item label="字体文件" required>
-          <el-upload
-            :auto-upload="false"
-            :limit="1"
-            :show-file-list="false"
-            accept=".ttf,.otf,.ttc"
-            :on-change="onFileChange"
-          >
-            <el-button>选择文件</el-button>
-          </el-upload>
-          <div v-if="uploadForm.file" class="text-muted form-tip">
-            {{ uploadForm.file.name }}（{{ sizeText(uploadForm.file.size) }}）
-          </div>
-          <div v-else class="text-muted form-tip">
-            支持 .ttf / .otf / .ttc，最大 30MB。
-            <b>字体本身要允许嵌入</b>（不少商业中文字体在文件里禁止嵌入，传上来会被退回并说明原因）
-          </div>
-        </el-form-item>
-        <el-form-item label="字体名" prop="fontName">
-          <el-input v-model="uploadForm.fontName" placeholder="设计器字体下拉里显示的名字" />
-          <div class="text-muted form-tip">
-            单元格记的就是这个名字，<b>传上来之后不建议再改</b>（改了老报表里绑着旧名字的格子会退回默认字体）
-          </div>
-        </el-form-item>
-        <el-form-item v-if="isTtc" label="字体集序号" prop="ttcIndex">
-          <el-input-number v-model="uploadForm.ttcIndex" :min="0" :max="20" />
-          <span class="text-muted" style="margin-left: 8px">.ttc 里含多款字体，用第几款（宋体是 0、新宋体是 1）</span>
-        </el-form-item>
-        <el-form-item label="备注" prop="remark">
-          <el-input v-model="uploadForm.remark" type="textarea" :rows="2" placeholder="比如授权范围、来源" />
-        </el-form-item>
-      </el-form>
+    <!--
+      上传：可以一次选多个文件，一款一行。字体名默认取文件名（去掉后缀），可就地改。
+
+      传是**一款一款串行传**的（见 api/font.js#uploadFont），所以状态与失败原因也是逐行标的：
+      一批里混进一款禁止嵌入的商业字体时，其余几款照样传得上去，改完那一行还能只重传它。
+    -->
+    <el-dialog v-model="uploadVisible" title="上传字体" width="820px" destroy-on-close>
+      <el-upload
+        :auto-upload="false"
+        multiple
+        :show-file-list="false"
+        accept=".ttf,.otf,.ttc"
+        :on-change="onFileChange"
+      >
+        <el-button :disabled="saving">选择文件</el-button>
+      </el-upload>
+      <div class="text-muted form-tip">
+        支持 .ttf / .otf / .ttc，单个最大 30MB，可一次选多个。
+        <b>字体本身要允许嵌入</b>（不少商业中文字体在文件里禁止嵌入，传上来会被退回并说明原因）
+      </div>
+
+      <el-table v-if="uploadRows.length" :data="uploadRows" size="small" border class="upload-table">
+        <el-table-column prop="fileName" label="文件" min-width="150" show-overflow-tooltip />
+        <el-table-column label="字体名" min-width="200">
+          <template #default="{ row }">
+            <el-input
+              v-model="row.fontName"
+              :disabled="saving || row.status === 'success'"
+              placeholder="设计器字体下拉里显示的名字"
+            />
+            <div v-if="row.error" class="row-error">{{ row.error }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="字体集序号" width="120">
+          <!-- .ttc 里含多款字体，用第几款（宋体是 0、新宋体是 1）；批量时猜不出来，一律默认 0 -->
+          <template #default="{ row }">
+            <el-input-number
+              v-if="row.isTtc"
+              v-model="row.ttcIndex"
+              :min="0"
+              :max="20"
+              size="small"
+              controls-position="right"
+              style="width: 96px"
+              :disabled="saving || row.status === 'success'"
+            />
+            <span v-else class="text-muted">-</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="大小" width="90">
+          <template #default="{ row }">{{ sizeText(row.size) }}</template>
+        </el-table-column>
+        <el-table-column label="状态" width="100">
+          <template #default="{ row }">
+            <el-tag v-if="row.status === 'success'" size="small" type="success">已上传</el-tag>
+            <el-tag v-else-if="row.status === 'error'" size="small" type="danger">失败</el-tag>
+            <span v-else-if="row.status === 'uploading'" class="text-muted">
+              <el-icon class="is-loading"><Loading /></el-icon> 上传中
+            </span>
+            <span v-else class="text-muted">待上传</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="70">
+          <template #default="{ $index }">
+            <el-button link type="danger" :disabled="saving" @click="uploadRows.splice($index, 1)">移除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <div class="upload-remark">
+        <span class="remark-label">备注</span>
+        <!-- 整批共用一条：备注写的是授权范围、来源这类东西，同一批传上来的多半是同一个出处 -->
+        <el-input v-model="uploadRemark" :disabled="saving" placeholder="比如授权范围、来源（这一批共用）" />
+      </div>
+      <div class="text-muted form-tip">
+        单元格记的就是<b>字体名</b>，<b>传上来之后不建议再改</b>（改了老报表里绑着旧名字的格子会退回默认字体）
+      </div>
+
       <template #footer>
-        <el-button @click="uploadVisible = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="handleUpload">上传</el-button>
+        <el-button :disabled="saving" @click="uploadVisible = false">关闭</el-button>
+        <el-button type="primary" :loading="saving" :disabled="!pendingRows.length" @click="handleUpload">
+          {{ uploadBtnText }}
+        </el-button>
       </template>
     </el-dialog>
 
@@ -156,7 +201,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Search, Upload, WarningFilled } from '@element-plus/icons-vue'
+import { Loading, Search, Upload, WarningFilled } from '@element-plus/icons-vue'
 import { pageFont, uploadFont, updateFont, deleteFont } from '@/api/font'
 import { loadCustomFonts } from '@/utils/fontList'
 
@@ -173,21 +218,53 @@ const searchName = ref('')
 
 const uploadVisible = ref(false)
 const editVisible = ref(false)
-const uploadFormRef = ref(null)
 const editFormRef = ref(null)
 
-const uploadForm = reactive({ file: null, fontName: '', ttcIndex: 0, remark: '' })
+/**
+ * 待上传的那几款，一个文件一行：
+ * `{ file, fileName, size, fontName, isTtc, ttcIndex, status: ''|'uploading'|'success'|'error', error }`。
+ * 传成功的行留在表里（标成「已上传」、不再参与重传），这样一批传完还看得出哪几款进去了。
+ */
+const uploadRows = ref([])
+/** 备注整批共用，见模板里那句注释 */
+const uploadRemark = ref('')
+
 const editForm = reactive({ id: '', fontName: '', remark: '', status: 1 })
 
-const isTtc = computed(() => /\.ttc$/i.test(uploadForm.file?.name || ''))
+/** 还没传上去的那几行：上传按钮传的就是它们，也是「重传失败项」的范围 */
+const pendingRows = computed(() => uploadRows.value.filter((r) => r.status !== 'success'))
 
+const uploadBtnText = computed(() => {
+  const n = pendingRows.value.length
+  if (!n) return '上传'
+  return uploadRows.value.some((r) => r.status === 'success') ? `重传这 ${n} 款` : `上传 ${n} 款`
+})
+
+/**
+ * 字体名的规则。这个名字要同时当 CSS 的 font-family、xlsx 的字体名用，引号逗号在那两处都是语法。
+ * 后端 `FontServiceImpl#checkName` 是同一条规则，这里先拦一道少跑一趟
+ * —— 一款字体十几 MB，为一个打错的名字把它传上去再退回来太亏。
+ *
+ * @returns 错误信息，合法则返回空串
+ */
+function nameError(name) {
+  const v = (name || '').trim()
+  if (!v) return '请填写字体名'
+  if (v.length > 32) return '字体名不能超过 32 个字符'
+  if (!/^[^"',<>\\/;{}]+$/.test(v)) return '不能包含 " \' , < > \\ / ; { } 这些字符'
+  return ''
+}
+
+/** 编辑弹窗那份表单校验，规则与 nameError 共用一处 */
 const rules = {
   fontName: [
-    { required: true, message: '请填写字体名', trigger: 'blur' },
-    { max: 32, message: '不能超过 32 个字符', trigger: 'blur' },
-    // 这个名字要同时当 CSS 的 font-family、xlsx 的字体名用，引号逗号在那两处都是语法。
-    // 后端 FontServiceImpl#checkName 是同一条规则，这里先拦一道少跑一趟
-    { pattern: /^[^"',<>\\/;{}]+$/, message: '不能包含 " \' , < > \\ / ; { } 这些字符', trigger: 'blur' }
+    {
+      validator: (rule, value, callback) => {
+        const msg = nameError(value)
+        callback(msg ? new Error(msg) : undefined)
+      },
+      trigger: 'blur'
+    }
   ]
 }
 
@@ -221,39 +298,105 @@ function handleSearch() {
 }
 
 function openUpload() {
-  Object.assign(uploadForm, { file: null, fontName: '', ttcIndex: 0, remark: '' })
+  uploadRows.value = []
+  uploadRemark.value = ''
   uploadVisible.value = true
 }
 
-/** 选中文件时顺手把字体名填成文件名（去后缀），大多数时候就是想要的那个 */
+/**
+ * 选文件：多选时 el-upload 是**一个文件调一次**，所以这里只管往列表里追加一行。
+ * 字体名顺手填成文件名（去后缀），大多数时候就是想要的那个。
+ */
 function onFileChange(file) {
-  uploadForm.file = file.raw
-  if (!uploadForm.fontName) {
-    uploadForm.fontName = (file.name || '').replace(/\.[^.]+$/, '')
-  }
+  if (!file.raw) return
+  // 同一个文件选两次没有意义（名字还必定撞车），按文件名去重
+  if (uploadRows.value.some((r) => r.fileName === file.name)) return
+  uploadRows.value.push({
+    file: file.raw,
+    fileName: file.name,
+    size: file.size,
+    fontName: (file.name || '').replace(/\.[^.]+$/, ''),
+    isTtc: /\.ttc$/i.test(file.name || ''),
+    ttcIndex: 0,
+    status: '',
+    error: ''
+  })
 }
 
+/**
+ * 上传：**一款一款串行传**（并发的理由见 api/font.js#uploadFont），逐行标状态与失败原因。
+ * 传成功的不再重传，所以改完失败那几行的名字可以直接再点一次按钮。
+ */
 async function handleUpload() {
-  if (!uploadForm.file) {
+  const rows = pendingRows.value
+  if (!rows.length) {
     ElMessage.warning('请选择字体文件')
     return
   }
-  try {
-    await uploadFormRef.value?.validate()
-  } catch (e) {
-    return
-  }
+  if (!checkRows(rows)) return
+
   saving.value = true
+  let ok = 0
   try {
-    await uploadFont(uploadForm.file, uploadForm.fontName, isTtc.value ? uploadForm.ttcIndex : 0, uploadForm.remark)
-    ElMessage.success('上传成功')
-    uploadVisible.value = false
-    await refresh()
-  } catch (e) {
-    // 已由拦截器提示（字体文件 PDF 引擎读不了也是在这里报出来的）
+    for (const row of rows) {
+      row.status = 'uploading'
+      row.error = ''
+      try {
+        await uploadFont({
+          file: row.file,
+          fontName: row.fontName.trim(),
+          ttcIndex: row.isTtc ? row.ttcIndex : 0,
+          remark: uploadRemark.value,
+          silent: true
+        })
+        row.status = 'success'
+        ok++
+      } catch (e) {
+        // silent 的请求不弹全局提示，原因标在这一行上（字体名重了、PDF 引擎读不了、不许嵌入…）
+        row.status = 'error'
+        row.error = e?.response?.data?.msg || e?.message || '上传失败'
+      }
+    }
   } finally {
     saving.value = false
   }
+
+  // 刷新只做一次：字体清单要重新拉一遍（listFont + @font-face），一款一刷太浪费
+  if (ok) await refresh()
+  const failed = rows.length - ok
+  if (!failed) {
+    ElMessage.success(`上传成功 ${ok} 款`)
+    uploadVisible.value = false
+    return
+  }
+  ElMessage.warning(`成功 ${ok} 款，失败 ${failed} 款：原因见列表，改完可以只重传失败的那几款`)
+}
+
+/**
+ * 提交前自己判得了的先拦下来：名字不合法、以及**这一批里的重名**。
+ *
+ * 字体名是否与**库里已有的**撞车不在这儿查 —— `listFont` 只还启用的那些，而停用的字体照样占着
+ * 名字（后端 `checkName` 数的是全部未删除的行），前端查出来的是个半准的结论，
+ * 不如让后端那条唯一的规则说话，撞了就标在那一行上。
+ *
+ * @returns 全部合法返回 true
+ */
+function checkRows(rows) {
+  const seen = new Map()
+  rows.forEach((row) => {
+    row.error = nameError(row.fontName)
+    if (row.error) return
+    const key = row.fontName.trim()
+    const first = seen.get(key)
+    if (first) {
+      // 两条都标上：只标后一条的话，用户改了它还是不知道跟谁重了
+      first.error = '这一批里有重名的字体名'
+      row.error = '这一批里有重名的字体名'
+    } else {
+      seen.set(key, row)
+    }
+  })
+  return !rows.some((row) => row.error)
 }
 
 function openEdit(row) {
@@ -322,6 +465,32 @@ onMounted(() => {
 .form-tip {
   margin-top: 4px;
   font-size: 12px;
+}
+
+.upload-table {
+  margin-top: 12px;
+}
+
+/* 失败原因可能很长（比如「不允许嵌入」那一整段），让它在格子里折行而不是把列撑开 */
+.row-error {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--el-color-danger);
+  word-break: break-all;
+}
+
+.upload-remark {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.remark-label {
+  flex: none;
+  font-size: 14px;
+  color: var(--el-text-color-regular);
 }
 
 .sample {

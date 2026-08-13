@@ -15,16 +15,25 @@ export const deleteFont = (id) => request.delete(`/font/${id}`)
 /**
  * 传一款字体。
  *
+ * **批量上传就是把它串行调多遍**（见 views/font/FontList.vue）—— 接口本身保持一款一次是有意的：
+ * 每款都要在服务端真用 PDF 引擎加载一遍才收（FontServiceImpl#checkLoadable），一批里混进一款
+ * 禁止嵌入的商业字体时，该报的是「这一款不行」而不是整批回滚。并发也不合适：一款十几 MB，
+ * 十款一起发能把带宽和服务端内存一起打满。
+ *
+ * @param file     字体文件（.ttf / .otf / .ttc）
  * @param fontName 字体名，就是单元格样式里 ff 存的那个字符串，全局唯一
  * @param ttcIndex .ttc 字体集里用第几款，其余格式忽略
+ * @param remark   备注
+ * @param silent   true = 失败时不弹全局提示，由调用方自己显示（批量时逐行标在各自那一行上）
  */
-export const uploadFont = (file, fontName, ttcIndex, remark) => {
+export const uploadFont = ({ file, fontName, ttcIndex, remark, silent = false }) => {
   const form = new FormData()
   form.append('file', file)
   // 字体文件动辄十几 MB，别用默认的 120s 卡在半路
   return request.post('/font/upload', form, {
     params: { fontName, ttcIndex, remark },
-    timeout: 180000
+    timeout: 180000,
+    silent
   })
 }
 

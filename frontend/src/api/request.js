@@ -46,6 +46,14 @@ async function readErrorMsg(data) {
 }
 
 /**
+ * 请求配置里带 `silent: true` 的不弹全局提示，**但照样 reject** —— 调用方自己负责把错误
+ * 显示出来。给「一次循环发很多请求」的场景用（眼下是批量上传字体）：一批传十款失败五款，
+ * 五个红条会把屏幕盖满还互相顶掉，而每一条属于哪个文件也说不清；那种场景下错误逐行标在
+ * 各自那一行上更有用。**默认仍然弹**，别为了省事到处加这个标志。
+ */
+const silent = (config) => config?.silent === true
+
+/**
  * 统一解包 { code, msg, data }：成功返回 data，失败弹提示并 reject。
  */
 request.interceptors.response.use(
@@ -54,7 +62,7 @@ request.interceptors.response.use(
     if (isBinary(response.config)) {
       const msg = await readErrorMsg(response.data)
       if (msg) {
-        ElMessage.error(msg)
+        if (!silent(response.config)) ElMessage.error(msg)
         return Promise.reject(new Error(msg))
       }
       return response
@@ -62,8 +70,9 @@ request.interceptors.response.use(
     const body = response.data
     if (body && typeof body === 'object' && 'code' in body) {
       if (body.code === 0) return body.data
-      ElMessage.error(body.msg || '请求失败')
-      return Promise.reject(new Error(body.msg || '请求失败'))
+      const msg = body.msg || '请求失败'
+      if (!silent(response.config)) ElMessage.error(msg)
+      return Promise.reject(new Error(msg))
     }
     return body
   },
@@ -74,7 +83,7 @@ request.interceptors.response.use(
       error.response?.data?.msg ||
       error.message ||
       '网络异常'
-    ElMessage.error(msg)
+    if (!silent(error.config)) ElMessage.error(msg)
     return Promise.reject(error)
   }
 )
