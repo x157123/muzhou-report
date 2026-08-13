@@ -495,7 +495,18 @@ code 只在同一作用范围内唯一，不同报表、同报表不同版都允
 分页条只在「主接口是分页型」时出现，翻页 = 带着 `pageNo`/`pageSize`（**保留参数名**）
 重新渲染整张报表。
 
-主接口还管第二件事：`content.splitMode`（打印设置弹窗的「输出」页签）非 `single` 时
+主接口还管第二件事 —— **导出文件名**：`content.exportConfig`（打印设置弹窗的「导出」页签）= 报表名 +
+主接口若干字段值，拼法只有 `dto/ExportConfigDTO` 一处（洗掉 `\/:*?"<>|`、空字段整段跳过、
+拼不出来退回报表名），前端 `utils/sheet.js#exportFileName` 是设计器那个「示例」的同一套算法。
+两件事必须记住：① **名字随字节一起从 service 回来**（`RenderService.ExportFile`）——
+拼它要主接口那一行数据，controller 再去取一次就是白打一遍接口；那一行是从**这次渲染用的
+同一个取数函数**里要的（`RenderServiceImpl#firstPrimaryRow`，定版后 `rebind` 换过的话要用换过的
+那个），于是通常直接命中 `CachingDataFetcher` 不多打一次。取不到只是少一段名字，**决不能让
+导出失败** —— 文件都生成好了。② **前端一律从 `Content-Disposition` 读**
+（`utils/sheet.js#fileNameFromResponse`，controller 另外放出 `Access-Control-Expose-Headers`），
+自己拼一份必定和后端拼的不是一个名字。
+
+主接口还管第三件事：`content.splitMode`（打印设置弹窗的「输出」页签）非 `single` 时
 **按主接口的每一行拆**，一条数据一张单据。两个值是**同一套拆分的两个出口**
 （`splitByRow()` 共用，区别只在拼不拼）：`perRow`（界面上叫「每条数据一个 sheet」）不拼接、
 直接出 M×N 张 sheet，`perRowPage`（界面上叫「多 sheet 输出」）拼回一张。
@@ -582,7 +593,7 @@ code 只在同一作用范围内唯一，不同报表、同报表不同版都允
 **参数是「一路透传」的**：`ReportRenderEngine#mergeParams` 与 `SqlParamParser#resolveValues`
 都只对**声明过**的参数补默认值/校验/转类型，没声明的原样留在 map 里传到底。前端因此把
 预览/设计器地址上的 query 一并提交（`utils/params.js#queryParams`，见 CONTRACT §5），
-`/preview/{id}?id=11233` 里的 id 不必在报表参数里声明就能被 SQL 的 `${id}` 和
+`/view/{id}?id=11233` 里的 id 不必在报表参数里声明就能被 SQL 的 `${id}` 和
 api 数据集接口地址里的 `${id}`（`DatasetServiceImpl#substituteUrl`，值做 URL 编码）取到。
 改参数合并逻辑时别顺手加「未声明就丢弃」的过滤——那会把这条链路整个掐断。
 行数/超时/单元格数上限在 `application.yml` 的 `muzhou.report.*`，读取自 `MzProperties`。

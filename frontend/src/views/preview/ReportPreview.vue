@@ -28,11 +28,12 @@
 <!--        </template>-->
 <!--      </ParamForm>-->
 
-      <div class="flex-spacer"></div>
-      <el-radio-group v-model="viewMode" size="small">
-        <el-radio-button value="pdf" title="按打印的样子预览（后端出的 PDF）">PDF</el-radio-button>
-        <el-radio-button value="sheet" title="表格预览，可滚动、可选中复制">表格</el-radio-button>
-      </el-radio-group>
+      <div class="flex-spacer">
+        <el-radio-group v-model="viewMode" size="small">
+          <el-radio-button value="pdf" title="按打印的样子预览（后端出的 PDF）">PDF</el-radio-button>
+          <el-radio-button value="sheet" title="表格预览，可滚动、可选中复制">表格</el-radio-button>
+        </el-radio-group>
+      </div>
       <el-dropdown trigger="click" :disabled="exporting" @command="handleExport">
         <el-button :icon="Download" :loading="exporting">
           导出<el-icon class="el-icon--right"><ArrowDown /></el-icon>
@@ -120,7 +121,7 @@ import FortuneSheet from '@/components/FortuneSheet.vue'
 import ParamForm from '@/components/ParamForm.vue'
 import { getReport } from '@/api/report'
 import { renderReport, getReportParams, exportExcel, exportPdf, exportWord } from '@/api/render'
-import { downloadBlob } from '@/utils/sheet'
+import { downloadBlob, fileNameFromResponse } from '@/utils/sheet'
 import { normalizePageConfig, pageConfigOfResult, paperSizeMm } from '@/utils/print'
 import { printPdfBlob, disposePrintFrame } from '@/utils/printPdf'
 import { applyWrapRowHeights } from '@/utils/wrapHeight'
@@ -132,7 +133,7 @@ const router = useRouter()
 const reportId = route.params.id
 
 /**
- * 外部地址上带来的参数：`/preview/{id}?id=11233`。
+ * 外部地址上带来的参数：`/view/{id}?id=11233`。
  *
  * 报表里**声明过**的参数用它当表单初值（用户还能改），**没声明**的也一起提交 ——
  * 数据集里 `${id}` 照样取得到（SQL 走 JDBC 绑定、API 地址走 URL 编码替换），
@@ -141,7 +142,7 @@ const reportId = route.params.id
 const externalParams = queryParams(route.query)
 
 /**
- * 地址上指定的版本（`/preview/{id}?versionId=xxx`），空 = 让后端按版本切换规则自动选。
+ * 地址上指定的版本（`/view/{id}?versionId=xxx`），空 = 让后端按版本切换规则自动选。
  *
  * versionId 是**保留参数名**：它走渲染请求体，不能混进报表参数（否则会被塞进 SQL 的
  * `${versionId}`），`queryParams` 已经把它剔出去了。
@@ -183,6 +184,8 @@ const viewMode = ref('pdf')
 
 /** 当前这份 PDF：blob 给打印用，url 给 iframe 用（换一份必须 revoke 旧的，否则内存里越攒越多） */
 let pdfBlob = null
+/** 这份 PDF 的文件名（后端按导出设置拼的），打印失败退回下载时用 */
+let pdfName = ''
 const pdfUrl = ref('')
 const pdfLoading = ref(false)
 const pdfError = ref('')
@@ -360,6 +363,8 @@ async function loadPdf() {
     revokePdf()
     // 后端的 Content-Type 已是 application/pdf，这里再兜一层，免得 iframe 把它当附件下载
     pdfBlob = new Blob([res.data], { type: 'application/pdf' })
+    // 打印被浏览器拦下来时会退回「下载」，那时也该是导出设置里配的那个名字
+    pdfName = fileNameFromResponse(res, `${reportName.value || 'report'}.pdf`)
     pdfUrl.value = URL.createObjectURL(pdfBlob)
     pdfStale = false
   } catch (e) {
@@ -377,6 +382,7 @@ function revokePdf() {
     pdfUrl.value = ''
   }
   pdfBlob = null
+  pdfName = ''
 }
 
 async function doRender() {
@@ -437,7 +443,9 @@ async function handleExport(type) {
   try {
     // 版本一路带着：不带的话「页面上看的是 v2、导出的却是规则选出来的 v3」
     const res = await api(reportId, buildParams(), versionId)
-    downloadBlob(res.data, `${reportName.value || 'report'}.${ext}`)
+    // 文件名跟着响应头走：后端按报表的「导出」设置拼好了（报表名 + 主接口字段值），
+    // 这边没有那份数据，自己拼只会拼成另一个名字
+    downloadBlob(res.data, fileNameFromResponse(res, `${reportName.value || 'report'}.${ext}`))
   } catch (e) {
     // 错误已由 axios 拦截器提示
   } finally {
@@ -460,6 +468,7 @@ async function handlePrint() {
   if (printing.value) return
   printing.value = true
   let blob = null
+  let name = pdfName || `${reportName.value || 'report'}.pdf`
   try {
     if (viewMode.value === 'pdf' && pdfBlob && !pdfStale) {
       blob = pdfBlob
@@ -467,6 +476,7 @@ async function handlePrint() {
       const res = await exportPdf(reportId, buildParams(), activeSheetIndex.value, versionId)
       // 后端的 Content-Type 已是 application/pdf，这里再兜一层，免得 iframe 把它当附件下载
       blob = new Blob([res.data], { type: 'application/pdf' })
+      name = fileNameFromResponse(res, name)
     }
     await printPdfBlob(blob)
   } catch (e) {
@@ -476,7 +486,7 @@ async function handlePrint() {
       ElMessage.info('已在新标签页打开 PDF，请在其中打印')
     } else if (blob) {
       ElMessage.warning('浏览器拦截了打印窗口，已改为下载 PDF')
-      downloadBlob(blob, `${reportName.value || 'report'}.pdf`)
+      downloadBlob(blob, name)
     }
   } finally {
     printing.value = false

@@ -142,7 +142,7 @@ function goDesign(row) {
 }
 
 function goPreview(row) {
-  router.push('/preview/' + row.id)
+  router.push('/view/' + row.id)
 }
 
 async function handleCopy(row) {

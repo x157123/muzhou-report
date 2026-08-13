@@ -5,6 +5,7 @@ import {
   defaultCellConfig,
   defaultFormatPattern,
   deepClone,
+  normalizeExportConfig,
   normalizeRowColOp,
   normalizeSheets,
   pruneEmptyCellConfigs,
@@ -140,6 +141,7 @@ export const useDesignerStore = defineStore('designer', {
       content.splitMode = content.splitMode || 'single'
       content.sheetNameField = content.sheetNameField || ''
       content.datasetLinks = Array.isArray(content.datasetLinks) ? content.datasetLinks : []
+      content.exportConfig = normalizeExportConfig(content.exportConfig)
       content.pageConfig = normalizePageConfig(content.pageConfig)
       // 按 sheet 单独设的那些也逐个补全字段，后面各处就可以直接用
       const perSheet = {}
@@ -447,6 +449,15 @@ export const useDesignerStore = defineStore('designer', {
       const mode = ['perRow', 'perRowPage'].includes(splitMode) ? splitMode : 'single'
       this.content.splitMode = mode
       this.content.sheetNameField = mode === 'single' ? '' : sheetNameField || ''
+      this.dirty = true
+    },
+
+    /**
+     * 导出设置（**报表级**）：导出的文件叫什么名字 —— 报表名 + 主接口若干字段值。
+     * 后端拼名字时取的是主接口第一行，见 `dto/ExportConfigDTO`。
+     */
+    setExportConfig(cfg) {
+      this.content.exportConfig = normalizeExportConfig(cfg)
       this.dirty = true
     },
 

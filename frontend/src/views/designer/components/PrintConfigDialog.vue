@@ -294,6 +294,61 @@
           </div>
         </el-form>
       </el-tab-pane>
+      <!-- ------------------------------ 导出 ------------------------------ -->
+      <el-tab-pane label="导出" name="export">
+        <el-form label-width="96px" size="small">
+          <el-form-item label="文件名">
+            <el-checkbox v-model="exportCfg.withReportName">以报表名「{{ reportName }}」开头</el-checkbox>
+          </el-form-item>
+
+          <el-form-item label="拼接字段">
+            <el-select
+              v-model="exportCfg.fields"
+              multiple
+              :disabled="!primary"
+              placeholder="取主接口的哪几个字段（可多选，按选中顺序拼）"
+              style="width: 100%"
+            >
+              <el-option
+                v-for="f in primaryFields"
+                :key="f.fieldName"
+                :label="`${f.fieldText || f.fieldName} (${f.fieldName})`"
+                :value="f.fieldName"
+              />
+            </el-select>
+            <span v-if="!primary" class="text-muted" style="margin-top: 4px">
+              未设主接口 —— 在左侧数据集面板点 ☆ 指定一个，这里才有字段可选
+            </span>
+          </el-form-item>
+
+          <el-form-item label="连接符">
+            <el-input v-model="exportCfg.separator" style="width: 120px" maxlength="8" />
+            <span class="text-muted" style="margin-left: 8px">各段之间拼什么，默认下划线</span>
+          </el-form-item>
+
+          <el-form-item label="示例">
+            <span class="mono">{{ exportNameSample }}.xlsx</span>
+            <span class="text-muted" style="margin-left: 8px">
+              （字段位置这里用<b>字段名</b>示意，实际是那一行的值）
+            </span>
+          </el-form-item>
+
+          <div class="tips">
+            <p>
+              导出的 <b>Excel / PDF / Word</b> 都用这个名字；字段值取的是<b>主接口第一行</b> ——
+              一次导出只出一个文件，按条拆单据时整批也仍是一份，所以拿第一条代表整份。
+            </p>
+            <p>
+              取不到值的字段整段跳过（不会留下空的连接符）；文件名里不能用的字符
+              <code>\ / : * ? " &lt; &gt; |</code> 会被去掉。一段都拼不出来时退回报表名。
+            </p>
+            <p>
+              预览页的「打印」走的是浏览器打印对话框，<b>那里的文件名由浏览器决定</b>，这里管不到。
+            </p>
+          </div>
+        </el-form>
+      </el-tab-pane>
+
       <!-- ------------------------------ 版本 ------------------------------ -->
       <el-tab-pane label="版本" name="version">
         <el-form label-width="96px" size="small">
@@ -445,6 +500,7 @@ import {
   totalColumnsWidth
 } from '@/utils/print'
 import { versionIntervals, intervalText } from '@/utils/version'
+import { normalizeExportConfig, exportFileName } from '@/utils/sheet'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -478,6 +534,11 @@ const split = ref({ splitMode: 'single', sheetNameField: '' })
  * 本身就是被版本化的那个东西，规则放进去就成了「每个版本各有一套怎么选自己」，逻辑成环）。
  */
 const version = ref({ source: 'field', field: '', fallback: 'default' })
+/**
+ * 导出设置（**报表级**）：导出的文件叫什么名字 —— 报表名 + 主接口若干字段值。
+ * 同样是编辑副本，点确定才写回 store。
+ */
+const exportCfg = ref(normalizeExportConfig(null))
 const tab = ref('page')
 /** 占位符要插到哪个输入框：最后获得焦点的那个 */
 const target = ref({ part: 'header', section: 'center' })
@@ -505,6 +566,7 @@ watch(visible, (v) => {
     sheetNameField: store.content.sheetNameField || ''
   }
   version.value = store.versionConfigOf()
+  exportCfg.value = normalizeExportConfig(store.content.exportConfig)
   // 单 sheet 报表没有「按 sheet 设」的意义，直接写报表级，避免存一份多余的覆盖
   scope.value = multiSheet.value ? 'sheet' : 'all'
   tab.value = 'page'
@@ -518,6 +580,15 @@ const primaryFields = computed(() => primary.value?.fields || [])
  * 只有「主接口是集合型」才拆得动：分页型自己就在按页取数，再按行拆 sheet 是两套分页打架。
  */
 const canSplit = computed(() => !!primary.value && primary.value.resultType !== 'page')
+
+/* ------------------------------ 导出 ------------------------------ */
+
+const reportName = computed(() => store.report.name || '报表')
+/**
+ * 文件名示例：字段位置拿**字段名**示意（设计器里没有真实数据），
+ * 拼法与后端 `ExportConfigDTO#resolve` 是同一套（utils/sheet.js#exportFileName）。
+ */
+const exportNameSample = computed(() => exportFileName(exportCfg.value, reportName.value))
 
 /* ------------------------------ 版本 ------------------------------ */
 
@@ -622,6 +693,8 @@ function onConfirm() {
   store.setSheetSplit(canSplit.value ? split.value : { splitMode: 'single' })
   // 版本切换规则同样是报表级的，而且存在 report 上而不是 content 里
   store.setVersionConfig(version.value)
+  // 导出文件名也是报表级的一份，与「作用范围」无关
+  store.setExportConfig(exportCfg.value)
   emit('applied')
   visible.value = false
   ElMessage.success(

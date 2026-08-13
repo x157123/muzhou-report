@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.muzhou.report.common.BizException;
 import com.muzhou.report.config.MzProperties;
 import com.muzhou.report.dto.DatasetRowsDTO;
+import com.muzhou.report.dto.ExportConfigDTO;
 import com.muzhou.report.dto.PageConfigDTO;
 import com.muzhou.report.dto.ReportContentDTO;
 import com.muzhou.report.dto.ReportParamDTO;
@@ -157,7 +158,7 @@ public class RenderServiceImpl implements RenderService {
     }
 
     @Override
-    public byte[] exportExcel(String reportId, Map<String, Object> params, String versionId) {
+    public ExportFile exportExcel(String reportId, Map<String, Object> params, String versionId) {
         return withExportPermit(() -> {
             long start = System.currentTimeMillis();
             Prepared p = prepareExport(reportId, params, versionId, null);
@@ -166,7 +167,7 @@ public class RenderServiceImpl implements RenderService {
             log.info("导出Excel完成: 请求数据 {}ms → 渲染 {}ms → 转Excel {}ms → 合计 {}ms",
                     p.result().getFetchElapsed(), p.result().getExpandElapsed(),
                     System.currentTimeMillis() - excelStart, System.currentTimeMillis() - start);
-            return bytes;
+            return new ExportFile(bytes, p.fileName());
         });
     }
 
@@ -177,7 +178,7 @@ public class RenderServiceImpl implements RenderService {
      * 而 {@code maxCells} 只拦得住**单次**规模。不排队的话，十个人同时导一份大报表就能把堆打满，
      * 倒下的是整个服务而不只是那几次导出。
      */
-    private byte[] withExportPermit(Supplier<byte[]> task) {
+    private <T> T withExportPermit(Supplier<T> task) {
         int wait = props.getExportWaitSeconds();
         boolean acquired = false;
         try {
@@ -198,7 +199,7 @@ public class RenderServiceImpl implements RenderService {
     }
 
     @Override
-    public byte[] exportPdf(String reportId, Map<String, Object> params, Integer sheetIndex, String versionId) {
+    public ExportFile exportPdf(String reportId, Map<String, Object> params, Integer sheetIndex, String versionId) {
         // PDF 走「先出 xlsx 再转」这一条路：页面设置已经写在 xlsx 里，转换器照着出纸，
         // 不必在 PDF 侧把 pageConfig 再实现一遍。xlsx 不落成字节 —— workbook 对象直通给转换器，
         // 省掉「序列化再解析回来」的往返（200 页的报表约 0.5s）。
@@ -215,7 +216,7 @@ public class RenderServiceImpl implements RenderService {
                         p.result().getFetchElapsed(), p.result().getExpandElapsed(),
                         excelMs, System.currentTimeMillis() - pdfStart,
                         System.currentTimeMillis() - start);
-                return pdf;
+                return new ExportFile(pdf, p.fileName());
             } catch (IOException e) {
                 throw new BizException("PDF 导出失败: " + e.getMessage());
             }
@@ -223,7 +224,7 @@ public class RenderServiceImpl implements RenderService {
     }
 
     @Override
-    public byte[] exportWord(String reportId, Map<String, Object> params, String versionId) {
+    public ExportFile exportWord(String reportId, Map<String, Object> params, String versionId) {
         return withExportPermit(() -> {
             long start = System.currentTimeMillis();
             Prepared p = prepareExport(reportId, params, versionId, null);
@@ -239,7 +240,7 @@ public class RenderServiceImpl implements RenderService {
                         p.result().getFetchElapsed(), p.result().getExpandElapsed(),
                         excelMs, System.currentTimeMillis() - wordStart,
                         System.currentTimeMillis() - start);
-                return word;
+                return new ExportFile(word, p.fileName());
             } catch (IOException e) {
                 throw new BizException("Word 导出失败: " + e.getMessage());
             }
@@ -258,11 +259,18 @@ public class RenderServiceImpl implements RenderService {
     private record Prepared(List<Map<String, Object>> sheets, IntFunction<PageConfigDTO> pageConfigOf,
                             IntFunction<List<Integer>> docBreaksOf,
                             IntFunction<List<String>> docNamesOf,
-                            RenderResultDTO result) {
+                            RenderResultDTO result,
+                            String fileName) {
     }
 
-    /** 一次「选版本 + 渲染」的产物：结果，以及**基准**那份 content（取打印设置时兜底要用）。 */
-    private record Rendered(RenderResultDTO result, ReportContentDTO content) {
+    /**
+     * 一次「选版本 + 渲染」的产物：结果、**基准**那份 content（取打印设置时兜底要用），
+     * 外加拼导出文件名要用的三样 —— 报表名、这次渲染用的取数函数、合并后的参数
+     * （见 {@link #exportFileName}）。
+     */
+    private record Rendered(RenderResultDTO result, ReportContentDTO content, String reportName,
+                            BiFunction<String, Map<String, Object>, List<Map<String, Object>>> fetcher,
+                            Map<String, Object> params) {
     }
 
     private Prepared prepareExport(String reportId, Map<String, Object> params, String versionId,
@@ -286,7 +294,39 @@ public class RenderServiceImpl implements RenderService {
         IntFunction<List<Integer>> docBreaksOf = i -> docBreaksAt(exported, i);
         // 每份单据叫什么同样存不进 xlsx（Excel 的 &A 只有工作表名一个值），一起递下去
         IntFunction<List<String>> docNamesOf = i -> docNamesAt(exported, i);
-        return new Prepared(exported, pageConfigOf, docBreaksOf, docNamesOf, result);
+        return new Prepared(exported, pageConfigOf, docBreaksOf, docNamesOf, result,
+                exportFileName(rendered));
+    }
+
+    /**
+     * 这份文件叫什么（不含扩展名）：报表名 + 主接口若干字段值，规则在
+     * {@link com.muzhou.report.dto.ExportConfigDTO} 里，本方法只负责把那一行数据找出来。
+     *
+     * <p>那一行取的是**主接口第一行**，而且是从刚才渲染用的同一个取数函数里要的 ——
+     * 主接口已经被 {@link CachingDataFetcher} 记着（key = code + 合并后的参数），
+     * 所以这一问通常直接命中缓存、不会多打一次接口。取不到数据、接口报错都只是「少一段名字」，
+     * 决不能让导出本身失败 —— 文件已经生成好了，为了个名字把它丢掉说不过去。
+     */
+    private String exportFileName(Rendered rendered) {
+        ReportContentDTO content = rendered.content();
+        Map<String, Object> row = null;
+        ExportConfigDTO cfg = content.getExportConfig();
+        if (cfg != null && cfg.needsRow() && StringUtils.hasText(content.getPrimaryDataset())) {
+            row = firstPrimaryRow(rendered);
+        }
+        return content.exportFileName(rendered.reportName(), row);
+    }
+
+    /** 主接口第一行；没有数据或取数出错都返回 null（文件名少那几段而已）。 */
+    private Map<String, Object> firstPrimaryRow(Rendered rendered) {
+        try {
+            List<Map<String, Object>> rows = rendered.fetcher()
+                    .apply(rendered.content().getPrimaryDataset(), rendered.params());
+            return rows == null || rows.isEmpty() ? null : rows.get(0);
+        } catch (Exception e) {
+            log.warn("拼导出文件名时取主接口数据失败，文件名退回报表名: {}", e.getMessage());
+            return null;
+        }
     }
 
     /** 第 {@code i} 张导出 sheet 上的 {@code mzDocBreaks}（每份单据的起始行）；普通报表没有这一项。 */
@@ -358,6 +398,9 @@ public class RenderServiceImpl implements RenderService {
 
         RenderResultDTO result;
         ReportContentDTO content;
+        // 这次渲染真正用的取数函数（下面定版后可能被 rebind 换掉）—— 导出拼文件名时
+        // 还要拿它问一次主接口，问的必须是同一个，否则命中不了缓存、白打一遍接口
+        BiFunction<String, Map<String, Object>, List<Map<String, Object>>> used = fetcher;
         // 探测取数用的参数要和引擎随后 mergeParams 出来的那份**一致**，否则缓存 key 对不上，
         // 主接口会被打第二遍。逐行那条路上 source=param 的匹配条件也从这份取值
         Map<String, Object> probeParams = renderEngine.mergeParams(base.getParams(), params);
@@ -376,15 +419,15 @@ public class RenderServiceImpl implements RenderService {
             ReportVersionResolver.Resolution resolution = ReportVersionResolver.resolve(
                     candidates, versionId, config, base.getPrimaryDataset(), probeParams, fetcher);
             content = contentOf(reportId, resolution.version().id(), baseVersionId, base);
-            result = renderEngine.render(content, params,
-                    rebind(fetcher, reportId, baseVersionId, resolution.version().id(), content, totals));
+            used = rebind(fetcher, reportId, baseVersionId, resolution.version().id(), content, totals);
+            result = renderEngine.render(content, params, used);
             result.setVersionId(resolution.version().id());
             result.setVersionNo(resolution.version().versionNo());
             result.setVersionName(resolution.version().name());
             result.setVersionMatch(resolution.reason());
         }
         fillTotal(result, content, totals);
-        return new Rendered(result, content);
+        return new Rendered(result, content, report.getName(), used, probeParams);
     }
 
     /**

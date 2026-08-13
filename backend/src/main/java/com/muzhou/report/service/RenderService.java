@@ -17,6 +17,17 @@ import java.util.Map;
 public interface RenderService {
 
     /**
+     * 一次导出的产物：文件字节 + 文件名。
+     *
+     * <p>文件名**不含扩展名**（由 controller 按格式补 `.xlsx` / `.pdf` / `.docx`），
+     * 内容由 `content.exportConfig` 决定 —— 报表名 + 主接口若干字段值，见 CONTRACT §4。
+     * 它必须跟着字节一起回来：拼名字要用主接口那一行数据，只有渲染那一层拿得到
+     * （controller 再去取一次就是白打一遍接口）。
+     */
+    record ExportFile(byte[] bytes, String baseName) {
+    }
+
+    /**
      * 渲染已保存的报表。
      *
      * @param reportId  报表 id
@@ -45,7 +56,7 @@ public interface RenderService {
     /**
      * 渲染并导出为 Excel 字节流。
      */
-    byte[] exportExcel(String reportId, Map<String, Object> params, String versionId);
+    ExportFile exportExcel(String reportId, Map<String, Object> params, String versionId);
 
     /**
      * 渲染并导出为 PDF 字节流。
@@ -56,12 +67,12 @@ public interface RenderService {
      * @param sheetIndex 只出**渲染结果**里的第几张 sheet，null / 越界 = 整本。
      *                   预览页的「打印」按钮打的就是这份 PDF，而它一次只显示一张工作表
      */
-    byte[] exportPdf(String reportId, Map<String, Object> params, Integer sheetIndex, String versionId);
+    ExportFile exportPdf(String reportId, Map<String, Object> params, Integer sheetIndex, String versionId);
 
     /**
      * 渲染并导出为 Word(.docx) 字节流。
      *
      * <p>同样是「先导出 xlsx 再转」，按 xlsx 的页面设置分页，版式与 PDF 一致。
      */
-    byte[] exportWord(String reportId, Map<String, Object> params, String versionId);
+    ExportFile exportWord(String reportId, Map<String, Object> params, String versionId);
 }

@@ -72,6 +72,24 @@ public class ReportContentDTO implements Serializable {
      */
     private List<DatasetLinkDTO> datasetLinks = new ArrayList<>();
 
+    /**
+     * 导出设置：下载下来的 Excel / PDF / Word 叫什么名字（报表名 + 主接口的若干字段值）。
+     *
+     * <p>与 {@link #splitMode} 一样是**报表级**的（不按 sheet 分）—— 一次导出只出一个文件。
+     */
+    private ExportConfigDTO exportConfig = new ExportConfigDTO();
+
+    /**
+     * 导出的文件名（不含扩展名）。没配过导出设置的老报表就是报表名本身。
+     *
+     * @param reportName 报表名
+     * @param row        主接口第一行，可以为 null（没有主接口、没配字段、或者一条数据都没取到）
+     */
+    public String exportFileName(String reportName, Map<String, Object> row) {
+        ExportConfigDTO cfg = exportConfig == null ? new ExportConfigDTO() : exportConfig;
+        return cfg.resolve(reportName, row);
+    }
+
     /** 取第 {@code sheetIndex} 张 sheet 实际生效的打印设置。 */
     public PageConfigDTO pageConfigOf(int sheetIndex) {
         PageConfigDTO own = pageConfigs == null ? null : pageConfigs.get(String.valueOf(sheetIndex));

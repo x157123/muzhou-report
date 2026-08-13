@@ -1,14 +1,11 @@
 package com.muzhou.report.controller;
 
-import com.muzhou.report.common.BizException;
 import com.muzhou.report.common.Result;
 import com.muzhou.report.dto.PreviewRequestDTO;
 import com.muzhou.report.dto.RenderRequestDTO;
 import com.muzhou.report.dto.RenderResultDTO;
 import com.muzhou.report.dto.ReportParamDTO;
-import com.muzhou.report.entity.MzReport;
 import com.muzhou.report.service.RenderService;
-import com.muzhou.report.service.ReportService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -40,8 +37,6 @@ public class RenderController {
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
 
     private final RenderService renderService;
-
-    private final ReportService reportService;
 
     /**
      * 渲染已保存的报表。
@@ -78,7 +73,7 @@ public class RenderController {
                                               @RequestBody(required = false) RenderRequestDTO body) {
         Map<String, Object> params = body == null ? Map.of() : body.getParams();
         String versionId = body == null ? null : body.getVersionId();
-        return download(renderService.exportExcel(id, params, versionId), id, ".xlsx", XLSX);
+        return download(renderService.exportExcel(id, params, versionId), ".xlsx", XLSX);
     }
 
     /**
@@ -96,7 +91,7 @@ public class RenderController {
         Map<String, Object> params = body == null ? Map.of() : body.getParams();
         Integer sheetIndex = body == null ? null : body.getSheetIndex();
         String versionId = body == null ? null : body.getVersionId();
-        return download(renderService.exportPdf(id, params, sheetIndex, versionId), id, ".pdf",
+        return download(renderService.exportPdf(id, params, sheetIndex, versionId), ".pdf",
                 MediaType.APPLICATION_PDF);
     }
 
@@ -111,24 +106,27 @@ public class RenderController {
                                              @RequestBody(required = false) RenderRequestDTO body) {
         Map<String, Object> params = body == null ? Map.of() : body.getParams();
         String versionId = body == null ? null : body.getVersionId();
-        return download(renderService.exportWord(id, params, versionId), id, ".docx", DOCX);
+        return download(renderService.exportWord(id, params, versionId), ".docx", DOCX);
     }
 
-    /** 以报表名 + 扩展名作为下载文件名（RFC 5987 编码，兼容中文名）。 */
-    private ResponseEntity<byte[]> download(byte[] bytes, String reportId, String ext, MediaType type) {
-        // 只要个名字，走 getById 而不是 getDetail —— 后者会连当前版本的 content(CLOB) 一起捞回来，
-        // 而这份内容刚刚渲染时已经读过一遍了，纯属白读
-        MzReport report = reportService.getById(reportId);
-        if (report == null) {
-            throw new BizException("报表不存在");
-        }
-        String fileName = (report.getName() == null || report.getName().isBlank() ? "report" : report.getName())
-                + ext;
-        String encoded = java.net.URLEncoder.encode(fileName, StandardCharsets.UTF_8).replace("+", "%20");
+    /**
+     * 下载响应：文件名 + 扩展名（RFC 5987 编码，兼容中文名）。
+     *
+     * <p>名字由渲染那一层拼好（{@code content.exportConfig}：报表名 + 主接口若干字段值，
+     * 见 CONTRACT §4）—— 拼它要用主接口那一行数据，只有那边拿得到。
+     *
+     * <p>额外放出 {@code Content-Disposition}：前端按 blob 收流，要从这个头上读文件名，
+     * 而它不是 CORS 的「简单响应头」，跨域部署时不显式放出来 JS 一个字都读不到。
+     */
+    private ResponseEntity<byte[]> download(RenderService.ExportFile file, String ext, MediaType type) {
+        String baseName = file.baseName() == null || file.baseName().isBlank() ? "report" : file.baseName();
+        String encoded = java.net.URLEncoder.encode(baseName + ext, StandardCharsets.UTF_8)
+                .replace("+", "%20");
 
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(type);
         headers.set(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename*=UTF-8''" + encoded);
-        return ResponseEntity.ok().headers(headers).body(bytes);
+        headers.set(HttpHeaders.ACCESS_CONTROL_EXPOSE_HEADERS, HttpHeaders.CONTENT_DISPOSITION);
+        return ResponseEntity.ok().headers(headers).body(file.bytes());
     }
 }

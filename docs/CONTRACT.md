@@ -380,7 +380,7 @@ status / is_default）—— 漏了后者，副本会是一张没有版式的报
 | PUT | `/version` | `ReportVersionSaveDTO{id, name, effectiveFrom, effectiveTo, matchRules, status, remark}` → `Boolean`。三者传 null 分别表示「左端不限」「右端不限」「无条件匹配」，都能被显式清空；两端都填时结束必须**严格晚于**开始（左闭右开，相等 = 永不生效），**版本之间的重叠不拦**；`matchRules` 是 JSON 数组串，存之前字段名空的条目会被丢掉，格式非法直接报错 |
 | POST | `/{id}/version/{versionId}/default` | 设为默认（停用中的会一并启用） → `Boolean` |
 | DELETE | `/version/{versionId}` | `Boolean`。**默认版本、最后一个启用版本不许删**；删掉时**这一版自己的数据集跟着删**（版本没了它们就是谁也解析不到的孤儿行） |
-| GET | `/{id}/version/{versionId}/check` | `List<String>` 体检：这一版引用的数据集/字段是否还在、**匹配条件引用的字段/参数是否还在**（字段名写错时这一版只是永远匹配不上，渲染既不报错也没有别的痕迹）、**数字大小比较的值是不是数字**（不是的话那一条被整个跳过，同样没痕迹），以及主接口 / 输出方式 / 父子关联与默认版本是否一致（不一致时以默认版本为准，只提示不拦） |
+| GET | `/{id}/version/{versionId}/check` | `List<String>` 体检：这一版引用的数据集/字段是否还在、**匹配条件引用的字段/参数是否还在**（字段名写错时这一版只是永远匹配不上，渲染既不报错也没有别的痕迹）、**数字大小比较的值是不是数字**（不是的话那一条被整个跳过，同样没痕迹）、**导出文件名引用的主接口字段是否还在**（没了只是文件名少一段，同样没痕迹），以及主接口 / 输出方式 / 父子关联与默认版本是否一致（不一致时以默认版本为准，只提示不拦） |
 
 ### 3.4 渲染 `/api/render`
 | POST | `/report/{id}` | `{params:{k:v}, versionId?}` → `RenderResult`（`params` 里的 `pageNo`/`pageSize` 驱动主接口翻页，见 §5） |
@@ -401,6 +401,11 @@ status / is_default）—— 漏了后者，副本会是一张没有版式的报
 
 > 导出接口失败时返回的仍是 HTTP 200 + `Result`（JSON），只是 `Content-Type` 为 `application/json`；
 > 前端按 blob 收流，需识别出这种「200 里装着错误结构」的情况，否则会把错误 JSON 当文件下载。
+
+> **文件名走 `Content-Disposition`**（`filename*=UTF-8''…`，另外显式放出
+> `Access-Control-Expose-Headers`，跨域部署时 JS 才读得到）：名字由 `content.exportConfig` 决定
+> ——报表名 + 主接口若干字段值（见 §4）。拼它要用主接口那一行数据，只有渲染那一层拿得到，
+> 所以**前端一律从响应头读**（`utils/sheet.js#fileNameFromResponse`），别在前端自己拼一份。
 
 ### 3.5 全局参数 `/api/param`
 
@@ -582,6 +587,19 @@ status / is_default）—— 漏了后者，副本会是一张没有版式的报
       "mappings": [{ "param": "orderId", "field": "id" }]
     }
   ],
+  // 导出设置（**报表级**，一次导出只出一个文件，所以不按 sheet 分）：
+  // 下载下来的 Excel / PDF / Word 叫什么名字 = 报表名（可关）+ 主接口若干字段值，用 separator 拼。
+  // 字段值取的是**主接口第一行**（按条拆单据时整批仍是一份文件，拿第一条代表整份）；
+  // 取不到值的字段整段跳过、不留空的连接符；`\ / : * ? " < > |` 与控制字符会被洗掉；
+  // 一段都拼不出来时退回报表名，再空才是 report。长度上限 120 字符。
+  // 老报表没有这一项 = 就叫报表名，行为与从前一致。
+  // 后端 dto/ExportConfigDTO 是这套规则的唯一实现（controller 只负责补扩展名 + 编 Content-Disposition），
+  // 前端 utils/sheet.js#exportFileName 是设计器里那个「示例」用的同一套拼法，改一处要改另一处。
+  "exportConfig": {
+    "withReportName": true,     // 文件名以报表名开头，默认 true
+    "fields": ["orderNo"],      // 拼进文件名的主接口字段，**按数组顺序**拼；空 = 只用报表名
+    "separator": "_"            // 各段之间的连接符，默认下划线（本身也会被洗一遍）
+  },
   // 报表级打印设置：设计器画布分页线、预览页浏览器打印(@page)、Excel/PDF 导出页面设置共用。
   // 没有在 pageConfigs 里单独设置过的 sheet 都用这一份（老报表也只有这一份）。
   "pageConfig": {
@@ -986,7 +1004,7 @@ api 类型数据集的**接口地址**里同样写 `${paramName}`，替换时对
 
 停用（`status=0`）的全局参数不参与合并 —— 等于它不存在，报表里同名的那条照常生效。
 
-第 3 条里包含**预览/设计器地址上的 query 参数**：前端把 `/preview/{id}?id=11233` 的 query
+第 3 条里包含**预览/设计器地址上的 query 参数**：前端把 `/view/{id}?id=11233` 的 query
 一并提交（`utils/params.js#queryParams`），**报表里没声明过的参数也照传** —— 于是数据集里
 `${id}`（SQL 绑定、接口地址替换都算）直接就能取到外部传来的值，嵌入方不必先在报表里
 声明一遍参数。声明过的参数则用 query 值作为参数表单的初值，用户仍可改。
@@ -1082,7 +1100,7 @@ N 次结果拼成一份，主表这一行的字段合进它的每条子行（同
 ## 8. 前端约定
 
 - 基础路径 `import.meta.env.VITE_API_BASE` 默认 `/api`，vite dev proxy → `http://localhost:8080`。
-- 路由：`/`→`/report`，`/datasource`，`/dataset`，`/report`，`/designer/:id`，`/preview/:id`。
+- 路由：`/`→`/report`，`/datasource`，`/dataset`，`/report`，`/designer/:id`，`/view/:id`（老地址 `/preview/:id` 重定向过去，query 原样带上）。
 - Pinia store：`stores/designer.js`（当前报表 content、cellConfigs、选中单元格、数据集列表）、`stores/app.js`。
 - api 模块：`api/datasource.js` `api/dataset.js` `api/report.js` `api/render.js`，均 `export` 与 §3 一一对应的函数。
 - UI 库：Element Plus（全量引入）；图标 `@element-plus/icons-vue`。

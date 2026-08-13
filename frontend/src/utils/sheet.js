@@ -49,6 +49,45 @@ export function createEmptySheet(index = 0) {
   }
 }
 
+/**
+ * 导出设置（报表级）：导出的 Excel / PDF / Word 叫什么名字 —— 报表名 + 主接口若干字段值，
+ * 用 `separator` 拼起来。见 CONTRACT §4，后端那份是 `dto/ExportConfigDTO`。
+ *
+ * 老报表没有这一项（等于「就叫报表名」），这里补全字段，弹窗里就不用到处判空。
+ */
+export function normalizeExportConfig(cfg) {
+  const c = cfg || {}
+  return {
+    withReportName: c.withReportName !== false,
+    fields: Array.isArray(c.fields) ? c.fields.filter((f) => !!f) : [],
+    separator: typeof c.separator === 'string' ? c.separator : '_'
+  }
+}
+
+/**
+ * 照 `exportConfig` 拼一个文件名（不含扩展名）—— 设计器里那个「示例」用它现算，
+ * 后端 `ExportConfigDTO#resolve` 是同一套规则（含洗掉 `\/:*?"<>|` 这些字符）。
+ *
+ * @param values 字段名 -> 值；设计器里没有真实数据，传字段的显示名当示意
+ */
+export function exportFileName(cfg, reportName, values = {}) {
+  const c = normalizeExportConfig(cfg)
+  const clean = (s) =>
+    String(s ?? '')
+      // 与后端 ExportConfigDTO#sanitize 一致：洗掉文件名里不能用的那几个字符，
+      // 换行/制表折成空格（后端连控制字符一并丢掉，效果相同）
+      .replace(/[\\\/:*?"<>|]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .replace(/\.+$/, '')
+      .trim()
+  const parts = []
+  if (c.withReportName) parts.push(clean(reportName))
+  c.fields.forEach((f) => parts.push(clean(values[f] ?? f)))
+  const name = parts.filter((p) => p).join(clean(c.separator))
+  return name || clean(reportName) || 'report'
+}
+
 /** 生成一份空白报表 content，见 docs/CONTRACT.md §4 */
 export function createEmptyContent() {
   return {
@@ -68,6 +107,8 @@ export function createEmptyContent() {
     sheetNameField: '',
     /** 父子关联（子接口查询）：[{name, master, child, mappings:[{param, field}]}] */
     datasetLinks: [],
+    /** 导出设置：下载下来的文件叫什么名字，见 normalizeExportConfig */
+    exportConfig: normalizeExportConfig(null),
     pageConfig: {
       paperSize: 'A4',
       orientation: 'portrait',
@@ -455,6 +496,28 @@ export function pruneSheetConfigs(content) {
   content.cellConfigs = remapCellConfigs(content.cellConfigs, dead)
   content.pageConfigs = remapPageConfigs(content.pageConfigs, dead)
   return content
+}
+
+/**
+ * 从响应头 `Content-Disposition` 里取文件名 —— **导出下载一律用它**：
+ * 文件名由后端按 `content.exportConfig` 拼（报表名 + 主接口若干字段值，见 CONTRACT §4），
+ * 前端手上没有那份数据，自己拼只会拼成另一个名字。
+ *
+ * 认两种写法：`filename*=UTF-8''%E2%80%A6`（后端发的这种，中文名要它）与 `filename="x.xlsx"`。
+ * 读不到就退回 `fallback`（跨域部署时后端没放出这个响应头的话就会走到这一步）。
+ */
+export function fileNameFromResponse(res, fallback) {
+  const raw = res?.headers?.['content-disposition'] || res?.headers?.get?.('content-disposition') || ''
+  const star = /filename\*=UTF-8''([^;]+)/i.exec(raw)
+  if (star) {
+    try {
+      return decodeURIComponent(star[1].trim())
+    } catch (e) {
+      // 编码坏了就当没有，退回 fallback
+    }
+  }
+  const plain = /filename="?([^";]+)"?/i.exec(raw)
+  return plain ? plain[1].trim() : fallback
 }
 
 /** 触发浏览器下载 */

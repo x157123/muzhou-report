@@ -47,11 +47,13 @@ const routes = [
     meta: { title: '报表设计器', fullscreen: true }
   },
   {
-    path: '/preview/:id',
+    path: '/view/:id',
     name: 'Preview',
     component: () => import('@/views/preview/ReportPreview.vue'),
     meta: { title: '报表预览', fullscreen: true }
   },
+  // 老地址：外部系统 / 已发出去的链接还指着 /preview/{id}，原样带着 query 转过去
+  { path: '/preview/:id', redirect: (to) => ({ path: '/view/' + to.params.id, query: to.query }) },
   { path: '/:pathMatch(.*)*', redirect: '/report' }
 ]
 

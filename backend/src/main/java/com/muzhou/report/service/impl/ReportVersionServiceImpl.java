@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.muzhou.report.common.BizException;
 import com.muzhou.report.dto.CellConfigDTO;
 import com.muzhou.report.dto.DatasetLinkDTO;
+import com.muzhou.report.dto.ExportConfigDTO;
 import com.muzhou.report.dto.ReportContentDTO;
 import com.muzhou.report.dto.ReportVersionSaveDTO;
 import com.muzhou.report.dto.VersionMatchRuleDTO;
@@ -520,7 +521,27 @@ public class ReportVersionServiceImpl extends ServiceImpl<MzReportVersionMapper,
             }
         }
 
-        // 三、与默认版本之间那几项「按默认版本为准」的设置是否一致 ——
+        // 三、导出文件名引用的主接口字段还在不在。同匹配条件那一项：字段没了只是文件名少一段，
+        // 既不报错也没有痕迹 —— 一批单据导出来全叫同一个名字时没人想得到是这里
+        ExportConfigDTO exportCfg = content.getExportConfig();
+        if (exportCfg != null && exportCfg.needsRow()) {
+            String primary = content.getPrimaryDataset();
+            if (!StringUtils.hasText(primary)) {
+                problems.add("导出文件名要取主接口字段，但这一版没设主接口");
+            } else {
+                Set<String> primaryFields = fieldsByCode.computeIfAbsent(primary,
+                        c -> loadFieldNames(reportId, target.getId(), c));
+                for (String field : exportCfg.getFields()) {
+                    if (StringUtils.hasText(field) && primaryFields != null
+                            && !primaryFields.contains(field.toLowerCase())) {
+                        problems.add("主接口[" + primary + "]里没有字段[" + field
+                                + "]了，导出文件名会少这一段");
+                    }
+                }
+            }
+        }
+
+        // 四、与默认版本之间那几项「按默认版本为准」的设置是否一致 ——
         // 不一致不是错，但这一版上配的那份不会生效，得让人知道
         MzReportVersion base = detail(reportId, null);
         if (!Objects.equals(base.getId(), target.getId())) {

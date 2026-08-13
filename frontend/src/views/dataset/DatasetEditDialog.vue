@@ -124,7 +124,7 @@
             <div class="text-muted" style="margin-top: 6px">
               地址里的 <span class="mono">${参数名}</span> 会做 URL 编码后替换，点「解析字段」可自动列出来。
               取值优先用下方参数页签里的值，<b>报表预览地址上的同名 query 参数会覆盖它</b> ——
-              例如预览页打开 <span class="mono">/preview/{报表id}?id=11233</span>，这里的
+              例如预览页打开 <span class="mono">/view/{报表id}?id=11233</span>，这里的
               <span class="mono">${id}</span> 拿到的就是 11233。
             </div>
           </div>
