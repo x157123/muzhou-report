@@ -10,6 +10,7 @@ import '@/styles/index.css'
 
 import App from './App.vue'
 import router from './router'
+import { loadCustomFonts } from '@/utils/fontList'
 
 const app = createApp(App)
 
@@ -20,4 +21,7 @@ for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
 app.use(createPinia())
 app.use(router)
 app.use(ElementPlus, { locale: zhCn })
-app.mount('#app')
+
+// 上传字体要赶在挂载之前并进字体清单、注册 @font-face：设计器一挂载就要按字体量文字算行高
+// （utils/wrapHeight.js），字体还没到位的话量的是兜底字体的字宽。它自己不会抛，失败顶多少几款字体
+loadCustomFonts().finally(() => app.mount('#app'))

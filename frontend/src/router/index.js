@@ -30,6 +30,13 @@ const routes = [
         name: 'ParamList',
         component: () => import('@/views/param/ParamList.vue'),
         meta: { title: '参数管理', icon: 'Key' }
+      },
+      {
+        // 上传字体：服务器上没有的字体传一份上来，PDF 才印得出它，见 CONTRACT §3.6
+        path: 'font',
+        name: 'FontList',
+        component: () => import('@/views/font/FontList.vue'),
+        meta: { title: '字体管理', icon: 'EditPen' }
       }
     ]
   },

@@ -96,6 +96,35 @@ public class MzProperties {
     /** 图片单元格（type=img / base64）导出时的取图配置。 */
     private Image image = new Image();
 
+    /** 上传字体的存放配置。 */
+    private Font font = new Font();
+
+    /**
+     * 上传字体配置。见 {@link com.muzhou.report.service.FontService}。
+     *
+     * <p>字体文件的正本在库里（见 {@code MzFont#fileData}），这里配的是各节点落缓存的地方。
+     */
+    @Data
+    public static class Font {
+
+        /**
+         * 字体文件的**本地缓存目录**，相对路径按进程工作目录解析。
+         *
+         * <p>PDF 引擎要的是一个路径而不是一段字节，所以各节点第一次用到某款字体时会把它从库里
+         * 落一份到这里。**删了不会丢东西**（正本在库里，下次用到自动重新落），多节点部署时
+         * 各节点各配各的、不需要共享存储。
+         */
+        private String dir = "./data/fonts";
+
+        /**
+         * 单个字体文件的字节上限。
+         *
+         * <p>中文字体动辄十几 MB（思源黑体全字集 20MB+），所以不能照图片那个 5MB 收；
+         * 但也得有个上限，这个目录是无限往里堆的。
+         */
+        private long maxBytes = 30L * 1024 * 1024;
+    }
+
     /**
      * 图片单元格取图配置。见 {@link com.muzhou.report.export.ImageLoader}。
      *

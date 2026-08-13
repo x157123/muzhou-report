@@ -38,6 +38,8 @@ import org.openpdf.text.pdf.BaseFont;
 import org.openpdf.text.pdf.PdfContentByte;
 import org.openpdf.text.pdf.PdfGState;
 import org.openpdf.text.pdf.PdfWriter;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Component;
 
 import java.awt.Color;
@@ -52,7 +54,9 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.IntFunction;
 
 /**
@@ -68,13 +72,17 @@ import java.util.function.IntFunction;
  *
  * <p><b>字体</b>是唯一的环境依赖：PDF 必须内嵌字体才能显示中文，而 JDK 不带中文字体。
  * 默认在系统字体目录里探测（Windows 的微软雅黑/宋体、Linux 的文泉驿/Noto、macOS 的苹方），
- * 探测不到时用 {@code muzhou.report.pdf.font-path} 指一个字体文件。
+ * 探测不到时用 {@code muzhou.report.pdf.font-path} 指一个字体文件。这一款是**兜底**字体：
+ * 单元格上设了字体名的按 {@link PdfFonts} 逐格解析（上传字体 → 系统别名 → 兜底），
+ * 页头页尾与水印没有「这一格是什么字体」可问，用的一直是兜底那款。
  *
  * <p>页头页尾从 xlsx 的页眉页脚读回来逐页画（{@link #drawHeaderFooter}），水印则只能由调用方
  * 额外传一份 {@code PageConfigDTO} —— xlsx 里没有水印这个概念，见 {@link #convert(byte[], IntFunction)}。
  *
- * <p>已知边界：只还原报表用得到的那部分 Excel 表现 —— 底色、细边框、字体（名称由统一字体
- * 代替，字号/粗体/斜体/颜色保留）、对齐、合并、自动换行、行高列宽、缩放与分页，
+ * <p>已知边界：只还原报表用得到的那部分 Excel 表现 —— 底色、细边框、字体（字体名解析得到
+ * 才用，解析不到退回兜底那款；字号/颜色照搬，**粗体/斜体一律靠描边与倾斜模拟** ——
+ * 一个字体名对应的是一个字体文件而不是一整个字族，手上没有它 Bold 的那一款）、
+ * 对齐、合并、自动换行、行高列宽、缩放与分页，
  * 以及锚在单元格上的图片（{@link #readImages}，报表的图片单元格出的就是这种）。
  * 渐变填充、条件格式、图表、浮动摆放的图片不支持。
  */
@@ -135,11 +143,36 @@ public class PdfExporter {
 
     private final MzProperties props;
 
+    /**
+     * 上传字体的来源，没有这个能力（或测试里直接 {@code new}）时为 null，
+     * 此时逐格字体只剩 {@link PdfFonts} 里那份系统别名可查。
+     */
+    private final FontProvider fontProvider;
+
     /** 惰性加载并常驻的正文字体：探测 + 解析字体文件不便宜，一次就够。 */
     private volatile BaseFont baseFont;
 
+    /**
+     * 路径 -> 已解析字体，**跨导出常驻**。解析一个字体文件要几十到几百毫秒，
+     * 一张报表用到三款字体就是三次，每导一次都重来一遍的话，耗时全花在这儿。
+     *
+     * <p>值用 {@link Optional} 是因为 ConcurrentHashMap 不收 null，而「这个路径加载不了」
+     * 恰恰是最该记住的结论 —— 不记的话，一份坏字体会在每一格上重试一次。
+     *
+     * <p>不必做失效：文件名按 id 生成、id 不复用，字体的文件路径一经写入就不再变
+     * （换文件走「删了重传」，见 {@code FontService#update}）。
+     */
+    private final Map<String, Optional<BaseFont>> loadedFonts = new ConcurrentHashMap<>();
+
+    /** 测试与「没有字体管理能力」的部署用：不认识上传字体，行为等同于改动之前。 */
     public PdfExporter(MzProperties props) {
+        this(props, null);
+    }
+
+    @Autowired
+    public PdfExporter(MzProperties props, @Nullable FontProvider fontProvider) {
         this.props = props;
+        this.fontProvider = fontProvider;
     }
 
     /**
@@ -228,7 +261,8 @@ public class PdfExporter {
         try (ByteArrayOutputStream out = new ByteArrayOutputStream()) {
 
             long fontStart = System.currentTimeMillis();
-            BaseFont font = font();
+            // 上传字体是惰性问的：PdfFonts 只为模板里真出现过的那几个字体名各问一次（见 FontProvider）
+            PdfFonts fonts = new PdfFonts(fontProvider, this::loadFont, font());
             long fontMs = System.currentTimeMillis() - fontStart;
             DataFormatter formatter = new DataFormatter(Locale.CHINA);
             FormulaEvaluator evaluator = wb.getCreationHelper().createFormulaEvaluator();
@@ -244,8 +278,8 @@ public class PdfExporter {
                     // 撑高要放在分页之前：行高一变，能塞进一页的行数就跟着变。
                     // 行网格又要排在撑高之后 —— 文字块摆在格子的哪个位置，得等行高定下来
                     long t = System.currentTimeMillis();
-                    growWrapRows(geom, font, formatter, evaluator);
-                    buildLineGrids(geom, font, formatter, evaluator);
+                    growWrapRows(geom, fonts, formatter, evaluator);
+                    buildLineGrids(geom, fonts, formatter, evaluator);
                     growMs += System.currentTimeMillis() - t;
                     geom.watermark = cfg == null ? null : cfg.getWatermark();
                     geom.docStarts = docStartRows(docBreaksOf == null ? null : docBreaksOf.apply(i),
@@ -274,12 +308,12 @@ public class PdfExporter {
                     doc.setPageSize(pages.get(i).geom.paper);
                     doc.newPage();
                 }
-                drawPage(writer.getDirectContent(), pages.get(i), font, formatter, evaluator);
-                drawHeaderFooter(writer.getDirectContent(), pages.get(i), font,
+                drawPage(writer.getDirectContent(), pages.get(i), fonts, formatter, evaluator);
+                drawHeaderFooter(writer.getDirectContent(), pages.get(i), fonts.base(),
                         new HeaderFooterText.Ctx(numbering[i][0], numbering[i][1], names[i], now));
                 // 水印画在最后 = 压在内容之上。放在内容下面的话，凡是设过底色的单元格
                 // （报表的表头几乎都设了）就会把水印盖掉，各处表现还不一致
-                drawWatermark(writer.getDirectContent(), pages.get(i), font);
+                drawWatermark(writer.getDirectContent(), pages.get(i), fonts.base());
                 // 内容是直接画在 direct content 上的，OpenPDF 判断不出这一页有东西，
                 // 不显式标记非空的话空页会被丢掉（末页尤其明显）。
                 writer.setPageEmpty(false);
@@ -870,7 +904,7 @@ public class PdfExporter {
      * <p>文字行网格不在这里记：它要用最终的行高才算得出来（行高定不下来就不知道文字块摆在哪儿），
      * 所以另起一步 {@link #buildLineGrids}。
      */
-    private void growWrapRows(Geom g, BaseFont font, DataFormatter formatter, FormulaEvaluator evaluator) {
+    private void growWrapRows(Geom g, PdfFonts fonts, DataFormatter formatter, FormulaEvaluator evaluator) {
         float limit = g.availHeight() * MAX_WRAP_PAGES;
         for (int r = g.r0; r <= g.r1; r++) {
             Row row = g.sheet.getRow(r);
@@ -887,7 +921,7 @@ public class PdfExporter {
                 if (style == null || !style.getWrapText()) {
                     continue;
                 }
-                Measured m = measure(g, r, c, cell, style, font, formatter, evaluator);
+                Measured m = measure(g, r, c, cell, style, fonts, formatter, evaluator);
                 if (m == null || m.count() <= 1) {
                     continue;
                 }
@@ -909,7 +943,7 @@ public class PdfExporter {
      * <p><b>这一行里每一格都要算</b>，不只是撑得最高的那一格：切口是整行一刀下去的，
      * 只躲开最高那格的文字，旁边那格（比如短短一个序号）照样会被从中间切成两半。
      */
-    private void buildLineGrids(Geom g, BaseFont font, DataFormatter formatter, FormulaEvaluator evaluator) {
+    private void buildLineGrids(Geom g, PdfFonts fonts, DataFormatter formatter, FormulaEvaluator evaluator) {
         float avail = g.bodyAvail();
         for (int r = g.r0; r <= g.r1; r++) {
             Row row = g.sheet.getRow(r);
@@ -924,7 +958,7 @@ public class PdfExporter {
                     continue;
                 }
                 XSSFCellStyle style = (XSSFCellStyle) cell.getCellStyle();
-                Measured m = measure(g, r, c, cell, style, font, formatter, evaluator);
+                Measured m = measure(g, r, c, cell, style, fonts, formatter, evaluator);
                 if (m == null) {
                     continue;
                 }
@@ -951,9 +985,15 @@ public class PdfExporter {
     private record Measured(int count, float block, float lineHeight, float face) {
     }
 
-    /** 量一格文字（跨行合并、空格子返回 null）。开了自动换行的按格宽折行，没开的只按换行符分段。 */
+    /**
+     * 量一格文字（跨行合并、空格子返回 null）。开了自动换行的按格宽折行，没开的只按换行符分段。
+     *
+     * <p>字体必须与 {@link #drawText} 取自同一处（都是 {@code fonts.of(style)}）：这里算出
+     * 多高，那边就画多高 —— 两边用的不是同一款字体的话，折出来的行数就对不上，
+     * 撑出来的行高与实际画的文字差一截，垂直居中的文字上下两头会被切掉。
+     */
     private Measured measure(Geom g, int r, int c, Cell cell, XSSFCellStyle style,
-                             BaseFont font, DataFormatter formatter, FormulaEvaluator evaluator) {
+                             PdfFonts fonts, DataFormatter formatter, FormulaEvaluator evaluator) {
         CellRangeAddress region = regionAt(g, r, c);
         if (region != null && (region.getLastRow() > region.getFirstRow()
                 || region.getFirstRow() != r || region.getFirstColumn() != c)) {
@@ -969,9 +1009,10 @@ public class PdfExporter {
              i <= Math.min(region == null ? c : region.getLastColumn(), g.c1); i++) {
             width += g.colWidth[i - g.c0];
         }
-        // 字号、可用宽度都与 drawText 取同一个值（colWidth 已经乘过缩放）
+        // 字体、字号、可用宽度都与 drawText 取同一个值（colWidth 已经乘过缩放）
         XSSFFont f = style == null ? null : style.getFont();
         float size = (f == null || f.getFontHeightInPoints() <= 0 ? 11 : f.getFontHeightInPoints()) * g.scale;
+        BaseFont font = fonts.of(style);
         List<String> lines = List.of(text.split("\r\n|\r|\n", -1));
         if (style != null && style.getWrapText()) {
             lines = wrapLines(lines, font, size, width - 2 * PADDING);
@@ -1130,7 +1171,7 @@ public class PdfExporter {
      * <p>标题行是**每页重画一遍**的那几行（{@code _xlnm.Print_Titles}），它已经从分页的行流里
      * 摘掉了（见 {@link Geom#paginate}），所以两段各画各的、行区间不会重叠。
      */
-    private void drawPage(PdfContentByte cb, Page page, BaseFont font,
+    private void drawPage(PdfContentByte cb, Page page, PdfFonts fonts,
                           DataFormatter formatter, FormulaEvaluator evaluator) {
         Geom g = page.geom();
         float top = g.paper.getHeight() - g.marginTop;
@@ -1138,14 +1179,14 @@ public class PdfExporter {
         if (g.titleEnabled()) {
             float titleHeight = g.titleHeight();
             drawBand(cb, page, new Band(g.r0, g.titleR1, top, top, top - titleHeight),
-                    font, formatter, evaluator);
+                    fonts, formatter, evaluator);
             top -= titleHeight;
         }
         // 接着上一页往下印的超高行：把它的**上边界**抬到正文区外面去，露出来的正好是还没印的那一截。
         // 格子照旧按整行的几何画（文字的行距、垂直居中都算在整行上），越界的部分由裁剪挡掉 ——
         // 所以裁的是 top（这一页正文的顶边）而不是抬高后的 top + skip
         drawBand(cb, page, new Band(page.r0(), page.r1(), top + page.skip(), top, top - page.height()),
-                font, formatter, evaluator);
+                fonts, formatter, evaluator);
     }
 
     /**
@@ -1154,7 +1195,7 @@ public class PdfExporter {
      * <p>列范围恒是本页那一批列。一页由「标题行」和「正文」两段拼起来，两段用的是同一套画法，
      * 区别只在从哪一行起、上下边界在哪。
      */
-    private void drawBand(PdfContentByte cb, Page page, Band band, BaseFont font,
+    private void drawBand(PdfContentByte cb, Page page, Band band, PdfFonts fonts,
                           DataFormatter formatter, FormulaEvaluator evaluator) {
         Geom g = page.geom();
         int cols = page.c1() - page.c0() + 1;
@@ -1198,7 +1239,7 @@ public class PdfExporter {
             float[] rect = rect(page, xs, ys, band, m.getFirstRow(), m.getLastRow(),
                     m.getFirstColumn(), m.getLastColumn());
             drawCell(cb, page, band, m.getFirstRow(), m.getFirstColumn(), rect,
-                    font, formatter, evaluator, false);
+                    fonts, formatter, evaluator, false);
         }
 
         for (int r = band.r0(); r <= band.r1(); r++) {
@@ -1210,7 +1251,7 @@ public class PdfExporter {
                     continue;
                 }
                 float[] rect = rect(page, xs, ys, band, r, r, c, c);
-                drawCell(cb, page, band, r, c, rect, font, formatter, evaluator, true);
+                drawCell(cb, page, band, r, c, rect, fonts, formatter, evaluator, true);
             }
         }
 
@@ -1384,7 +1425,7 @@ public class PdfExporter {
      *
      * @param overflow 文字超出格宽时是否允许压到相邻空格上（Excel 的默认表现）；合并区不需要
      */
-    private void drawCell(PdfContentByte cb, Page page, Band band, int r, int c, float[] rect, BaseFont font,
+    private void drawCell(PdfContentByte cb, Page page, Band band, int r, int c, float[] rect, PdfFonts fonts,
                           DataFormatter formatter, FormulaEvaluator evaluator, boolean overflow) {
         Row row = page.geom().sheet.getRow(r);
         Cell cell = row == null ? null : row.getCell(c);
@@ -1415,7 +1456,7 @@ public class PdfExporter {
 
         String text = textOf(cell, formatter, evaluator);
         if (!text.isEmpty()) {
-            drawText(cb, page, band, r, c, text, style, font, left, bottom, right, top, overflow);
+            drawText(cb, page, band, r, c, text, style, fonts, left, bottom, right, top, overflow);
         }
     }
 
@@ -1442,14 +1483,15 @@ public class PdfExporter {
     /**
      * 画单元格文字：按对齐方式定位，裁剪到（可能扩展过的）格子范围内，粗体/斜体用描边和倾斜模拟。
      *
-     * <p>字体统一用探测到的那一款，不还原 Excel 里各格设置的字体名 —— 逐格加载字体会让 PDF
-     * 体积和导出耗时都失控，而报表里字体名的差异远没有字号/粗细/颜色重要。
+     * <p>字体按这一格的字体名解析（{@link PdfFonts}），解析不到才退回探测到的那款 ——
+     * 必须与 {@link #measure} 取自同一处，否则算出来的行高和真画出来的文字对不上。
      */
     private void drawText(PdfContentByte cb, Page page, Band band, int r, int c, String text, XSSFCellStyle style,
-                          BaseFont font, float left, float bottom, float right, float top, boolean overflow) {
+                          PdfFonts fonts, float left, float bottom, float right, float top, boolean overflow) {
         XSSFFont f = style == null ? null : style.getFont();
         float size = (f == null || f.getFontHeightInPoints() <= 0 ? 11 : f.getFontHeightInPoints())
                 * page.geom().scale;
+        BaseFont font = fonts.of(style);
         boolean bold = f != null && f.getBold();
         boolean italic = f != null && f.getItalic();
         Color color = f == null ? null : toColor(f.getXSSFColor());
@@ -1696,7 +1738,30 @@ public class PdfExporter {
     /* ---------------------------------- 字体 ---------------------------------- */
 
     /**
-     * 取正文字体：配置的优先，其次按系统字体目录探测，都没有就退回 Helvetica。
+     * 按路径加载一款字体，加载不了返回 null（由 {@link PdfFonts} 决定退到哪一级）。
+     *
+     * <p>结果**连失败一起**缓存：一份坏字体不缓存的话会在每一格上重试一次，一张 500 行的报表
+     * 就是几千次「打开文件 → 解析 → 抛异常」。{@code path} 里含 .ttc 的序号，
+     * 所以同一个文件的不同款各占一个 key，正是想要的。
+     */
+    private BaseFont loadFont(String path) {
+        return loadedFonts.computeIfAbsent(path, p -> {
+            try {
+                BaseFont font = PdfFonts.load(p);
+                log.debug("PDF 加载字体: {}", p);
+                return Optional.of(font);
+            } catch (Exception e) {
+                log.warn("字体[{}]加载失败，这些格子退回默认字体: {}", p, e.getMessage());
+                return Optional.empty();
+            }
+        }).orElse(null);
+    }
+
+    /**
+     * 取**兜底**正文字体：配置的优先，其次按系统字体目录探测，都没有就退回 Helvetica。
+     *
+     * <p>单元格上设了字体名的不走这里，见 {@link PdfFonts}；页头页尾、水印没有「这一格是什么
+     * 字体」可问，用的一直是这一款。
      *
      * <p>退回 Helvetica 时中文会显示不出来，但导出本身不该因此失败 —— 报表可能全是英文数字，
      * 而且「导出了但中文是空的」比「导出直接报错」更容易让人定位到是字体问题。

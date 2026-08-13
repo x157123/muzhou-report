@@ -195,6 +195,40 @@ CREATE UNIQUE INDEX IF NOT EXISTS "PRIMARY_KEY_MP" ON public.mz_param (id);
 CREATE UNIQUE INDEX IF NOT EXISTS uk_param_name ON public.mz_param (param_name);
 
 
+-- public.mz_font 定义
+--
+-- 上传字体：一份系统级的字体，所有报表共用（见 CONTRACT §2 mz_font / §3.6）。
+-- font_name 就是单元格 ff 里存的那个名字。
+--
+-- 字体文件**存在库里**（file_data）：多节点部署时，库是各节点唯一共享的东西 ——
+-- 存本地磁盘的话，在 A 节点传的字体，B 节点导出时找不到文件、静默退回默认字体，
+-- 于是「同一张报表导两次字体不一样」。各节点用到时再把它落成本地缓存文件
+-- （muzhou.report.font.dir，PDF 引擎要的是一个路径），见 FontServiceImpl#pathOf。
+-- 切 MySQL 时 blob -> LONGBLOB。
+
+CREATE TABLE IF NOT EXISTS public.mz_font (
+                                 id character varying(32) NOT NULL,
+                                 font_name character varying(64) NOT NULL,
+                                 file_name character varying(255),
+                                 file_data blob,
+                                 font_format character varying(10),
+                                 ttc_index integer DEFAULT 0,
+                                 file_size bigint,
+                                 remark character varying(500),
+                                 status integer DEFAULT 1,
+                                 deleted integer DEFAULT 0,
+                                 create_time timestamp,
+                                 update_time timestamp
+);
+-- 早先这张表存的是 file_path（字体文件落在本地磁盘上），多节点下不成立，改成把文件存进库。
+-- 新增列一律 IF NOT EXISTS，老库跑到这儿是空跑
+ALTER TABLE public.mz_font ADD COLUMN IF NOT EXISTS file_data blob;
+CREATE UNIQUE INDEX IF NOT EXISTS "PRIMARY_KEY_MF" ON public.mz_font (id);
+-- 同 uk_param_name：逻辑删除不会把行删掉，这个唯一索引连已删字体一起管着，
+-- 删掉再传同名字体会撞唯一键（MzFontMapper#purgeDeletedByName）
+CREATE UNIQUE INDEX IF NOT EXISTS uk_font_name ON public.mz_font (font_name);
+
+
 -- public.order_items 定义
 
 -- Drop table
