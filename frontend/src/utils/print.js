@@ -41,6 +41,16 @@ export const DEFAULT_COL_WIDTH = 73
 export const DEFAULT_ROW_HEIGHT = 19
 
 /**
+ * 手输行高列宽的范围（px）。上限与 FortuneSheet 右键菜单里那两项一致（545 / 2038），
+ * 两个入口对同一件事不该给出不同的上限；545 也正好是 Excel 的行高上限 409.5pt
+ * —— 再高存不进 xlsx，而 PDF / Word 都是从 xlsx 读回来的。
+ * 下限取 1 而不是 0 —— 0 在 FortuneSheet 里是「隐藏」，那是另一件事，不该由填尺寸填出来。
+ */
+export const MIN_CELL_SIZE = 1
+export const MAX_ROW_HEIGHT = 545
+export const MAX_COL_WIDTH = 2038
+
+/**
  * 页头/页尾的行距系数。后端 `PageConfigDTO.LINE_HEIGHT`、`PdfExporter`、`WordExporter`
  * 用的是同一个数 —— 各处算出同一个「页头占多高」，分页位置才对得上。
  */
@@ -332,6 +342,51 @@ export function cellSizePx(sheet, r, c) {
   let height = 0
   for (let i = span.r; i < span.r + span.rs; i += 1) height += rowHeight(sheet, i)
   return { width, height, rowSpan: span.rs, colSpan: span.cs }
+}
+
+/**
+ * 属性面板里手输尺寸后要写回哪些行高列宽。
+ *
+ * 面板上显示的是**整块**的尺寸（落在合并区里时是整个合并块），所以写回时也要把这个数
+ * **摊回**它占住的那几行几列，按各自现有尺寸等比例分。余数一律落在最后一行/列上 ——
+ * 逐个四舍五入的话三列各差 1px，加起来对不上用户输入的那个数，面板上显示出来的还是老值，
+ * 看着像是没生效。现有尺寸全是 0（整块隐藏了）时平均分。
+ *
+ * width / height 传 null（或非正数）表示这一维不动。
+ *
+ * @returns {{widths: Record<number,number>, heights: Record<number,number>}} 可直接喂给
+ *          FortuneSheet 的 setColumnWidth / setRowHeight
+ */
+export function resizeCellPlan(sheet, r, c, size) {
+  const span = mergeSpanAt(sheet, r, c)
+  return {
+    widths: spreadSize(span.c, span.cs, size?.width, (i) => colWidth(sheet, i), MAX_COL_WIDTH),
+    heights: spreadSize(span.r, span.rs, size?.height, (i) => rowHeight(sheet, i), MAX_ROW_HEIGHT)
+  }
+}
+
+/** 把 total 按现有尺寸等比摊到 [start, start+count) 这几行/列上，每份落在 [MIN_CELL_SIZE, max] 内 */
+function spreadSize(start, count, total, currentOf, max) {
+  const out = {}
+  if (!(total > 0) || count < 1) return out
+  const target = Math.min(Math.max(Math.round(total), MIN_CELL_SIZE * count), max * count)
+  const cur = []
+  let sum = 0
+  for (let i = 0; i < count; i += 1) {
+    const v = Math.max(numOr(currentOf(start + i), 0), 0)
+    cur.push(v)
+    sum += v
+  }
+  let left = target
+  for (let i = 0; i < count - 1; i += 1) {
+    const share = sum > 0 ? Math.round((target * cur[i]) / sum) : Math.round(target / count)
+    // 留够后面每一份的下限，免得最后一份被挤成负数
+    const hi = Math.min(max, left - MIN_CELL_SIZE * (count - 1 - i))
+    out[start + i] = Math.min(Math.max(share, MIN_CELL_SIZE), hi)
+    left -= out[start + i]
+  }
+  out[start + count - 1] = Math.min(Math.max(left, MIN_CELL_SIZE), max)
+  return out
 }
 
 /** (r,c) 所属的合并区域；未合并则返回它自己 */

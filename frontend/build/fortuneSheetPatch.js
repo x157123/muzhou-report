@@ -29,7 +29,28 @@
  *    **另一维**的值一并写回 Toolbar；而重开后 `changeColor/changeStyle` 是复位过的默认值，
  *    于是「选完红色关掉菜单、重开再挑一种线型」得到的是黑色边框。② 把初值接上之后这条自然消失。
  *
- * ── 二、字号清单补上 6 / 7 / 8
+ * ── 二、右键菜单的「行高」「列宽」对**选中的格子**也生效
+ *
+ * 这两项（`set-row-height` / `set-column-width`）官方本来就有，输入框、批量写回选区、
+ * 校验都是现成的 —— 唯独**只在整行/整列选区上才渲染**（`row_select` / `column_select`，
+ * 也就是必须先点行号或列标）。而报表设计时最顺手的是「框选一片格子 → 右键 → 把这几行调成同一高度」，
+ * 那时两项都不出现，用户以为没有这个功能，只能一行行拖。
+ *
+ * 改法是把条件反过来：**整列选区不给「行高」、整行选区不给「列宽」**（Excel 也是这样：
+ * 右键列标只给列宽），其余情况两项都给。整行/整列选区上的表现与改之前一字不差，
+ * 多出来的只有「框选格子」这一种情况 —— 写回的范围就是选区覆盖的那几行/那几列。
+ *
+ * **输入框的默认值改成选区的平均行高/列宽**（`mzAvgLen`，四舍五入取整）。原文是「各行一样高就
+ * 显示那个高度、只要有一行不一样就**显示空**」，而框选一片格子时高矮不齐才是常态，于是那个框
+ * 十有八九是空的 —— 想微调（比如「都调到 30」）得先自己去别处看现在是多少。取平均至少给出一个
+ * 有意义的起点，回车即用也不会把版式改乱多少。它判「齐不齐」用的 `height_move` 是**带缩放**的
+ * 像素值，改用 `config.rowlen` / `columnlen` 直接算，与我们自己那份 `utils/print.js#rowHeight` 同源。
+ *
+ * 顺带两处：**输入框从 40px 放宽到 64px**（写死在行内 style 里，40px 装不下三位数 —— 默认列宽
+ * 就是 73，一进去就看不全）；**「列宽」输入框的 `max`** 原文抄的是行高那份的 545，而它自己的
+ * 校验放到 2038（见同一段的 `parseInt(targetColWidth, 10) > 2038`），于是宽表的列用微调按钮点不上去。
+ *
+ * ── 三、字号清单补上 6 / 7 / 8
  *
  * 工具栏字号下拉的那串数字是**写死在 JSX 里的字面量数组**（既不在 locale 里、也不是 settings 项，
  * 所以不像字体清单那样能从 `utils/fontList.js` 那条路换掉），最小只到 9。报表上的备注、
@@ -146,6 +167,119 @@ var CustomBorder = function CustomBorder(_ref) {
           onPick: function onPick(color, style) {`
   },
   {
+    name: '右键菜单：选中格子时也给出「行高」',
+    from: `      return ((_context$luckysheet_s9 = context.luckysheet_select_save) === null || _context$luckysheet_s9 === void 0 ? void 0 : _context$luckysheet_s9.some(function (section) {
+        return section.row_select;
+      })) ? (/*#__PURE__*/React.createElement(Menu, {
+        key: "set-row-height",`,
+    to: `      return !(context.luckysheet_select_save || []).some(function (section) {
+        return section.column_select;
+      }) ? (/*#__PURE__*/React.createElement(Menu, {
+        key: "set-row-height",`
+  },
+  {
+    name: '右键菜单：选中格子时也给出「列宽」',
+    from: `      return ((_context$luckysheet_s1 = context.luckysheet_select_save) === null || _context$luckysheet_s1 === void 0 ? void 0 : _context$luckysheet_s1.some(function (section) {
+        return section.column_select;
+      })) ? (/*#__PURE__*/React.createElement(Menu, {`,
+    to: `      return !(context.luckysheet_select_save || []).some(function (section) {
+        return section.row_select;
+      }) ? (/*#__PURE__*/React.createElement(Menu, {`
+  },
+  {
+    name: '右键菜单：算选区平均行高/列宽的辅助函数',
+    from: `var ContextMenu = function ContextMenu() {`,
+    to: `/**
+ * 选区覆盖的那几行（那几列）的平均行高（列宽），四舍五入取整。
+ * lens 是当前工作表的 config.rowlen / config.columnlen，没记过的行列按默认值算。
+ */
+function mzAvgLen(sections, key, lens, fallback) {
+  var sum = 0;
+  var count = 0;
+  (sections || []).forEach(function (section) {
+    var range = section[key];
+    if (!range) return;
+    for (var i = range[0]; i <= range[1]; i += 1) {
+      var v = lens == null ? undefined : lens[i];
+      sum += typeof v === "number" && isFinite(v) ? v : fallback;
+      count += 1;
+    }
+  });
+  return count > 0 ? Math.round(sum / count) : fallback;
+}
+var ContextMenu = function ContextMenu() {`
+  },
+  {
+    name: '右键菜单：「行高」的默认值取选中各行的平均值',
+    from: `      var rowHeight = (selection === null || selection === void 0 ? void 0 : selection.height) || context.defaultrowlen;
+      var shownRowHeight = ((_context$luckysheet_s8 = context.luckysheet_select_save) === null || _context$luckysheet_s8 === void 0 ? void 0 : _context$luckysheet_s8.some(function (section) {
+        return section.height_move !== (rowHeight + 1) * (section.row[1] - section.row[0] + 1) - 1;
+      })) ? "" : rowHeight;`,
+    to: `      var shownRowHeight = mzAvgLen(context.luckysheet_select_save, "row", context.config && context.config.rowlen, context.defaultrowlen);`
+  },
+  {
+    name: '右键菜单：「列宽」的默认值取选中各列的平均值',
+    from: `      var colWidth = (selection === null || selection === void 0 ? void 0 : selection.width) || context.defaultcollen;
+      var shownColWidth = ((_context$luckysheet_s0 = context.luckysheet_select_save) === null || _context$luckysheet_s0 === void 0 ? void 0 : _context$luckysheet_s0.some(function (section) {
+        return section.width_move !== (colWidth + 1) * (section.column[1] - section.column[0] + 1) - 1;
+      })) ? "" : colWidth;`,
+    to: `      var shownColWidth = mzAvgLen(context.luckysheet_select_save, "column", context.config && context.config.columnlen, context.defaultcollen);`
+  },
+  {
+    name: '右键菜单：「行高」输入框加宽',
+    from: `        defaultValue: shownRowHeight,
+        style: {
+          width: "40px"
+        }`,
+    to: `        defaultValue: shownRowHeight,
+        style: {
+          width: "64px"
+        }`
+  },
+  {
+    name: '右键菜单：「列宽」输入框加宽',
+    from: `        defaultValue: shownColWidth,
+        style: {
+          width: "40px"
+        }`,
+    to: `        defaultValue: shownColWidth,
+        style: {
+          width: "64px"
+        }`
+  },
+  {
+    // getMenuElement 是 useCallback 记住的，deps 里没有 config：拖过行高之后不换选区直接右键，
+    // 拿到的会是上一份 config，平均值按老行高算。原文只读 selection 所以碰不到，我们读了就得补上。
+    name: '右键菜单：getMenuElement 的依赖补上 config',
+    from: `  }, [context.currentSheetId, context.lang, context.luckysheet_select_save, context.defaultrowlen, context.defaultcollen, rightclick, info, setContext, showAlert, showDialog, drag, generalDialog]);`,
+    to: `  }, [context.currentSheetId, context.lang, context.config, context.luckysheet_select_save, context.defaultrowlen, context.defaultcollen, rightclick, info, setContext, showAlert, showDialog, drag, generalDialog]);`
+  },
+  {
+    name: '右键菜单：「列宽」输入框的上限按列宽算（原文抄的是行高的 545）',
+    from: `}, rightclick.column, rightclick.width, /*#__PURE__*/React.createElement("input", {
+        onClick: function onClick(e) {
+          return e.stopPropagation();
+        },
+        onKeyDown: function onKeyDown(e) {
+          return e.stopPropagation();
+        },
+        tabIndex: 0,
+        type: "number",
+        min: 1,
+        max: 545,`,
+    to: `}, rightclick.column, rightclick.width, /*#__PURE__*/React.createElement("input", {
+        onClick: function onClick(e) {
+          return e.stopPropagation();
+        },
+        onKeyDown: function onKeyDown(e) {
+          return e.stopPropagation();
+        },
+        tabIndex: 0,
+        type: "number",
+        min: 1,
+        max: 2038,`
+  },
+  {
     name: '字号清单补上 6 / 7 / 8',
     from: `[9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72].map(`,
     to: `[6, 7, 8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72].map(`
@@ -197,7 +331,7 @@ export function fortuneSheetPatchPlugin() {
  */
 export function fortuneSheetPatchEsbuildPlugin() {
   return {
-    name: 'mz-fortune-sheet-patch-v2',
+    name: 'mz-fortune-sheet-patch-v5',
     setup(build) {
       build.onLoad({ filter: /[\\/]@fortune-sheet[\\/]react[\\/]dist[\\/]index\.esm\.js$/ }, async (args) => {
         const { readFile } = await import('node:fs/promises')

@@ -207,18 +207,37 @@
         <div class="size-title">单元格尺寸</div>
         <div class="size-row">
           <span class="size-label">宽</span>
-          <b class="mono">{{ Math.round(size.width) }}</b>
+          <el-input-number
+            :model-value="Math.round(size.width)"
+            :min="minSize(size.colSpan)"
+            :max="maxWidth(size.colSpan)"
+            :step="5"
+            :controls="false"
+            size="small"
+            class="size-input"
+            @change="onResize('width', $event)"
+          />
           <span class="size-unit">px</span>
           <span class="size-mm">≈ {{ pxToMm(size.width).toFixed(1) }} mm</span>
         </div>
         <div class="size-row">
           <span class="size-label">高</span>
-          <b class="mono">{{ Math.round(size.height) }}</b>
+          <el-input-number
+            :model-value="Math.round(size.height)"
+            :min="minSize(size.rowSpan)"
+            :max="maxHeight(size.rowSpan)"
+            :step="5"
+            :controls="false"
+            size="small"
+            class="size-input"
+            @change="onResize('height', $event)"
+          />
           <span class="size-unit">px</span>
           <span class="size-mm">≈ {{ pxToMm(size.height).toFixed(1) }} mm</span>
         </div>
         <div v-if="size.rowSpan > 1 || size.colSpan > 1" class="text-muted size-merge">
-          合并区域 {{ size.rowSpan }} 行 × {{ size.colSpan }} 列，上面是整块的尺寸
+          合并区域 {{ size.rowSpan }} 行 × {{ size.colSpan }} 列，上面是整块的尺寸，
+          改了按现有比例摊给这几行几列
         </div>
       </div>
 
@@ -249,7 +268,7 @@ import {
   CN_UPPER_PATTERN,
   defaultFormatPattern
 } from '@/utils/sheet'
-import { pxToMm } from '@/utils/print'
+import { pxToMm, MIN_CELL_SIZE, MAX_ROW_HEIGHT, MAX_COL_WIDTH } from '@/utils/print'
 
 const props = defineProps({
   /** store.activeConfig，可能为 null */
@@ -262,7 +281,7 @@ const props = defineProps({
   size: { type: Object, default: null }
 })
 
-const emit = defineEmits(['update', 'clear'])
+const emit = defineEmits(['update', 'clear', 'resize'])
 
 const coordText = computed(() => (props.cell ? toA1(props.cell.r, props.cell.c) : ''))
 
@@ -321,6 +340,31 @@ const isChineseUpper = computed(() => props.config?.formatPattern === CN_UPPER_P
 
 function onChange(field, value) {
   emit('update', { [field]: value })
+}
+
+/* ------------------------- 尺寸 ------------------------- */
+
+/**
+ * 合并块的取值范围要按跨了几行几列放大 —— 每一行/列各自受上下限约束，整块自然是它们的 n 倍。
+ */
+function minSize(span) {
+  return MIN_CELL_SIZE * Math.max(span || 1, 1)
+}
+function maxWidth(span) {
+  return MAX_COL_WIDTH * Math.max(span || 1, 1)
+}
+function maxHeight(span) {
+  return MAX_ROW_HEIGHT * Math.max(span || 1, 1)
+}
+
+/**
+ * 手输宽高。清空输入框时 el-input-number 给的是 null，那是「没改」不是「设成 0」，直接忽略。
+ * 真正摊到哪几行几列由父组件按合并区算（utils/print.js#resizeCellPlan）。
+ */
+function onResize(dim, value) {
+  if (value == null || !Number.isFinite(value)) return
+  if (Math.round(value) === Math.round(props.size?.[dim] ?? 0)) return
+  emit('resize', { [dim]: Math.round(value) })
 }
 
 /**
@@ -402,6 +446,14 @@ function onFormatTypeChange(value) {
 .size-label {
   width: 20px;
   color: var(--el-text-color-secondary);
+}
+/* 输入框只放三四位数，别把右边的 mm 换算挤没了 */
+.size-input {
+  width: 72px;
+}
+.size-input :deep(.el-input__inner) {
+  text-align: left;
+  font-family: 'Cascadia Code', Consolas, Monaco, monospace;
 }
 .size-unit {
   color: var(--el-text-color-secondary);

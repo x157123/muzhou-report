@@ -146,6 +146,7 @@
         :datasets="normalizedDatasets"
         @update="onCellConfigUpdate"
         @clear="onCellConfigClear"
+        @resize="onCellResize"
       />
     </div>
 
@@ -270,7 +271,8 @@ import {
   gridRange,
   colWidth,
   rowHeight,
-  cellSizePx
+  cellSizePx,
+  resizeCellPlan
 } from '@/utils/print'
 import { computeWrapRowHeights } from '@/utils/wrapHeight'
 import { queryParams, queryVersionId } from '@/utils/params'
@@ -859,13 +861,37 @@ const HIDDEN_TOOLBAR_ITEMS = [
   'screenshot',
   'search'
 ]
-const toolbarItems = defaultSettings.toolbarItems
-  .filter((name) => !HIDDEN_TOOLBAR_ITEMS.includes(name))
-  .filter((name, i, arr) => name !== '|' || (i > 0 && i < arr.length - 1 && arr[i - 1] !== '|'))
+/** 从官方默认清单里剔除若干项，并把因此空出来的连续分隔符「|」合并掉 */
+function withoutItems(items, hidden) {
+  return (items || [])
+    .filter((name) => !hidden.includes(name))
+    .filter((name, i, arr) => name !== '|' || (i > 0 && i < arr.length - 1 && arr[i - 1] !== '|'))
+}
+
+const toolbarItems = withoutItems(defaultSettings.toolbarItems, HIDDEN_TOOLBAR_ITEMS)
+
+/**
+ * 右键菜单里屏蔽掉的项：排序选区(sort)、升序排列(orderAZ)、降序排列(orderZA)、
+ * 筛选选区(filter)、插入图片(image)、插入链接(link)。
+ *
+ * 前四项是**改数据**的操作，而这里是模板设计器 —— 画布上那些 `#{code.field}` 是占位符，
+ * 排序/筛选的是模板本身，出纸时的行序由数据集与扩展决定，排了也白排（还会把行带打乱）。
+ * 后两项是 FortuneSheet 自己那套浮动图片与超链接：图片走单元格类型 `img`/`base64`
+ * （由数据绑定出图，见属性面板），超链接三条导出路都表达不了，留着就是「设计器里有、
+ * 导出全没了」。工具栏上这几个按钮本来就已经剔掉了（见 HIDDEN_TOOLBAR_ITEMS），
+ * 右键菜单是它们剩下的入口，一并关掉才算关干净。
+ *
+ * 行号/列标上的右键是另一份清单（headerContextMenu），排序那三项在那儿也有，同样剔掉。
+ */
+const HIDDEN_CONTEXT_MENU_ITEMS = ['sort', 'orderAZ', 'orderZA', 'filter', 'image', 'link']
+const cellContextMenu = withoutItems(defaultSettings.cellContextMenu, HIDDEN_CONTEXT_MENU_ITEMS)
+const headerContextMenu = withoutItems(defaultSettings.headerContextMenu, HIDDEN_CONTEXT_MENU_ITEMS)
 
 /** 传给 Workbook 的额外配置；hooks 引用必须稳定，内部读取响应式状态即可保持最新 */
 const sheetOptions = {
   toolbarItems,
+  cellContextMenu,
+  headerContextMenu,
   hooks: {
     beforeRenderCellArea: beginSampling,
     afterRenderCell: sampleCellGeometry
@@ -1047,6 +1073,22 @@ const activeCellSize = computed(() => {
   const cell = store.activeCell
   return cell ? cellSizePx(currentSheet.value, cell.r, cell.c) : null
 })
+
+/**
+ * 属性面板里手输的宽高：写回画布，画布再走 change 回写 store，面板上的数字跟着更新
+ * —— 与拖动行边界、列边界完全是同一条路（`setRowHeight`/`setColumnWidth` 都带 custom=true）。
+ *
+ * 刻意**不**绕开限宽钳制（不走 `applyColumnWidths`）：手输一个超宽的数与拖宽一列是一回事，
+ * 该拦就拦，随后那次 change 里 `enforceWidthLimit` 会把超出的部分还回去。
+ */
+function onCellResize(size) {
+  const cell = store.activeCell
+  const sheet = currentSheet.value
+  if (!cell || !sheet) return
+  const plan = resizeCellPlan(sheet, cell.r, cell.c, size)
+  if (Object.keys(plan.widths).length) sheetRef.value?.setColumnWidth(plan.widths)
+  if (Object.keys(plan.heights).length) sheetRef.value?.setRowHeight(plan.heights)
+}
 
 /** 状态栏左侧的选中格坐标（A1 记法） */
 const cellLabel = computed(() => (store.activeCell ? toA1(store.activeCell.r, store.activeCell.c) : ''))
