@@ -348,118 +348,6 @@
           </div>
         </el-form>
       </el-tab-pane>
-
-      <!-- ------------------------------ 版本 ------------------------------ -->
-      <el-tab-pane label="版本" name="version">
-        <el-form label-width="96px" size="small">
-          <el-form-item label="判定依据">
-            <el-radio-group v-model="version.source">
-              <el-radio-button value="field">主接口字段</el-radio-button>
-              <el-radio-button value="param">报表参数</el-radio-button>
-              <el-radio-button value="now">渲染当日</el-radio-button>
-            </el-radio-group>
-          </el-form-item>
-
-          <el-form-item v-if="version.source === 'field'" label="字段">
-            <el-select
-              v-model="version.field"
-              placeholder="取主接口的哪个字段（留空 = 只按条件选）"
-              clearable
-              style="width: 260px"
-            >
-              <el-option
-                v-for="f in primaryFields"
-                :key="f.fieldName"
-                :label="`${f.fieldText || f.fieldName} (${f.fieldName})`"
-                :value="f.fieldName"
-              />
-            </el-select>
-            <span v-if="!primary" class="text-muted" style="margin-left: 8px">
-              未设主接口 —— 在左侧数据集面板点 ☆ 指定一个
-            </span>
-          </el-form-item>
-
-          <el-form-item v-else-if="version.source === 'param'" label="参数">
-            <el-select v-model="version.field" placeholder="取哪个报表参数" clearable style="width: 260px">
-              <el-option
-                v-for="p in reportParams"
-                :key="p.name"
-                :label="`${p.text || p.name} (${p.name})`"
-                :value="p.name"
-              />
-            </el-select>
-          </el-form-item>
-
-          <el-form-item label="无法判定时">
-            <el-radio-group v-model="version.fallback">
-              <el-radio-button value="default">用默认版本{{ defaultLabel }}</el-radio-button>
-              <el-radio-button value="error">直接报错</el-radio-button>
-            </el-radio-group>
-          </el-form-item>
-
-          <el-form-item label="各版本">
-            <div class="version-table">
-              <el-table :data="versionRows" size="small" border>
-                <el-table-column label="版本" width="110">
-                  <template #default="{ row }">
-                    <span>{{ row.label }}</span>
-                    <el-tag v-if="row.id === store.versionId" size="small" type="primary" effect="plain">
-                      当前
-                    </el-tag>
-                  </template>
-                </el-table-column>
-                <el-table-column label="匹配条件">
-                  <template #default="{ row }">
-                    <span :class="{ 'text-muted': !row.enabled || !row.condition }">
-                      {{ row.condition || '无条件（兜底）' }}
-                    </span>
-                  </template>
-                </el-table-column>
-                <el-table-column label="生效时间段（左闭右开）" width="220">
-                  <template #default="{ row }">
-                    <span :class="{ 'text-muted': !row.enabled }">{{ intervalText(row) }}</span>
-                    <!-- 允许多版共用同一段时间，被盖住的那一版要说清楚，
-                         否则「配了却没生效」在这里看不出原因 -->
-                    <div v-if="row.coveredBy.length" class="text-muted cover-note">
-                      重叠段归 {{ row.coveredBy.join('、') }}
-                    </div>
-                  </template>
-                </el-table-column>
-                <el-table-column label="" width="60">
-                  <template #default="{ row }">
-                    <el-tag v-if="row.isDefault" size="small" type="success" effect="plain">默认</el-tag>
-                  </template>
-                </el-table-column>
-              </el-table>
-            </div>
-          </el-form-item>
-
-          <div class="tips">
-            <p>
-              选版本看<b>两维</b>：各版自己的<b>匹配条件</b>（类型、区域…，在「版本管理」里配，
-              同一版内多条是「并且」）先筛，再在筛出来的那几版里按<b>生效时间</b>推区间。
-              多版同时匹配时<b>条件更具体的赢</b>；上面这个「判定依据」只管时间那一维，
-              <b>留空就是只按条件选</b>。
-            </p>
-            <p>
-              区间是<b>推导</b>出来的：每一版只存生效起点，右端就是<b>同条件</b>的下一版的起点。
-              在<b>「版本管理」</b>里改各版本的匹配条件、生效时间、启停与默认版本。
-            </p>
-            <p>
-              <b>版本切换规则是报表级的</b>（不按 sheet 分）—— 它决定的是整张报表用哪一份版式，
-              和上面几个页签里那些「这张 sheet 怎么出纸」不是一回事。
-            </p>
-            <p v-if="splitByRow">
-              「每条数据一张/一页」时，<b>每条数据按自己那一行的字段值各选各的版式</b>（时间判定字段
-              与取主接口字段的匹配条件都逐行判）—— 跨期、跨类型的一批单据可以一次打完。
-            </p>
-            <p v-else-if="version.source === 'field' && version.field">
-              非拆分报表取的是主接口<b>第一行</b>的字段值；汇总类报表第一行的日期未必代表整张表，
-              建议改用「报表参数」或「渲染当日」。
-            </p>
-          </div>
-        </el-form>
-      </el-tab-pane>
     </el-tabs>
 
     <div class="preview-summary">
@@ -499,7 +387,6 @@ import {
   widthOverflowPx,
   totalColumnsWidth
 } from '@/utils/print'
-import { versionIntervals, intervalText } from '@/utils/version'
 import { normalizeExportConfig, exportFileName } from '@/utils/sheet'
 
 const props = defineProps({
@@ -529,11 +416,6 @@ const scope = ref('sheet')
  * 和打印设置一样，编辑的是副本，点确定才写回 store。
  */
 const split = ref({ splitMode: 'single', sheetNameField: '' })
-/**
- * 版本切换规则（**报表级**，绑的是 `store.report.versionConfig` 而不是 content —— content
- * 本身就是被版本化的那个东西，规则放进去就成了「每个版本各有一套怎么选自己」，逻辑成环）。
- */
-const version = ref({ source: 'field', field: '', fallback: 'default' })
 /**
  * 导出设置（**报表级**）：导出的文件叫什么名字 —— 报表名 + 主接口若干字段值。
  * 同样是编辑副本，点确定才写回 store。
@@ -565,7 +447,6 @@ watch(visible, (v) => {
     splitMode: ['perRow', 'perRowPage'].includes(stored) ? stored : 'single',
     sheetNameField: store.content.sheetNameField || ''
   }
-  version.value = store.versionConfigOf()
   exportCfg.value = normalizeExportConfig(store.content.exportConfig)
   // 单 sheet 报表没有「按 sheet 设」的意义，直接写报表级，避免存一份多余的覆盖
   scope.value = multiSheet.value ? 'sheet' : 'all'
@@ -589,18 +470,6 @@ const reportName = computed(() => store.report.name || '报表')
  * 拼法与后端 `ExportConfigDTO#resolve` 是同一套（utils/sheet.js#exportFileName）。
  */
 const exportNameSample = computed(() => exportFileName(exportCfg.value, reportName.value))
-
-/* ------------------------------ 版本 ------------------------------ */
-
-const reportParams = computed(() => store.content.params || [])
-/** 版本列表 + 推导出来的生效区间（只读展示，改在「版本管理」里） */
-const versionRows = computed(() => versionIntervals(store.versions))
-const defaultLabel = computed(() => {
-  const d = versionRows.value.find((v) => v.isDefault)
-  return d ? ` ${d.label}` : ''
-})
-/** 按条拆分时，版本是**逐行**选的（每张单据各按自己的日期） */
-const splitByRow = computed(() => ['perRow', 'perRowPage'].includes(store.content.splitMode))
 
 const printable = computed(() => printableSizeMm(form.value))
 
@@ -691,8 +560,6 @@ function onConfirm() {
   store.setPageConfig(form.value, scope.value)
   // 输出方式是报表级的，跟「作用范围」无关，单独写
   store.setSheetSplit(canSplit.value ? split.value : { splitMode: 'single' })
-  // 版本切换规则同样是报表级的，而且存在 report 上而不是 content 里
-  store.setVersionConfig(version.value)
   // 导出文件名也是报表级的一份，与「作用范围」无关
   store.setExportConfig(exportCfg.value)
   emit('applied')
@@ -770,16 +637,6 @@ function onConfirm() {
 }
 .tips p {
   margin: 0;
-}
-.version-table {
-  width: 100%;
-}
-.version-table :deep(.el-tag) {
-  margin-left: 6px;
-}
-.cover-note {
-  font-size: 12px;
-  line-height: 1.3;
 }
 .wm-preview {
   display: flex;

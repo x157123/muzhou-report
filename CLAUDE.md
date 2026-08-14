@@ -7,7 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `docs/CONTRACT.md` 是本项目的 **single source of truth**：接口路径、JSON 字段名、数据库列名、
 `mz_report.content` 结构、渲染算法七步都写在里面。**改动任何跨前后端的结构前先读它**，
 文件头部明确要求实现服从契约而不是反过来改契约。README.md 是面向使用者的说明，
-「渲染算法要点」「已知边界」两节与 CONTRACT §7 对应。
+「渲染算法要点」「已知边界」两节与 CONTRACT §7 对应。`docs/VERSION.md`（报表版本功能的设计方案
+与落地时的偏差记录）、`docs/OPTIMIZATION.md`（一次全项目走查清单，已全部实施）是历史/设计背景，
+日常改动不必读，本文件才是权威。
 
 中文项目：注释、提交信息、UI 文案都用中文，保持一致。
 

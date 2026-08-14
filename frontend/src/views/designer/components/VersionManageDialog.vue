@@ -11,8 +11,82 @@
   <el-dialog v-model="visible" title="版本管理" width="1100px" :close-on-click-modal="false" destroy-on-close>
     <div class="tips">
       版本化的是<b>版式</b>：每一版持有一份完整的报表内容。用哪一版由<b>匹配条件</b>（类型/区域这类维度）
-      加<b>生效时间段</b>两维决定 —— 条件先筛、时间后判，判定值从哪来在「打印设置 → 版本」里配。
+      加<b>生效时间段</b>两维决定 —— 条件先筛、时间后判，判定值从哪来在下面配。
       改<b>数据集</b>会同时影响所有版本（数据集不随版本走）。
+    </div>
+
+    <el-form label-width="96px" size="small" class="version-config-form">
+      <el-form-item label="判定依据">
+        <el-radio-group v-model="versionConfig.source" @change="applyVersionConfig">
+          <el-radio-button value="field">主接口字段</el-radio-button>
+          <el-radio-button value="param">报表参数</el-radio-button>
+          <el-radio-button value="now">渲染当日</el-radio-button>
+        </el-radio-group>
+      </el-form-item>
+
+      <el-form-item v-if="versionConfig.source === 'field'" label="字段">
+        <el-select
+          v-model="versionConfig.field"
+          placeholder="取主接口的哪个字段（留空 = 只按条件选）"
+          clearable
+          style="width: 260px"
+          @change="applyVersionConfig"
+        >
+          <el-option
+            v-for="f in primaryFields"
+            :key="f.fieldName"
+            :label="`${f.fieldText || f.fieldName} (${f.fieldName})`"
+            :value="f.fieldName"
+          />
+        </el-select>
+        <span v-if="!primary" class="text-muted" style="margin-left: 8px">
+          未设主接口 —— 在左侧数据集面板点 ☆ 指定一个
+        </span>
+      </el-form-item>
+
+      <el-form-item v-else-if="versionConfig.source === 'param'" label="参数">
+        <el-select
+          v-model="versionConfig.field"
+          placeholder="取哪个报表参数"
+          clearable
+          style="width: 260px"
+          @change="applyVersionConfig"
+        >
+          <el-option
+            v-for="p in reportParams"
+            :key="p.name"
+            :label="`${p.text || p.name} (${p.name})`"
+            :value="p.name"
+          />
+        </el-select>
+      </el-form-item>
+
+      <el-form-item label="无法判定时">
+        <el-radio-group v-model="versionConfig.fallback" @change="applyVersionConfig">
+          <el-radio-button value="default">用默认版本{{ defaultLabel }}</el-radio-button>
+          <el-radio-button value="error">直接报错</el-radio-button>
+        </el-radio-group>
+      </el-form-item>
+    </el-form>
+
+    <div class="tips">
+      <p>
+        选版本看<b>两维</b>：<b>判定依据</b>只管上面这一维（留空就是只按下表的匹配条件选）；
+        每一版自己的<b>匹配条件</b>在下表里配（同一版内多条是「并且」），条件先筛、时间后判，
+        多版同时匹配时<b>条件更具体的赢</b>。
+      </p>
+      <p v-if="splitByRow">
+        「每条数据一张/一页」时，<b>每条数据按自己那一行的字段值各选各的版式</b>（时间判定字段
+        与匹配条件里取主接口字段的那些都逐行判）—— 跨期、跨类型的一批单据可以一次打完。
+      </p>
+      <p v-else-if="versionConfig.source === 'field' && versionConfig.field">
+        非拆分报表取的是主接口<b>第一行</b>的字段值；汇总类报表第一行的日期未必代表整张表，
+        建议改用「报表参数」或「渲染当日」。
+      </p>
+      <p>
+        <b>判定依据是报表级设置</b>，改完记得点顶部工具栏的<b>保存</b>才会写回报表；
+        下面各版本自己的匹配条件/生效时间/名称/启停改了立即生效，不必再按保存。
+      </p>
     </div>
 
     <el-table :data="rows" size="small" v-loading="loading" border>
@@ -66,7 +140,7 @@
       <el-table-column label="名称" min-width="130">
         <template #default="{ row }">
           <el-input
-            :model-value="row.name"
+            v-model="rawVersion(row.id).name"
             size="small"
             :placeholder="`留空显示 v${row.versionNo}`"
             @change="(v) => saveMeta(row, { name: v })"
@@ -150,6 +224,7 @@ import {
   checkVersion
 } from '@/api/report'
 import { versionIntervals, intervalText } from '@/utils/version'
+import { useDesignerStore } from '@/stores/designer'
 import VersionRulesDialog from './VersionRulesDialog.vue'
 
 const props = defineProps({
@@ -165,14 +240,49 @@ const visible = computed({
   set: (v) => emit('update:modelValue', v)
 })
 
+const store = useDesignerStore()
+
 const versions = ref([])
 const loading = ref(false)
 
 /** 带上推导出来的生效区间 */
 const rows = computed(() => versionIntervals(versions.value))
 
+/**
+ * 「名称」输入框专用：`rows` 是 `versionIntervals` 每次都重新 `{...v}` 展开出来的普通对象，
+ * 绑给它的 `el-input` 每敲一个字都会被 Element Plus 自己的 `setNativeInputValue` 拉回旧值
+ * （modelValue 没有跟着变，见 input.vue 的 handleInput）—— 这就是"打不出字"的根因。
+ * 必须直接把 v-model 接回 `versions` 里那个响应式对象本身。
+ */
+function rawVersion(id) {
+  return versions.value.find((v) => v.id === id) || {}
+}
+
+/**
+ * 版本切换规则（判定依据 / 字段 / 取不到时怎么办）：**报表级**设置，原来放在打印设置弹窗的
+ * 「版本」页签，和这里的版本列表分散两处不好找，合并到版本管理里一起改。
+ * 绑的是 `store.report.versionConfig` 而不是 content —— content 本身就是被版本化的那个东西，
+ * 规则放进去就成了「每个版本各有一套怎么选自己」，逻辑成环；和报表名一样，改了要点顶部工具栏
+ * 的保存才落库，所以这里只改本地 store、不单独调接口。
+ */
+const versionConfig = ref({ source: 'field', field: '', fallback: 'default' })
+const primary = computed(() => store.datasetByCode(store.content.primaryDataset))
+const primaryFields = computed(() => primary.value?.fields || [])
+const reportParams = computed(() => store.content.params || [])
+const splitByRow = computed(() => ['perRow', 'perRowPage'].includes(store.content.splitMode))
+const defaultLabel = computed(() => {
+  const d = rows.value.find((v) => v.isDefault)
+  return d ? ` ${d.label}` : ''
+})
+
+function applyVersionConfig() {
+  store.setVersionConfig(versionConfig.value)
+}
+
 watch(visible, (v) => {
-  if (v) load()
+  if (!v) return
+  load()
+  versionConfig.value = store.versionConfigOf()
 })
 
 async function load() {
@@ -290,6 +400,9 @@ function emitOpen(row) {
 }
 .tips p {
   margin: 0;
+}
+.version-config-form {
+  margin-bottom: 4px;
 }
 .mono {
   margin-right: 6px;
