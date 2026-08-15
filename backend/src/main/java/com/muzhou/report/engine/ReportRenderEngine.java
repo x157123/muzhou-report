@@ -130,25 +130,32 @@ public class ReportRenderEngine {
     }
 
     /**
-     * 「每条数据一个 sheet」：主接口有几行，整份模板就渲染几遍。
+     * 「每条数据一个 sheet」：主接口有几行，参与拆分的那几张模板就渲染几遍。
      *
      * <p>做法是**换掉取数函数**而不是改扩展逻辑 —— 第 i 遍渲染时，主接口只返回第 i 行，
      * 其它数据集照常返回全量（且只取一次，缓存起来复用，否则 100 条数据会把从表接口打 100 遍）。
      * 于是「一行数据一张单据」在模板里就是普通的取数，不用为它写第二套扩展规则。
      *
-     * <p>模板本身有多张 sheet 时，每一行都会把这几张都渲染一遍（N 行 × M 张），
-     * 输出顺序是**行优先**（r0t0, r0t1, r1t0, r1t1…），即一条数据的几张挨在一起 ——
-     * {@link SheetConcat} 原样照抄这个顺序摞。
+     * <p><b>不是每张模板都跟着拆</b>：模板按 {@code content.sheetSplits} 切成连续的几段
+     * （{@link #segments}），{@code once} 段整段只渲染一次、主接口给它**全量**数据（清单列表），
+     * {@code perRow} 段整段对每一行渲染一遍（单据详情）。段内输出顺序仍是**行优先**
+     * （r0t0, r0t1, r1t0, r1t1…），一条数据的几张挨在一起 —— {@link SheetConcat} 原样照抄这个顺序摞。
+     * 于是「第一张是清单、后面每条数据一份详情」出来就是「清单、数据1详情、数据2详情…」。
      *
-     * <p>{@code perRowPage} 走的也是这段代码，只是出口处多一道拼接（{@link #concatIfNeeded}）。
+     * <p>{@code perRowPage} 走的也是这段代码，只是出口处多一道拼接（{@link #concatIfNeeded}）；
+     * **段与段之间必定断开**，清单不会被摞进单据那张里去。
      *
      * <p>配了父子关联时，关联要套在换掉的这个取数函数**外面**：子表向里问主表要数据，
      * 拿到的正好是当前这一行，于是「这张单据的明细」自然只查这一行的。也因此**子表不能进
      * 上面那个跨行复用的缓存** —— 它每张 sheet 都不一样，缓存下来就全串成第一条的明细了。
+     * （{@code once} 段那边主表是全量的，父子关联照旧按「主表每行查一次子表」跑，
+     * 于是清单页也写得出「主表 + 明细」那种行带。）
      *
      * <p>{@code versionPicker} 不为空时**每一行还会各自换一份模板**（逐行选版本）：这一批单据
      * 跨了改版时点，3 月的那几张用旧版式、9 月的用新版式。换的只有模板与打印设置，
      * 上面那套取数逻辑一个字没动 —— 模板按 content 实例缓存，同一版只 parse 一次。
+     * **{@code once} 段恒取基准版本**（它不属于任何一行，逐行换对它没有意义），
+     * 逐行换的那几段按「第几个 {@code perRow} 段」与各版配对（见 {@link #perRowSegment}）。
      */
     private RenderResultDTO renderPerRow(ReportContentDTO content, List<SheetTemplate> templates,
                                          Map<String, Object> params,
@@ -163,6 +170,9 @@ public class ReportRenderEngine {
                 LinkedDataFetcher.wrap(links, dataFetcher, props.getMaxLinkRows()));
         long primaryFetched = System.currentTimeMillis();
 
+        // 模板按「参不参与按行拆分」切成连续的几段（清单段 / 单据段），见 Segment
+        List<Segment> segments = segments(content, templates);
+
         // 主接口一条数据都没有：退回普通渲染出一份空模板，比给个没有 sheet 的工作簿友好
         if (rows.isEmpty()) {
             Map<String, List<Map<String, Object>>> empty = fetchDatasets(templates, params,
@@ -172,15 +182,21 @@ public class ReportRenderEngine {
             List<SheetTemplate> sheetTemplates = new ArrayList<>();
             List<PageConfigDTO> pageConfigs = new ArrayList<>();
             List<Integer> docIndexes = new ArrayList<>();
-            for (SheetTemplate st : templates) {
-                outSheets.add(toSheet(st, expandProcessor.process(st, empty, params)));
-                sheetTemplates.add(st);
-                pageConfigs.add(content.pageConfigOf(st.getSheetIndex()));
-                // 一条数据都没有，那份空模板整个算作一份单据
-                docIndexes.add(0);
+            List<Integer> segmentIds = new ArrayList<>();
+            for (int segIndex = 0; segIndex < segments.size(); segIndex++) {
+                for (SheetTemplate st : segments.get(segIndex).templates()) {
+                    outSheets.add(toSheet(st, expandProcessor.process(st, empty, params)));
+                    sheetTemplates.add(st);
+                    pageConfigs.add(content.pageConfigOf(st.getSheetIndex()));
+                    // 一条数据都没有，那份空模板整个算作一份单据
+                    docIndexes.add(0);
+                    // 有数据时段与段之间是断开的，没数据时也得断开 —— 否则「有数据 2 张、
+                    // 没数据 1 张」，下游拿 sheet 张数对不上号
+                    segmentIds.add(segIndex);
+                }
             }
             // 每个模板正好一份，拼接是恒等变换，不必为这条早返回路径写特例
-            concatIfNeeded(content, result, outSheets, sheetTemplates, pageConfigs, docIndexes, null);
+            concatIfNeeded(content, result, outSheets, sheetTemplates, pageConfigs, docIndexes, null, segmentIds);
             result.setElapsed(System.currentTimeMillis() - start);
             result.setFetchElapsed(primaryFetched - fetchStart);
             result.setExpandElapsed(System.currentTimeMillis() - primaryFetched);
@@ -199,69 +215,180 @@ public class ReportRenderEngine {
         Set<String> childCodes = LinkedDataFetcher.childCodes(links);
         List<Map<String, Object>> outSheets = new ArrayList<>();
         // 与 outSheets 一一对应：这一份出自哪张模板、该用哪份打印设置。
-        // 逐行换版式之后「结果 sheet 数 = 模板张数 × N」这个前提没了（各版模板张数可以不同），
-        // 靠下标取模再也算不回去，只能一路记着
+        // 逐行换版式之后「结果 sheet 数 = 模板张数 × N」这个前提没了（各版模板张数可以不同，
+        // 清单页又只出一份），靠下标取模再也算不回去，只能一路记着
         List<SheetTemplate> sheetTemplates = new ArrayList<>();
         List<PageConfigDTO> pageConfigs = new ArrayList<>();
-        // 这一份属于第几条数据（= 第几份单据）。页码按单据重编就靠它，见 markDocBreaks
+        // 这一份属于第几份单据。页码按单据重编就靠它，见 markDocBreaks
         List<Integer> docIndexes = new ArrayList<>();
         // 这一份所属单据叫什么（= sheet 名去掉模板后缀与去重后缀那一层）。拼成一张之后
         // 页头页尾里的 ${sheet} 认它，见 SheetConcat 的 mzDocNames
         List<String> docNames = new ArrayList<>();
+        // 这一份出自第几段。**段与段之间不许拼进同一张 sheet**（清单摞进单据那张里，
+        // Excel 端就没法单独筛选排序了，Word 的节、Excel 的起始页号也都只到 sheet 级）
+        List<Integer> segmentIds = new ArrayList<>();
         Set<String> usedNames = new LinkedHashSet<>();
         // 同一版只 parse 一次：按 content 实例认（picker 每次给的是同一个缓存实例）
         Map<ReportContentDTO, List<SheetTemplate>> templateCache = new IdentityHashMap<>();
         templateCache.put(content, templates);
+        Map<ReportContentDTO, List<Segment>> segmentCache = new IdentityHashMap<>();
 
-        for (int i = 0; i < rows.size(); i++) {
-            Map<String, Object> row = rows.get(i);
-            // 这一行该用哪一版版式。基准 content 仍是传进来的那份（splitMode / primaryDataset /
-            // datasetLinks / 参数都以它为准），换掉的只有模板与打印设置
-            ReportContentDTO rowContent = pick(versionPicker, row, content);
-            List<SheetTemplate> rowTemplates = templateCache.computeIfAbsent(rowContent, templateParser::parse);
-            if (rowTemplates.isEmpty()) {
-                throw new BizException("第 " + (i + 1) + " 条数据选中的版式是空模板");
+        // 单据号全局递增（不再等于行下标）：清单页各自算一份，单据段里一行一份。
+        // 相邻两份号不同 = 页码从这里重编，见 markDocBreaks
+        int doc = 0;
+        // 这是第几个「按行拆」的段，逐行换版式时各版照这个序号配对
+        int perRowSeq = -1;
+        boolean warnedSegment = false;
+
+        for (int segIndex = 0; segIndex < segments.size(); segIndex++) {
+            Segment seg = segments.get(segIndex);
+
+            if (!seg.perRow()) {
+                // 清单段：主接口给**全量**（就是手上这份 rows，不再打一次接口），整段只渲染一次。
+                // 它对应的是「这一批数据」而不是某一行，所以逐行换版式对它没有意义，
+                // 模板与打印设置恒取基准版本 —— 同「取数配置以基准版本为准」那条边界
+                Map<String, List<Map<String, Object>>> datasets = fetchDatasets(seg.templates(), params,
+                        LinkedDataFetcher.wrap(links, wholeFetcher(primary, rows, shared, dataFetcher),
+                                props.getMaxLinkRows()));
+                for (SheetTemplate st : seg.templates()) {
+                    Map<String, Object> sheet = toSheet(st, expandProcessor.process(st, datasets, params));
+                    // 只出一份，id 不会撞车，照用模板的；order/status 得跟着结果顺序重编
+                    sheet.put("order", outSheets.size());
+                    sheet.put("status", outSheets.isEmpty() ? 1 : 0);
+                    sheet.put("name", uniqueName(st.getName(), usedNames));
+                    outSheets.add(sheet);
+                    sheetTemplates.add(st);
+                    pageConfigs.add(content.pageConfigOf(st.getSheetIndex()));
+                    // 清单自成一份单据：印的是「本清单第 x 页 共 y 页」，不该跟后面的单据连着数
+                    docIndexes.add(doc++);
+                    docNames.add(st.getName());
+                    segmentIds.add(segIndex);
+                }
+                continue;
             }
-            BiFunction<String, Map<String, Object>, List<Map<String, Object>>> perRowFetcher = (code, p) -> {
-                if (primary.equals(code)) {
-                    return List.of(row);
-                }
-                if (childCodes.contains(code)) {
-                    return fetchOne(code, p, dataFetcher);
-                }
-                return shared.computeIfAbsent(code, c -> fetchOne(c, p, dataFetcher));
-            };
-            // 关联套在 perRowFetcher **外面**：子表向里问主表要数据时，拿到的是当前这一行，
-            // 于是「这张单据的明细」自然就只查这一行的
-            Map<String, List<Map<String, Object>>> datasets = fetchDatasets(templates, params,
-                    LinkedDataFetcher.wrap(links, perRowFetcher, props.getMaxLinkRows()));
 
-            // 这一条数据（= 这份单据）叫什么：sheet 名与页头页尾里的 ${sheet} 共用这一个值
-            String docName = docName(row, content.getSheetNameField(), i);
-            for (SheetTemplate st : rowTemplates) {
-                Map<String, Object> sheet = toSheet(st, expandProcessor.process(st, datasets, params));
-                // id / order / status 必须重新编：模板的那份在 N 个副本之间会撞车
-                sheet.put("id", st.getId() + "_" + (i + 1));
-                sheet.put("order", outSheets.size());
-                sheet.put("status", outSheets.isEmpty() ? 1 : 0);
-                sheet.put("name", splitSheetName(docName, st, rowTemplates.size(), usedNames));
-                outSheets.add(sheet);
-                sheetTemplates.add(st);
-                // 打印设置取**这一行选中的那一版**的（模板下标是那一版里的下标）
-                pageConfigs.add(rowContent.pageConfigOf(st.getSheetIndex()));
-                docIndexes.add(i);
-                docNames.add(docName);
+            perRowSeq++;
+            for (int i = 0; i < rows.size(); i++) {
+                Map<String, Object> row = rows.get(i);
+                // 这一行该用哪一版版式。基准 content 仍是传进来的那份（splitMode / primaryDataset /
+                // datasetLinks / 参数都以它为准），换掉的只有模板与打印设置
+                ReportContentDTO rowContent = pick(versionPicker, row, content);
+                List<SheetTemplate> rowTemplates = templateCache.computeIfAbsent(rowContent, templateParser::parse);
+                if (rowTemplates.isEmpty()) {
+                    throw new BizException("第 " + (i + 1) + " 条数据选中的版式是空模板");
+                }
+                List<SheetTemplate> segTemplates = rowContent == content ? seg.templates()
+                        : perRowSegment(rowContent, rowTemplates, segmentCache, perRowSeq);
+                if (segTemplates.isEmpty()) {
+                    // 那一版把这一段整段标成了 once（或压根没有这么多段）：这一行在本段没有输出。
+                    // 一批数据里只警告一次，500 条不该刷 500 行日志
+                    if (!warnedSegment) {
+                        log.warn("第 {} 条数据选中的版式没有第 {} 个按行拆分的模板段，本段跳过这一条",
+                                i + 1, perRowSeq + 1);
+                        warnedSegment = true;
+                    }
+                    continue;
+                }
+                BiFunction<String, Map<String, Object>, List<Map<String, Object>>> perRowFetcher = (code, p) -> {
+                    if (primary.equals(code)) {
+                        return List.of(row);
+                    }
+                    if (childCodes.contains(code)) {
+                        return fetchOne(code, p, dataFetcher);
+                    }
+                    return shared.computeIfAbsent(code, c -> fetchOne(c, p, dataFetcher));
+                };
+                // 关联套在 perRowFetcher **外面**：子表向里问主表要数据时，拿到的是当前这一行，
+                // 于是「这张单据的明细」自然就只查这一行的
+                Map<String, List<Map<String, Object>>> datasets = fetchDatasets(segTemplates, params,
+                        LinkedDataFetcher.wrap(links, perRowFetcher, props.getMaxLinkRows()));
+
+                // 这一条数据（= 这份单据）叫什么：sheet 名与页头页尾里的 ${sheet} 共用这一个值
+                String docName = docName(row, content.getSheetNameField(), i);
+                for (SheetTemplate st : segTemplates) {
+                    Map<String, Object> sheet = toSheet(st, expandProcessor.process(st, datasets, params));
+                    // id / order / status 必须重新编：模板的那份在 N 个副本之间会撞车
+                    sheet.put("id", st.getId() + "_" + (i + 1));
+                    sheet.put("order", outSheets.size());
+                    sheet.put("status", outSheets.isEmpty() ? 1 : 0);
+                    sheet.put("name", splitSheetName(docName, st, segTemplates.size(), usedNames));
+                    outSheets.add(sheet);
+                    sheetTemplates.add(st);
+                    // 打印设置取**这一行选中的那一版**的（模板下标是那一版里的下标）
+                    pageConfigs.add(rowContent.pageConfigOf(st.getSheetIndex()));
+                    docIndexes.add(doc);
+                    docNames.add(docName);
+                    segmentIds.add(segIndex);
+                }
+                doc++;
             }
         }
 
         RenderResultDTO result = new RenderResultDTO();
-        concatIfNeeded(content, result, outSheets, sheetTemplates, pageConfigs, docIndexes, docNames);
+        concatIfNeeded(content, result, outSheets, sheetTemplates, pageConfigs, docIndexes, docNames, segmentIds);
         result.setElapsed(System.currentTimeMillis() - start);
         // 分段计时：主接口那一口 vs 逐条渲染那一段（含每条自己的其它取数与扩展）。
         // 日志由 RenderServiceImpl 连成一条耗时链统一打
         result.setFetchElapsed(primaryFetched - fetchStart);
         result.setExpandElapsed(System.currentTimeMillis() - primaryFetched);
         return result;
+    }
+
+    /**
+     * 一段**连续**的模板：整段按主接口逐行拆（{@code perRow}），或整段各只渲染一次（清单页）。
+     *
+     * <p>为什么按「连续段」而不是各标各的散着渲染：输出顺序得说得清。按模板下标顺序走一遍，
+     * 遇到不拆的就出一份、遇到连着的几张拆的就整段展开 N 遍，于是
+     * 「清单 + 明细 + 附页」出来是「清单、(数据1 明细/附页)、(数据2 明细/附页)…」——
+     * 一条数据的几张纸仍然挨在一起，而清单在它该在的位置上。
+     */
+    private record Segment(boolean perRow, List<SheetTemplate> templates) {
+    }
+
+    /** 按 {@code content.sheetSplits} 把模板切成连续的几段（相邻同类合并）。 */
+    private List<Segment> segments(ReportContentDTO content, List<SheetTemplate> templates) {
+        List<Segment> out = new ArrayList<>();
+        for (SheetTemplate st : templates) {
+            boolean perRow = content.splitsSheet(st.getSheetIndex());
+            if (out.isEmpty() || out.get(out.size() - 1).perRow() != perRow) {
+                out.add(new Segment(perRow, new ArrayList<>()));
+            }
+            out.get(out.size() - 1).templates().add(st);
+        }
+        return out;
+    }
+
+    /**
+     * 逐行换版式时，这一行的那一版里**第 {@code perRowSeq} 个按行拆分的段**是哪几张模板。
+     *
+     * <p>各版的模板张数与拆分标记都可以不一样，「第几张模板」说不清是哪一段，所以按
+     * **段序号**配对。绝大多数报表只有一个 perRow 段（清单 + 明细就是），配对是平凡的；
+     * 那一版段数不够时返回空，调用方跳过这一行并记一次 warn —— 猜一个段用上去只会出错版式。
+     */
+    private List<SheetTemplate> perRowSegment(ReportContentDTO rowContent, List<SheetTemplate> rowTemplates,
+                                              Map<ReportContentDTO, List<Segment>> cache, int perRowSeq) {
+        List<Segment> segs = cache.computeIfAbsent(rowContent, c -> segments(c, rowTemplates));
+        int seq = -1;
+        for (Segment s : segs) {
+            if (s.perRow() && ++seq == perRowSeq) {
+                return s.templates();
+            }
+        }
+        return List.of();
+    }
+
+    /**
+     * 清单段的取数函数：主接口还**全量**，其它数据集与单据段共用同一份缓存。
+     *
+     * <p>主接口直接还手上那份 {@code rows} —— 拆分前已经取过一次了，再打一遍既慢又可能
+     * 因为分页/时间点拿到不一样的数据，清单与单据就对不上号了。
+     */
+    private BiFunction<String, Map<String, Object>, List<Map<String, Object>>> wholeFetcher(
+            String primary, List<Map<String, Object>> rows,
+            Map<String, List<Map<String, Object>>> shared,
+            BiFunction<String, Map<String, Object>, List<Map<String, Object>>> dataFetcher) {
+        return (code, p) -> primary.equals(code) ? rows
+                : shared.computeIfAbsent(code, c -> fetchOne(c, p, dataFetcher));
     }
 
     /** 这一行用哪份 content：没有 picker（或它给了个空）就还用基准那份。 */
@@ -288,7 +415,8 @@ public class ReportRenderEngine {
                                 List<SheetTemplate> sheetTemplates,
                                 List<PageConfigDTO> pageConfigs,
                                 List<Integer> docIndexes,
-                                List<String> docNames) {
+                                List<String> docNames,
+                                List<Integer> segmentIds) {
         if (!content.concatPerRow()) {
             markDocBreaks(outSheets, docIndexes);
             result.setSheets(outSheets);
@@ -307,9 +435,11 @@ public class ReportRenderEngine {
         }
         // 打印设置一并传进去：一张 sheet 只放得下一套，设置不同的两份不能拼在一起。
         // 每一份属于第几条数据也要传：拼成一张之后，「页码从这里重编」只能靠行号表达（mzDocBreaks）。
-        // 名字同理 —— 拼完整张 sheet 只剩一个名字，页头页尾里的 ${sheet} 得另有出处（mzDocNames）
-        SheetConcat.Concated concated = SheetConcat.concat(outSheets, sheetTemplates, pageConfigs,
-                docIndexes, docNames);
+        // 名字同理 —— 拼完整张 sheet 只剩一个名字，页头页尾里的 ${sheet} 得另有出处（mzDocNames）。
+        // 段号与打印设置一起当拼接的判据（SheetConcat 只对它做 equals）：设置碰巧相同时，
+        // 清单页会被摞进后面那一摞单据里去，而清单本该是能单独筛选排序的一张表
+        SheetConcat.Concated concated = SheetConcat.concat(outSheets, sheetTemplates,
+                concatKeys(pageConfigs, segmentIds), docIndexes, docNames);
         result.setSheets(concated.sheets());
         // 每组的打印设置 = 该组第一份的那份（组里各份的设置本来就相同，不同才会另起一组）
         List<PageConfigDTO> merged = new ArrayList<>(concated.firstIndexes().size());
@@ -317,6 +447,22 @@ public class ReportRenderEngine {
             merged.add(pageConfigs.get(idx));
         }
         result.setSheetPageConfigs(merged);
+    }
+
+    /**
+     * 拼接的判据：段号 + 打印设置。{@link SheetConcat} 只对它做 {@code equals}，
+     * 所以段一变必定另起一张 sheet（清单不与单据摞在一起），段内仍照打印设置比对。
+     */
+    private record ConcatKey(int segment, PageConfigDTO setup) {
+    }
+
+    private List<Object> concatKeys(List<PageConfigDTO> pageConfigs, List<Integer> segmentIds) {
+        List<Object> keys = new ArrayList<>(pageConfigs.size());
+        for (int i = 0; i < pageConfigs.size(); i++) {
+            int seg = segmentIds == null || i >= segmentIds.size() ? 0 : segmentIds.get(i);
+            keys.add(new ConcatKey(seg, pageConfigs.get(i)));
+        }
+        return keys;
     }
 
     /**
@@ -329,6 +475,10 @@ public class ReportRenderEngine {
      * 印的是「第 7 页 共 20 页」—— 单据是一份份发出去的，那个数字对收到的人没有意义。
      *
      * <p>普通输出（{@code single}）不挂这一项，下游据此走「整份连续编号」的老路。
+     *
+     * <p>{@code docIndexes} 是**全局递增的单据号**而不是行下标：清单页也各自算一份单据
+     * （「本清单第 x 页 共 y 页」），同一行落在被清单隔开的两个段里时也是两份 —— 纸都被隔开了，
+     * 页码接着数没有意义。这里只比对相邻两份号相不相同，编号本身怎么来的不管。
      */
     private void markDocBreaks(List<Map<String, Object>> sheets, List<Integer> docIndexes) {
         if (docIndexes == null || docIndexes.size() != sheets.size()) {
@@ -364,6 +514,11 @@ public class ReportRenderEngine {
         if (templateCount > 1) {
             base = base + "-" + st.getName();
         }
+        return uniqueName(base, used);
+    }
+
+    /** 重名挂 (2)(3)：Excel 不允许同名工作表，而清单页的模板名与单据名都可能撞上。 */
+    private String uniqueName(String base, Set<String> used) {
         String unique = base;
         for (int n = 2; used.contains(unique); n++) {
             unique = base + "(" + n + ")";

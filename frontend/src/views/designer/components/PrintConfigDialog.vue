@@ -237,6 +237,21 @@
             <span v-else class="text-muted">未设置 —— 在左侧数据集面板点 ☆ 指定一个</span>
           </el-form-item>
 
+          <el-form-item v-if="canSplitSheet" label="本工作表">
+            <el-radio-group v-model="split.once">
+              <el-radio-button :value="false">跟着拆（每条数据一份）</el-radio-button>
+              <el-radio-button :value="true">只出一份（清单列表）</el-radio-button>
+            </el-radio-group>
+          </el-form-item>
+          <div v-if="canSplitSheet" class="tips" style="margin-top: -8px">
+            <p>
+              这一项<b>只管「{{ sheetName }}」这一张</b>（跟上面的「作用范围」无关，
+              全部标成清单页就等于没拆）。
+              <b>「只出一份」的那张拿到的是主接口的全量数据</b>，用来做清单列表；其余的每条数据各出一份。
+              模板顺序照旧，出纸就是「清单、数据1详情、数据2详情…」。
+            </p>
+          </div>
+
           <el-form-item v-if="split.splitMode !== 'single'" label="单据名">
             <el-select
               v-model="split.sheetNameField"
@@ -292,6 +307,11 @@
               导出的 Excel 里就是 N 个标签页。模板有 M 张 sheet 时一共出 <b>M×N 张</b>，
               顺序是「数据1的模板1/2/3、数据2的模板1/2/3」—— 同一条数据的几张单据挨着，
               但工作表一多就不好翻，只要「一条数据一页纸」的话选左边的「多 sheet 输出」更省事。
+            </p>
+            <p v-if="onceSheetNames.length">
+              <b>清单页：{{ onceSheetNames.join('、') }}</b> —— 这几张不跟着拆，各出一份、拿全量数据。
+              它们<b>自成一份单据</b>（页头页尾里的 <code>${page}</code> 从 1 数起），
+              <b>也不会被拼进单据那张 sheet 里</b>（哪怕打印设置一模一样）。
             </p>
             <p>
               打印设置按模板的 sheet 走：模板第 2 张设成横向，拆出来每一份的第 2 张都是横向。
@@ -421,8 +441,11 @@ const scope = ref('sheet')
  * 拆一份、拼回同一张 sheet、一份一页）/ 每条数据一个 sheet（`perRow`，同一套拆分不拼接，
  * 直接出 M×N 张 sheet）。
  * 和打印设置一样，编辑的是副本，点确定才写回 store。
+ *
+ * `once` 是**当前这张 sheet** 跟不跟着拆（true = 清单页，整份只渲染一次、拿全量数据），
+ * 落在 `content.sheetSplits[sheetIndex]` 上 —— 前两项是报表级的，只有它按 sheet 存。
  */
-const split = ref({ splitMode: 'single', sheetNameField: '' })
+const split = ref({ splitMode: 'single', sheetNameField: '', once: false })
 /**
  * 导出设置（**报表级**）：导出的文件叫什么名字 —— 报表名 + 主接口若干字段值。
  * 同样是编辑副本，点确定才写回 store。
@@ -452,7 +475,8 @@ watch(visible, (v) => {
   const stored = store.content.splitMode
   split.value = {
     splitMode: ['perRow', 'perRowPage'].includes(stored) ? stored : 'single',
-    sheetNameField: store.content.sheetNameField || ''
+    sheetNameField: store.content.sheetNameField || '',
+    once: store.sheetSplitOnce
   }
   exportCfg.value = normalizeExportConfig(store.content.exportConfig)
   // 单 sheet 报表没有「按 sheet 设」的意义，直接写报表级，避免存一份多余的覆盖
@@ -468,6 +492,27 @@ const primaryFields = computed(() => primary.value?.fields || [])
  * 只有「主接口是集合型」才拆得动：分页型自己就在按页取数，再按行拆 sheet 是两套分页打架。
  */
 const canSplit = computed(() => !!primary.value && primary.value.resultType !== 'page')
+/**
+ * 「这张跟不跟着拆」只在**多模板 + 真的在拆**时才有意义：单模板报表把唯一那张标成清单页，
+ * 等于把拆分整个关掉，那不是一个说得通的选择。
+ */
+const canSplitSheet = computed(() => canSplit.value && split.value.splitMode !== 'single' && multiSheet.value)
+/**
+ * 当前配置下哪几张是清单页（用于在 tips 里回显一遍）。
+ * **当前这张取弹窗里的待改值**，其余取 store 里已存的 —— 否则改了单选框、下面那行字纹丝不动。
+ */
+const onceSheetNames = computed(() => {
+  if (!canSplitSheet.value) return []
+  const current = String(store.sheetIndex)
+  return (store.content.sheets || [])
+    .map((s, i) => {
+      const once = String(i) === current
+        ? split.value.once
+        : store.content.sheetSplits?.[String(i)] === 'once'
+      return once ? s.name || `工作表${i + 1}` : null
+    })
+    .filter(Boolean)
+})
 
 /* ------------------------------ 导出 ------------------------------ */
 
@@ -565,8 +610,13 @@ function onConfirm() {
     }
   }
   store.setPageConfig(form.value, scope.value)
-  // 输出方式是报表级的，跟「作用范围」无关，单独写
-  store.setSheetSplit(canSplit.value ? split.value : { splitMode: 'single' })
+  // 输出方式是报表级的，跟「作用范围」无关，单独写；
+  // 里头的 once 只落在当前这张 sheet 上（多模板 + 真的在拆时才写，见 canSplitSheet）
+  store.setSheetSplit(
+    canSplit.value
+      ? { ...split.value, once: canSplitSheet.value ? split.value.once : undefined }
+      : { splitMode: 'single' }
+  )
   // 导出文件名也是报表级的一份，与「作用范围」无关
   store.setExportConfig(exportCfg.value)
   emit('applied')

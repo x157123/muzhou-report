@@ -66,6 +66,28 @@ public class ReportContentDTO implements Serializable {
     private String sheetNameField;
 
     /**
+     * <b>哪几张模板参与按行拆分</b>，key = 模板下标（字符串，与 {@link #pageConfigs} 同一套寻址），
+     * 值 {@code once} = 不参与（整份只渲染一次，主接口拿<b>全量</b>数据）/ {@code perRow} = 参与（默认）。
+     *
+     * <p>「第一张模板是清单列表、第二张是每条数据的详情」这种报表的出口：{@link #splitMode} 是
+     * <b>报表级</b>的总开关（拆不拆、拆完拼不拼），拆的时候<b>哪几张跟着拆</b>由这一项按模板决定。
+     * 没有它的话 {@code perRow} 会把清单页也复制 N 遍、每份还只喂一行数据 —— 清单就不成其为清单了。
+     *
+     * <p><b>只存「改过的」那些模板</b>，缺省即 {@code perRow} —— 老报表一个字都没有，行为不变。
+     */
+    private Map<String, String> sheetSplits = new LinkedHashMap<>();
+
+    /**
+     * 第 {@code sheetIndex} 张模板参不参与按行拆分（缺省参与）。
+     *
+     * <p>只在 {@link #splitByRow()} 为真时有意义；{@code single} 输出下每张模板本来就只渲染一次。
+     */
+    public boolean splitsSheet(int sheetIndex) {
+        String v = sheetSplits == null ? null : sheetSplits.get(String.valueOf(sheetIndex));
+        return !"once".equals(v);
+    }
+
+    /**
      * 父子关联（子接口查询）：主表取回的每一行，都拿它的字段值去查一遍子表。
      *
      * <p>只影响**取数**，扩展/公式/格式化一步没变，见 {@code engine/LinkedDataFetcher}。
@@ -99,10 +121,23 @@ public class ReportContentDTO implements Serializable {
     /**
      * 是否「按主接口每条数据拆分」——{@code perRow} 与 {@code perRowPage} 共用同一段拆分代码，
      * 区别只在拆完之后拼不拼（{@link #concatPerRow}）。还得真有主接口，不然不知道按谁拆。
+     *
+     * <p>还得<b>真有一张模板参与拆分</b>（{@link #splitsSheet}）：整份都标了 {@code once} 时
+     * 拆分是恒等变换，直接退回普通渲染那条路 —— 少一次主接口探测，也少给下游一堆
+     * 「一份单据」的标记。
      */
     public boolean splitByRow() {
-        return ("perRow".equals(splitMode) || "perRowPage".equals(splitMode))
-                && primaryDataset != null && !primaryDataset.isBlank();
+        if (!("perRow".equals(splitMode) || "perRowPage".equals(splitMode))
+                || primaryDataset == null || primaryDataset.isBlank()) {
+            return false;
+        }
+        int count = sheets == null ? 0 : sheets.size();
+        for (int i = 0; i < count; i++) {
+            if (splitsSheet(i)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** 拆完是否首尾相接拼回每个模板一张 sheet（每条数据之间打行分页符）。 */
@@ -142,6 +177,10 @@ public class ReportContentDTO implements Serializable {
      * {@code renderedIndex % 模板张数} 映射回模板下标；直接拿结果下标去查的话，
      * 第二条数据开始就全退回报表级默认值了。{@code perRowPage} 拼过之后这个推算不成立
      * （所以 {@link #splitPerRow} 把它排除在外），它必须靠 {@code mzTemplateIndex}。
+     *
+     * <p><b>混着 {@code once} 模板时（清单 + 明细）这个推算同样不成立</b> —— 清单那张只出一份，
+     * 后面的下标全错位了。那种结果一定带着 {@code mzTemplateIndex} 与
+     * {@code RenderResult.sheetPageConfigs}，走不到这里。
      */
     public PageConfigDTO pageConfigOfRendered(int renderedIndex) {
         int templateCount = sheets == null ? 0 : sheets.size();

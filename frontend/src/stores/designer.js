@@ -85,6 +85,10 @@ export const useDesignerStore = defineStore('designer', {
     hasOwnPageConfig(state) {
       return !!state.content.pageConfigs?.[String(state.sheetIndex)]
     },
+    /** 当前 sheet 是不是「清单页」（拆分时不跟着拆，整份只渲染一次、拿全量数据） */
+    sheetSplitOnce(state) {
+      return state.content.sheetSplits?.[String(state.sheetIndex)] === 'once'
+    },
     /** 报表中实际用到的数据集 code */
     usedDatasetCodes(state) {
       const set = new Set()
@@ -140,6 +144,13 @@ export const useDesignerStore = defineStore('designer', {
       content.primaryDataset = content.primaryDataset || ''
       content.splitMode = content.splitMode || 'single'
       content.sheetNameField = content.sheetNameField || ''
+      // 哪几张模板跟着拆：只认 once（不跟着拆），别的值一律当「跟着拆」丢掉 ——
+      // 与后端 ReportContentDTO#splitsSheet 同一条规则，存一堆没意义的值只会让 content 变脏
+      const splits = {}
+      Object.entries(content.sheetSplits || {}).forEach(([idx, v]) => {
+        if (v === 'once') splits[String(idx)] = 'once'
+      })
+      content.sheetSplits = splits
       content.datasetLinks = Array.isArray(content.datasetLinks) ? content.datasetLinks : []
       content.exportConfig = normalizeExportConfig(content.exportConfig)
       content.pageConfig = normalizePageConfig(content.pageConfig)
@@ -197,12 +208,14 @@ export const useDesignerStore = defineStore('designer', {
     setSheets(sheets) {
       if (!Array.isArray(sheets) || !sheets.length) return
       const next = toCelldataSheets(sheets)
-      // 删掉一张 sheet 会让它后面每张的下标往前挪，而 cellConfigs / pageConfigs 是按下标
-      // 寻址的 —— 必须按 sheet id 把 key 跟着搬过去，否则配置会对到别的 sheet 身上
+      // 删掉一张 sheet 会让它后面每张的下标往前挪，而 cellConfigs / pageConfigs / sheetSplits
+      // 都是按下标寻址的 —— 必须按 sheet id 把 key 跟着搬过去，否则配置会对到别的 sheet 身上
+      // （sheetSplits 搬错的后果尤其难查：清单页的标记跑到详情模板上，详情就只出一份了）
       const remap = sheetIndexRemap(this.content.sheets, next)
       if (remap) {
         this.content.cellConfigs = remapCellConfigs(this.content.cellConfigs, remap)
         this.content.pageConfigs = remapPageConfigs(this.content.pageConfigs, remap)
+        this.content.sheetSplits = remapPageConfigs(this.content.sheetSplits, remap)
         const to = remap.get(this.sheetIndex)
         if (to != null && to !== this.sheetIndex) {
           // 当前这张被删了（to<0）：先退到第一张，随后的 sheet-activate 会给出真正激活的那张
@@ -256,6 +269,8 @@ export const useDesignerStore = defineStore('designer', {
       } else {
         this.content.sheets = incoming
         this.content.cellConfigs = {}
+        // 版式整个换掉了，「哪张是清单页」说的是老模板，一起清掉
+        this.content.sheetSplits = {}
         this.content.pageConfig = normalizePageConfig(reportLevelIn)
         const perSheet = {}
         Object.entries(perSheetIn).forEach(([i, cfg]) => {
@@ -436,7 +451,7 @@ export const useDesignerStore = defineStore('designer', {
      * - `perRowPage`「多 sheet 输出」：按主接口每条数据拆一份，**首尾相接拼回同一张 sheet**、
      *   每份开头打一个行分页符 —— Excel 里是一张连续的表，打印时一条数据一页；
      * - `perRow`「每条数据一个 sheet」：**同一套拆分不拼接**，直接出 M×N 张 sheet
-     *   （M = 模板张数），导出的 Excel 里就是 M×N 个标签页。
+     *   （M = 跟着拆的模板张数），导出的 Excel 里就是那么多标签页。
      *
      * 跟打印设置一起在打印设置弹窗里配，但它是**报表级**的 —— 决定的是整个工作簿有几张 sheet，
      * 不是某一张 sheet 怎么出纸，所以不进 pageConfigs。
@@ -444,11 +459,33 @@ export const useDesignerStore = defineStore('designer', {
      * 两个拆分模式共用 `sheetNameField`，只是那个值落在哪儿不一样：`perRow` 拿它当 sheet 名，
      * `perRowPage` 拼成一张之后 sheet 名说不了话（整张只有一个名字），它改落在 `mzDocNames` 上
      * 当页头页尾里 `${sheet}` 的值（每张纸印自己那一份的单号）。`single` 用不上，清掉。
+     *
+     * `once` 是**当前这张 sheet** 的：拆的时候它不跟着拆，整份只渲染一次、主接口给它全量数据
+     * （清单列表页）。它**不跟弹窗上的「作用范围」走** —— 全部 sheet 都标成清单页就等于没拆，
+     * 那不是一个说得通的选择，所以只能一张一张标。`single` 时整份清掉：没拆分就没有「跟不跟着拆」。
      */
-    setSheetSplit({ splitMode, sheetNameField }) {
+    setSheetSplit({ splitMode, sheetNameField, once }) {
       const mode = ['perRow', 'perRowPage'].includes(splitMode) ? splitMode : 'single'
       this.content.splitMode = mode
       this.content.sheetNameField = mode === 'single' ? '' : sheetNameField || ''
+      if (mode === 'single') {
+        this.content.sheetSplits = {}
+      } else if (once !== undefined) {
+        this.setSheetSplitScope(this.sheetIndex, once)
+      }
+      this.dirty = true
+    },
+
+    /**
+     * 第 `sheetIndex` 张模板跟不跟着拆：`once=true` 不跟着拆（清单页）。
+     *
+     * **只存标了 once 的那些**，跟着拆是缺省 —— 存一堆 `perRow` 只会让老报表的 content
+     * 平白多出一截，也让「这张有没有特殊设置」不好判断（同 pageConfigs 只存改过的那些）。
+     */
+    setSheetSplitScope(sheetIndex, once) {
+      const key = String(sheetIndex)
+      if (once) this.content.sheetSplits[key] = 'once'
+      else delete this.content.sheetSplits[key]
       this.dirty = true
     },
 

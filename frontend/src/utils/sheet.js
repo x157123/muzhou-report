@@ -105,6 +105,14 @@ export function createEmptyContent() {
     splitMode: 'single',
     /** 拆分时单据名取主接口的哪个字段（perRow 当 sheet 名，perRowPage 当 ${sheet} 的值） */
     sheetNameField: '',
+    /**
+     * 哪几张模板**跟着拆**，key = 模板下标，值 `once` = 不跟着拆（整份只渲染一次、拿全量数据）。
+     * 缺省即跟着拆 —— 老报表一项都没有，行为不变。
+     *
+     * splitMode 是报表级的总开关（拆不拆），这一项按模板决定谁参与：
+     * 「第一张是清单列表、第二张是每条数据的详情」就靠它。
+     */
+    sheetSplits: {},
     /** 父子关联（子接口查询）：[{name, master, child, mappings:[{param, field}]}] */
     datasetLinks: [],
     /** 导出设置：下载下来的文件叫什么名字，见 normalizeExportConfig */
@@ -388,7 +396,11 @@ export function remapCellConfigs(cellConfigs, remap) {
   return out
 }
 
-/** 按下标映射搬 `pageConfigs` 的 key（key 本身就是下标）；sheet 已删的条目丢掉 */
+/**
+ * 按下标映射搬 `pageConfigs` 的 key（key 本身就是下标）；sheet 已删的条目丢掉。
+ *
+ * **`sheetSplits`（哪几张模板跟着拆）共用这个函数** —— 两者是同一套寻址，值原样搬。
+ */
 export function remapPageConfigs(pageConfigs, remap) {
   const out = {}
   Object.entries(pageConfigs || {}).forEach(([key, cfg]) => {
@@ -492,9 +504,12 @@ export function pruneSheetConfigs(content) {
   }
   Object.keys(content.cellConfigs || {}).forEach((k) => mark(Number(k.split('_')[0])))
   Object.keys(content.pageConfigs || {}).forEach((k) => mark(Number(k)))
+  Object.keys(content.sheetSplits || {}).forEach((k) => mark(Number(k)))
   if (!dead.size) return content
   content.cellConfigs = remapCellConfigs(content.cellConfigs, dead)
   content.pageConfigs = remapPageConfigs(content.pageConfigs, dead)
+  // 同一套寻址，同一个坑：留着越界的条目，新增一张 sheet 就会莫名其妙「继承」到清单页的标记
+  content.sheetSplits = remapPageConfigs(content.sheetSplits, dead)
   return content
 }
 
