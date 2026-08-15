@@ -12,83 +12,29 @@
     <div class="tips">
       版本化的是<b>版式</b>：每一版持有一份完整的报表内容。用哪一版由<b>生效时间段</b>加
       <b>匹配条件</b>（类型/区域这类维度）两维决定 —— <b>先按时间圈出这一刻生效的那几版，
-      再按匹配条件从中定唯一一份</b>，判定值从哪来在下面配。
-      改<b>数据集</b>会同时影响所有版本（数据集不随版本走）。
+      再按匹配条件从中定唯一一份</b>。改<b>数据集</b>会同时影响所有版本（数据集不随版本走）。
     </div>
-
-    <el-form label-width="96px" size="small" class="version-config-form">
-      <el-form-item label="判定依据">
-        <el-radio-group v-model="versionConfig.source" @change="applyVersionConfig">
-          <el-radio-button value="field">主接口字段</el-radio-button>
-          <el-radio-button value="param">报表参数</el-radio-button>
-          <el-radio-button value="now">渲染当日</el-radio-button>
-        </el-radio-group>
-      </el-form-item>
-
-      <el-form-item v-if="versionConfig.source === 'field'" label="字段">
-        <el-select
-          v-model="versionConfig.field"
-          placeholder="取主接口的哪个字段（留空 = 只按条件选）"
-          clearable
-          filterable
-          style="width: 260px"
-          @change="applyVersionConfig"
-        >
-          <el-option
-            v-for="f in primaryFields"
-            :key="f.fieldName"
-            :label="`${f.fieldText || f.fieldName} (${f.fieldName})`"
-            :value="f.fieldName"
-          />
-        </el-select>
-        <span v-if="!primary" class="text-muted" style="margin-left: 8px">
-          未设主接口 —— 在左侧数据集面板点 ☆ 指定一个
-        </span>
-      </el-form-item>
-
-      <el-form-item v-else-if="versionConfig.source === 'param'" label="参数">
-        <el-select
-          v-model="versionConfig.field"
-          placeholder="取哪个报表参数"
-          clearable
-          filterable
-          style="width: 260px"
-          @change="applyVersionConfig"
-        >
-          <el-option
-            v-for="p in reportParams"
-            :key="p.name"
-            :label="`${p.text || p.name} (${p.name})`"
-            :value="p.name"
-          />
-        </el-select>
-      </el-form-item>
-
-      <el-form-item label="无法判定时">
-        <el-radio-group v-model="versionConfig.fallback" @change="applyVersionConfig">
-          <el-radio-button value="default">用默认版本{{ defaultLabel }}</el-radio-button>
-          <el-radio-button value="error">直接报错</el-radio-button>
-        </el-radio-group>
-      </el-form-item>
-    </el-form>
 
     <div class="tips">
       <p>
-        选版本分<b>两步</b>：<b>先</b>用生效时间圈出这一刻生效的那几版（判定依据只管这一维，
-        留空就是不按时间筛），<b>再</b>照「起点更晚的优先、同起点版本号大的优先」的次序
-        逐个试匹配条件，<b>第一个条件满足的就是它</b>。没配条件 = 任何数据都满足，
+        选版本分<b>两步</b>：<b>先</b>拿「生效时间段」表头上那个<b>判定字段</b>的值圈出这一刻生效的
+        那几版（字段留空就是不按时间筛），<b>再</b>照「起点更晚的优先、同起点版本号大的优先」的
+        次序逐个试匹配条件，<b>第一个条件满足的就是它</b>。没配条件 = 任何数据都满足，
         所以它是同一时间段里的兜底。
       </p>
       <p v-if="splitByRow">
         「每条数据一张/一页」时，<b>每条数据按自己那一行的字段值各选各的版式</b>（时间判定字段
         与匹配条件里取主接口字段的那些都逐行判）—— 跨期、跨类型的一批单据可以一次打完。
       </p>
-      <p v-else-if="versionConfig.source === 'field' && versionConfig.field">
+      <p v-else-if="versionConfig.field">
         非拆分报表取的是主接口<b>第一行</b>的字段值；汇总类报表第一行的日期未必代表整张表，
-        建议改用「报表参数」或「渲染当日」。
+        配之前先确认这个字段说得了整张表的话。
       </p>
       <p>
-        <b>判定依据是报表级设置</b>，改完记得点顶部工具栏的<b>保存</b>才会写回报表；
+        判定字段取不到值、或者哪一版都没轮上，一律用<b>默认版本{{ defaultLabel }}</b>。
+      </p>
+      <p>
+        <b>判定字段是报表级设置</b>，改完记得点顶部工具栏的<b>保存</b>才会写回报表；
         下面各版本自己的匹配条件/生效时间/名称/启停改了立即生效，不必再按保存。
       </p>
     </div>
@@ -113,8 +59,37 @@
       <!--
         两个独立的日期框而不是一个 datetimerange：range 选择器只能整段填或整段清，
         配不出「从 5/1 起、右端不限」这种最常见的写法。
+
+        判定字段（报表级）挂在这一列的**表头**上：它管的就是这一列 —— 拿它的值去圈时间段，
+        放在弹窗顶上另起一栏时看不出这层关系。判定值只取自主接口字段，取不到就用默认版本，
+        所以不再有「判定依据」「无法判定时」那两组单选。
       -->
       <el-table-column label="生效时间段" width="300">
+        <template #header>
+          <div class="col-head">
+            <span>生效时间段</span>
+            <el-select
+              v-model="versionConfig.field"
+              placeholder="判定字段（空 = 不按时间筛）"
+              clearable
+              filterable
+              size="small"
+              :disabled="!primary"
+              class="field-select"
+              @change="applyVersionConfig"
+            >
+              <el-option
+                v-for="f in primaryFields"
+                :key="f.fieldName"
+                :label="`${f.fieldText || f.fieldName} (${f.fieldName})`"
+                :value="f.fieldName"
+              />
+            </el-select>
+            <div v-if="!primary" class="hint text-muted">
+              未设主接口 —— 在左侧数据集面板点 ☆ 指定一个
+            </div>
+          </div>
+        </template>
         <template #default="{ row }">
           <div class="range">
             <el-date-picker
@@ -265,16 +240,18 @@ function rawVersion(id) {
 }
 
 /**
- * 版本切换规则（判定依据 / 字段 / 取不到时怎么办）：**报表级**设置，原来放在打印设置弹窗的
- * 「版本」页签，和这里的版本列表分散两处不好找，合并到版本管理里一起改。
- * 绑的是 `store.report.versionConfig` 而不是 content —— content 本身就是被版本化的那个东西，
- * 规则放进去就成了「每个版本各有一套怎么选自己」，逻辑成环；和报表名一样，改了要点顶部工具栏
- * 的保存才落库，所以这里只改本地 store、不单独调接口。
+ * 版本切换规则：**报表级**设置，原来放在打印设置弹窗的「版本」页签，和这里的版本列表分散两处
+ * 不好找，合并到版本管理里一起改。绑的是 `store.report.versionConfig` 而不是 content ——
+ * content 本身就是被版本化的那个东西，规则放进去就成了「每个版本各有一套怎么选自己」，逻辑成环；
+ * 和报表名一样，改了要点顶部工具栏的保存才落库，所以这里只改本地 store、不单独调接口。
+ *
+ * 界面上只剩「判定字段」一项：判定值一律取自**主接口字段**，取不到就用默认版本。
+ * `source` / `fallback` 两项仍照原样写进去（后端契约没变），只是不再让用户选 ——
+ * 「报表参数」「渲染当日」和「直接报错」三个选项实际没人用，摆在那儿只是让人多猜一轮。
  */
 const versionConfig = ref({ source: 'field', field: '', fallback: 'default' })
 const primary = computed(() => store.datasetByCode(store.content.primaryDataset))
 const primaryFields = computed(() => primary.value?.fields || [])
-const reportParams = computed(() => store.content.params || [])
 const splitByRow = computed(() => ['perRow', 'perRowPage'].includes(store.content.splitMode))
 const defaultLabel = computed(() => {
   const d = rows.value.find((v) => v.isDefault)
@@ -288,7 +265,16 @@ function applyVersionConfig() {
 watch(visible, (v) => {
   if (!v) return
   load()
-  versionConfig.value = store.versionConfigOf()
+  const cfg = store.versionConfigOf()
+  // 老报表可能配的是「报表参数」/「渲染当日」：field 存的是参数名、不是主接口字段名，
+  // 直接当字段用会指到一个不存在的列上，所以一并清掉，由用户重新选一个主接口字段。
+  versionConfig.value = {
+    source: 'field',
+    field: cfg.source === 'field' ? cfg.field || '' : '',
+    fallback: 'default'
+  }
+  // 归一化过就写回 store（还是要点保存才落库）—— 不写回的话界面上看到的和真正生效的不是一回事。
+  if (cfg.source !== 'field' || cfg.fallback !== 'default') applyVersionConfig()
 })
 
 async function load() {
@@ -407,8 +393,16 @@ function emitOpen(row) {
 .tips p {
   margin: 0;
 }
-.version-config-form {
-  margin-bottom: 4px;
+/* 表头里塞了一个字段选择框：标题一行、选择框一行，别把日期那两列挤窄 */
+.col-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 2px 0;
+}
+.col-head .field-select {
+  width: 100%;
+  font-weight: normal;
 }
 .mono {
   margin-right: 6px;
