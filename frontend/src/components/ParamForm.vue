@@ -57,6 +57,7 @@
         v-model="form[p.name]"
         :placeholder="`请选择${p.text || p.name}`"
         clearable
+        filterable
         style="width: 180px"
         @change="emitChange"
       >

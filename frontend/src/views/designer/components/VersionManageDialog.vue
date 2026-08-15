@@ -30,6 +30,7 @@
           v-model="versionConfig.field"
           placeholder="取主接口的哪个字段（留空 = 只按条件选）"
           clearable
+          filterable
           style="width: 260px"
           @change="applyVersionConfig"
         >
@@ -50,6 +51,7 @@
           v-model="versionConfig.field"
           placeholder="取哪个报表参数"
           clearable
+          filterable
           style="width: 260px"
           @change="applyVersionConfig"
         >

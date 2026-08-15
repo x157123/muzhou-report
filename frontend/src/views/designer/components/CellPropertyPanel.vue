@@ -33,6 +33,7 @@
             <el-select
               :model-value="config?.datasetCode"
               placeholder="请选择数据集"
+              filterable
               style="width: 100%"
               @change="onChange('datasetCode', $event)"
             >
@@ -48,12 +49,15 @@
           <el-form-item label="字段">
             <el-select
               :model-value="config?.field"
-              placeholder="请选择字段"
+              placeholder="请选择字段（可搜字段名或中文名）"
+              filterable
+              :filter-method="(q) => (fieldQuery = q)"
               style="width: 100%"
               @change="onChange('field', $event)"
+              @visible-change="onFieldVisible"
             >
               <el-option
-                v-for="f in currentFields"
+                v-for="f in filteredFields"
                 :key="f.fieldName"
                 :label="f.fieldText || f.fieldName"
                 :value="f.fieldName"
@@ -72,11 +76,14 @@
                 :model-value="config?.fallbackField || ''"
                 placeholder="不兜底（出空白）"
                 clearable
+                filterable
+                :filter-method="(q) => (fallbackQuery = q)"
                 style="width: 100%"
                 @change="onChange('fallbackField', $event || '')"
+                @visible-change="onFallbackVisible"
               >
                 <el-option
-                  v-for="f in fallbackFields"
+                  v-for="f in filteredFallbackFields"
                   :key="f.fieldName"
                   :label="f.fieldText || f.fieldName"
                   :value="f.fieldName"
@@ -249,7 +256,7 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import {
   toA1,
   CELL_TYPES,
@@ -321,6 +328,39 @@ const currentFields = computed(() => {
 const fallbackFields = computed(() =>
   currentFields.value.filter((f) => f.fieldName !== props.config?.field)
 )
+
+/**
+ * 字段下拉的搜索：**字段名与中文名都能搜到**。
+ *
+ * 这个面板窄，选项标签只写 `fieldText || fieldName`（别的地方是
+ * `中文名 (field_name)`，宽度够）—— 而 el-select 自带的过滤只认标签文本，
+ * 于是设了中文名的字段就再也搜不到它的英文名了，偏偏手写 `#{code.field}` 时
+ * 记住的往往正是英文名。所以自己接管过滤，两样都比对。
+ */
+function matchFields(list, keyword) {
+  const kw = String(keyword || '').trim().toLowerCase()
+  if (!kw) return list
+  return list.filter((f) =>
+    `${f.fieldName || ''} ${f.fieldText || ''}`.toLowerCase().includes(kw)
+  )
+}
+
+const fieldQuery = ref('')
+const fallbackQuery = ref('')
+const filteredFields = computed(() => matchFields(currentFields.value, fieldQuery.value))
+const filteredFallbackFields = computed(() => matchFields(fallbackFields.value, fallbackQuery.value))
+
+/**
+ * 下拉收起时把关键字清掉：el-select 自己会清输入框，但过滤用的是我们这份状态，
+ * 不清的话下次展开看到的还是上次搜剩下的那几条。
+ */
+function onFieldVisible(visible) {
+  if (!visible) fieldQuery.value = ''
+}
+
+function onFallbackVisible(visible) {
+  if (!visible) fallbackQuery.value = ''
+}
 
 /**
  * `img` 的兜底只在「字段本身没值」时管用：地址取不回来是导出时（服务端下载）才知道的，

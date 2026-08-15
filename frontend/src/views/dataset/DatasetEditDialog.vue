@@ -95,7 +95,7 @@
       <!-- SQL 类型 -->
       <template v-if="form.type === 'sql'">
         <el-form-item label="数据源" prop="datasourceId">
-          <el-select v-model="form.datasourceId" placeholder="请选择数据源" style="width: 320px">
+          <el-select v-model="form.datasourceId" placeholder="请选择数据源" filterable style="width: 320px">
             <el-option v-for="ds in datasourceList" :key="ds.id" :label="ds.name" :value="ds.id" />
           </el-select>
         </el-form-item>

@@ -238,7 +238,13 @@
           </el-form-item>
 
           <el-form-item v-if="split.splitMode !== 'single'" label="单据名">
-            <el-select v-model="split.sheetNameField" placeholder="取主接口的哪个字段" clearable style="width: 260px">
+            <el-select
+              v-model="split.sheetNameField"
+              placeholder="取主接口的哪个字段"
+              clearable
+              filterable
+              style="width: 260px"
+            >
               <el-option
                 v-for="f in primaryFields"
                 :key="f.fieldName"
@@ -305,6 +311,7 @@
             <el-select
               v-model="exportCfg.fields"
               multiple
+              filterable
               :disabled="!primary"
               placeholder="取主接口的哪几个字段（可多选，按选中顺序拼）"
               style="width: 100%"
