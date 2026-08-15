@@ -131,6 +131,21 @@ export function createEmptyContent() {
   }
 }
 
+/**
+ * 归一 `sheetSplits`（哪几张模板跟着拆）：**只留标了 `once` 的那些**。
+ *
+ * 跟着拆是缺省，存一堆 `perRow` 只会让 content 平白多出一截，也让「这张有没有特殊设置」
+ * 不好判断（同 `pageConfigs` 只存改过的那些）。与后端 `ReportContentDTO#splitsSheet`
+ * 是同一条规则：认不得的值一律当「跟着拆」。
+ */
+export function normalizeSheetSplits(splits) {
+  const out = {}
+  Object.entries(splits || {}).forEach(([idx, v]) => {
+    if (v === 'once') out[String(idx)] = 'once'
+  })
+  return out
+}
+
 /** 默认单元格配置 */
 export function defaultCellConfig(sheetIndex, r, c) {
   return {

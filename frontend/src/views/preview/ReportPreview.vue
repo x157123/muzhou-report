@@ -46,7 +46,9 @@
           </el-dropdown-menu>
         </template>
       </el-dropdown>
-      <el-button :icon="Printer" :loading="printing" @click="handlePrint">打印</el-button>
+      <!-- 打的范围跟着看到的：PDF 视图是整本，表格视图只打当前那张 —— 按钮上说清楚，
+           否则多工作表报表点下去只出一张纸，看着像是漏印了 -->
+      <el-button :icon="Printer" :loading="printing" :title="printHint" @click="handlePrint">打印</el-button>
     </div>
 
     <div class="preview-body" v-loading="loading || pdfLoading">
@@ -199,6 +201,16 @@ let pdfSeq = 0
  * 表格视图下打印只打这一张（见 handlePrint），`@page` 也跟着它走；PDF 视图下用不到它。
  */
 const activeSheetIndex = ref(0)
+
+/**
+ * 打印按钮的悬停提示：**打的范围跟着看到的**。
+ * 多工作表报表在表格视图下点打印只出当前那一张，不写清楚就像是漏印了。
+ */
+const printHint = computed(() =>
+  viewMode.value === 'pdf'
+    ? '打印整本（所有工作表，与「导出 PDF」拿到的一样）'
+    : '只打印当前这张工作表；要整本请切到 PDF 视图'
+)
 
 /**
  * 主接口（报表里设的那个分页型数据集）自报的总条数，null = 这张报表不分页。

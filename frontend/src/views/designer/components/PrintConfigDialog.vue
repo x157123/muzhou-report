@@ -1,7 +1,10 @@
 <!--
   打印设置弹窗：编辑当前 sheet 生效的打印设置的副本，点击确定才写回 store。
   设置同时作用于：设计器画布上的分页线、预览页浏览器打印、Excel / PDF / Word 导出的页面设置。
-  作用范围可选「仅当前工作表」或「全部工作表」——一份宽表和一份窄表可以各用各的纸张方向。
+  作用范围三选一：「仅当前工作表」「全部工作表」（会清掉各表的独立设置）「跟随报表设置」——
+  一份宽表和一份窄表可以各用各的纸张方向。
+  多工作表报表另有一个「工作表」页签：一眼看全每张的纸张/独立设置/打印区域，
+  并在那里逐张勾「只出一份」（拆分时不跟着拆的清单页）——它是跨表的一项，不该逼用户切表。
 -->
 <template>
   <el-dialog v-model="visible" :title="title" width="660px" :close-on-click-modal="false" destroy-on-close>
@@ -11,19 +14,37 @@
           <el-radio-group v-model="scope">
             <el-radio-button value="sheet">仅「{{ sheetName }}」</el-radio-button>
             <el-radio-button value="all">全部工作表</el-radio-button>
+            <!-- 本来就没有独立设置时这一项没有意义，灰掉，免得点了以为改了什么 -->
+            <el-radio-button value="follow" :disabled="!store.hasOwnPageConfig">跟随报表设置</el-radio-button>
           </el-radio-group>
-          <el-button v-if="store.hasOwnPageConfig" link type="primary" @click="followReport">
-            改回跟随报表设置
-          </el-button>
-          <span v-else class="text-muted">当前跟随报表设置</span>
+          <span v-if="!store.hasOwnPageConfig && scope !== 'all'" class="text-muted">
+            当前跟随报表设置
+          </span>
         </div>
       </el-form-item>
+      <!-- 「全部工作表」会把各表的独立设置一起清掉，这事得在点确定之前就说清楚 -->
+      <el-alert
+        v-if="scope === 'all' && ownConfigSheets.length"
+        type="warning"
+        :closable="false"
+        show-icon
+        style="margin: -8px 0 12px"
+        :title="`将清除 ${ownConfigSheets.length} 张工作表的独立设置：${ownConfigSheets.join('、')}`"
+      />
+      <el-alert
+        v-if="scope === 'follow'"
+        type="info"
+        :closable="false"
+        show-icon
+        style="margin: -8px 0 12px"
+        :title="`「${sheetName}」将改回跟随报表设置，下面「页面 / 页头页尾 / 水印」三项显示的就是报表级的值`"
+      />
     </el-form>
 
     <el-tabs v-model="tab">
       <!-- ------------------------------ 页面 ------------------------------ -->
       <el-tab-pane label="页面" name="page">
-        <el-form label-width="96px" size="small">
+        <el-form label-width="96px" size="small" :disabled="followMode">
           <el-form-item label="纸张">
             <el-select v-model="form.paperSize" style="width: 100%">
               <el-option v-for="p in PAPER_OPTIONS" :key="p.value" :label="p.label" :value="p.value" />
@@ -112,7 +133,7 @@
 
       <!-- ---------------------------- 页头页尾 ---------------------------- -->
       <el-tab-pane label="页头页尾" name="headerFooter">
-        <el-form label-width="96px" size="small">
+        <el-form label-width="96px" size="small" :disabled="followMode">
           <el-form-item label="页头">
             <div class="hf-grid">
               <el-input
@@ -188,7 +209,7 @@
 
       <!-- ------------------------------ 水印 ------------------------------ -->
       <el-tab-pane label="水印" name="watermark">
-        <el-form label-width="96px" size="small">
+        <el-form label-width="96px" size="small" :disabled="followMode">
           <el-form-item label="水印文字">
             <el-input v-model="form.watermark.text" placeholder="留空 = 不加水印，例如 内部资料" clearable />
           </el-form-item>
@@ -236,21 +257,6 @@
             <span v-if="primary" class="mono">{{ primary.name }}（{{ primary.code }}）</span>
             <span v-else class="text-muted">未设置 —— 在左侧数据集面板点 ☆ 指定一个</span>
           </el-form-item>
-
-          <el-form-item v-if="canSplitSheet" label="本工作表">
-            <el-radio-group v-model="split.once">
-              <el-radio-button :value="false">跟着拆（每条数据一份）</el-radio-button>
-              <el-radio-button :value="true">只出一份（清单列表）</el-radio-button>
-            </el-radio-group>
-          </el-form-item>
-          <div v-if="canSplitSheet" class="tips" style="margin-top: -8px">
-            <p>
-              这一项<b>只管「{{ sheetName }}」这一张</b>（跟上面的「作用范围」无关，
-              全部标成清单页就等于没拆）。
-              <b>「只出一份」的那张拿到的是主接口的全量数据</b>，用来做清单列表；其余的每条数据各出一份。
-              模板顺序照旧，出纸就是「清单、数据1详情、数据2详情…」。
-            </p>
-          </div>
 
           <el-form-item v-if="split.splitMode !== 'single'" label="单据名">
             <el-select
@@ -308,10 +314,16 @@
               顺序是「数据1的模板1/2/3、数据2的模板1/2/3」—— 同一条数据的几张单据挨着，
               但工作表一多就不好翻，只要「一条数据一页纸」的话选左边的「多 sheet 输出」更省事。
             </p>
-            <p v-if="onceSheetNames.length">
-              <b>清单页：{{ onceSheetNames.join('、') }}</b> —— 这几张不跟着拆，各出一份、拿全量数据。
-              它们<b>自成一份单据</b>（页头页尾里的 <code>${page}</code> 从 1 数起），
-              <b>也不会被拼进单据那张 sheet 里</b>（哪怕打印设置一模一样）。
+            <p v-if="canSplitSheet">
+              <template v-if="onceSheetNames.length">
+                <b>清单页：{{ onceSheetNames.join('、') }}</b> —— 这几张不跟着拆，各出一份、拿全量数据，
+                <b>自成一份单据</b>（页头页尾里的 <code>${page}</code> 从 1 数起），
+                <b>也不会被拼进单据那张 sheet 里</b>（哪怕打印设置一模一样）。
+              </template>
+              <template v-else>眼下每张模板都跟着拆。</template>
+              要做「第一张清单列表 + 每条数据一份详情」，去
+              <el-link type="primary" :underline="false" @click="tab = 'sheets'">「工作表」页签</el-link>
+              把清单那张勾成「只出一份」。
             </p>
             <p>
               打印设置按模板的 sheet 走：模板第 2 张设成横向，拆出来每一份的第 2 张都是横向。
@@ -375,6 +387,59 @@
           </div>
         </el-form>
       </el-tab-pane>
+
+      <!-- ---------------------------- 工作表一览 ---------------------------- -->
+      <el-tab-pane v-if="multiSheet" label="工作表" name="sheets">
+        <el-table :data="sheetRows" size="small" :border="false" max-height="360">
+          <el-table-column label="工作表" min-width="130">
+            <template #default="{ row }">
+              <span :class="{ 'row-current': row.current }">{{ row.name }}</span>
+              <el-tag v-if="row.current" size="small" type="info" style="margin-left: 6px">当前</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="纸张" prop="paper" width="100" />
+          <el-table-column label="打印设置" width="100">
+            <template #default="{ row }">
+              <span :class="row.own ? '' : 'text-muted'">{{ row.own ? '单独设置' : '跟随报表' }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="打印区域 / 标题行" min-width="140">
+            <template #default="{ row }">
+              <span v-if="row.printArea || row.titleRows" class="mono">
+                {{ row.printArea || '—' }} / {{ row.titleRows || '—' }}
+              </span>
+              <span v-else class="text-muted">—</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="拆分" width="120">
+            <template #default="{ row }">
+              <el-checkbox
+                :model-value="row.once"
+                :disabled="!canSplitSheet"
+                @change="(v) => toggleOnce(row.index, v)"
+              >
+                只出一份
+              </el-checkbox>
+            </template>
+          </el-table-column>
+        </el-table>
+
+        <div class="tips tips-flush">
+          <p>
+            纸张、页边距这些<b>只在这里看，不在这里改</b> —— 改还是切到那张工作表去改，
+            两处都能改迟早对不齐。「打印设置」那列写「跟随报表」的，改报表级设置时会跟着变。
+          </p>
+          <p v-if="canSplitSheet">
+            <b>「只出一份」= 这张不跟着拆</b>：整份只渲染一次、主接口给它<b>全量</b>数据（清单列表），
+            其余的每条数据各出一份。出纸顺序照模板顺序走，
+            「清单 + 详情」出来就是「清单、数据1详情、数据2详情…」。
+            <b>点确定才生效</b>，和这个弹窗里其余的设置一样。
+          </p>
+          <p v-else-if="split.splitMode === 'single'" class="text-muted">
+            「输出」页签里选了按数据拆分之后，才谈得上「哪几张跟着拆」。
+          </p>
+        </div>
+      </el-tab-pane>
     </el-tabs>
 
     <div class="preview-summary">
@@ -404,6 +469,7 @@ import {
   ORIENTATIONS,
   HEADER_PLACEHOLDERS,
   normalizePageConfig,
+  pageConfigOf,
   printableSizeMm,
   computePageBreaks,
   headerFooterReserveMm,
@@ -434,18 +500,33 @@ const SECTIONS = [
 
 const store = useDesignerStore()
 const form = ref(normalizePageConfig(null))
-/** 'sheet' 仅当前工作表 | 'all' 全部工作表 */
+/**
+ * 打印设置写到哪儿：`sheet` 只给当前工作表 | `all` 写成报表级并**清掉各表的独立设置** |
+ * `follow` 撤掉当前工作表的独立设置、改回跟随报表级。
+ *
+ * 三个是互斥的一件事，所以做成一组单选而不是「两个单选 + 一个立即生效的链接」——
+ * 原先那个「改回跟随报表设置」按钮点下去就写库了，和弹窗其余部分「点确定才写回」不是一套，
+ * 点取消也撤不回来。现在三条路都是草稿，取消一律不留痕迹。
+ */
 const scope = ref('sheet')
+/** 跟随报表时，「页面 / 页头页尾 / 水印」整块禁用 —— 那三项写的就是本表自己那份，改了也不会存 */
+const followMode = computed(() => scope.value === 'follow')
 /**
  * 输出方式（报表级，不按 sheet 分）：单 sheet / 多 sheet 输出（`perRowPage`，按主接口每条数据
  * 拆一份、拼回同一张 sheet、一份一页）/ 每条数据一个 sheet（`perRow`，同一套拆分不拼接，
  * 直接出 M×N 张 sheet）。
  * 和打印设置一样，编辑的是副本，点确定才写回 store。
  *
- * `once` 是**当前这张 sheet** 跟不跟着拆（true = 清单页，整份只渲染一次、拿全量数据），
- * 落在 `content.sheetSplits[sheetIndex]` 上 —— 前两项是报表级的，只有它按 sheet 存。
+ * 这两项都是**报表级**的；「哪几张跟着拆」按 sheet 存，在 {@link splits} 里。
  */
-const split = ref({ splitMode: 'single', sheetNameField: '', once: false })
+const split = ref({ splitMode: 'single', sheetNameField: '' })
+/**
+ * 哪几张模板是清单页（`content.sheetSplits` 的草稿，key = 模板下标，值恒为 `once`）。
+ *
+ * **跨表的一项，所以不跟着「作用范围」走、也不该逼用户切表** —— 在「工作表」页签里
+ * 一张一张勾，点确定整份写回。
+ */
+const splits = ref({})
 /**
  * 导出设置（**报表级**）：导出的文件叫什么名字 —— 报表名 + 主接口若干字段值。
  * 同样是编辑副本，点确定才写回 store。
@@ -462,6 +543,14 @@ const visible = computed({
 
 const sheetCount = computed(() => store.content.sheets?.length || 0)
 const multiSheet = computed(() => sheetCount.value > 1)
+/** 眼下有自己那份打印设置的工作表名 —— 选「全部工作表」时它们会被清掉，先摆出来 */
+const ownConfigSheets = computed(() =>
+  Object.keys(store.content.pageConfigs || {})
+    .map((k) => Number(k))
+    .filter((i) => Number.isInteger(i) && i >= 0 && i < sheetCount.value)
+    .sort((a, b) => a - b)
+    .map((i) => store.content.sheets[i]?.name || `工作表${i + 1}`)
+)
 const sheetName = computed(() => props.sheet?.name || `工作表${store.sheetIndex + 1}`)
 const title = computed(() => (multiSheet.value ? `打印设置 · ${sheetName.value}` : '打印设置'))
 
@@ -475,14 +564,29 @@ watch(visible, (v) => {
   const stored = store.content.splitMode
   split.value = {
     splitMode: ['perRow', 'perRowPage'].includes(stored) ? stored : 'single',
-    sheetNameField: store.content.sheetNameField || '',
-    once: store.sheetSplitOnce
+    sheetNameField: store.content.sheetNameField || ''
   }
+  // 哪几张是清单页：整份拷一份当草稿（它是跨表的一项，在「工作表」页签里逐张勾）
+  splits.value = { ...(store.content.sheetSplits || {}) }
   exportCfg.value = normalizeExportConfig(store.content.exportConfig)
   // 单 sheet 报表没有「按 sheet 设」的意义，直接写报表级，避免存一份多余的覆盖
   scope.value = multiSheet.value ? 'sheet' : 'all'
   tab.value = 'page'
   target.value = { part: 'header', section: 'center' }
+})
+
+/**
+ * 切到「跟随报表设置」时，把报表级那份装进表单 —— 那三张表单同时被禁用，
+ * 于是用户看到的就是确定之后本表会变成的样子，而不是自己那份已经作废的设置。
+ * 切回来再装回本表生效的那份。
+ */
+watch(scope, (v, old) => {
+  if (!visible.value || v === old) return
+  if (v === 'follow') {
+    form.value = normalizePageConfig(JSON.parse(JSON.stringify(store.content.pageConfig)))
+  } else if (old === 'follow') {
+    form.value = normalizePageConfig(JSON.parse(JSON.stringify(store.pageConfig)))
+  }
 })
 
 /** 当前报表的主接口（含字段），没设主接口时为 null */
@@ -493,26 +597,48 @@ const primaryFields = computed(() => primary.value?.fields || [])
  */
 const canSplit = computed(() => !!primary.value && primary.value.resultType !== 'page')
 /**
- * 「这张跟不跟着拆」只在**多模板 + 真的在拆**时才有意义：单模板报表把唯一那张标成清单页，
+ * 「哪几张跟着拆」只在**多模板 + 真的在拆**时才有意义：单模板报表把唯一那张标成清单页，
  * 等于把拆分整个关掉，那不是一个说得通的选择。
  */
 const canSplitSheet = computed(() => canSplit.value && split.value.splitMode !== 'single' && multiSheet.value)
+/* ------------------------------ 工作表一览 ------------------------------ */
+
 /**
- * 当前配置下哪几张是清单页（用于在 tips 里回显一遍）。
- * **当前这张取弹窗里的待改值**，其余取 store 里已存的 —— 否则改了单选框、下面那行字纹丝不动。
+ * 每张工作表一行：名字 + 生效的纸张方向 + 是不是自己那份设置 + 是不是清单页。
+ *
+ * 有了它才不必「切标签 → 开弹窗 → 看一眼 → 关掉 → 再切下一张」把三张模板逐个翻一遍；
+ * **清单页那一列直接在这里勾**（草稿，点确定才写回），它本来就是跨表的一项。
+ * 纸张/页边距这些仍然是「谁生效改谁」，所以只读 —— 要改还是切到那张去改，
+ * 否则这张表就变成第二个打印设置界面了，两处说同一件事迟早对不齐。
  */
-const onceSheetNames = computed(() => {
-  if (!canSplitSheet.value) return []
-  const current = String(store.sheetIndex)
-  return (store.content.sheets || [])
-    .map((s, i) => {
-      const once = String(i) === current
-        ? split.value.once
-        : store.content.sheetSplits?.[String(i)] === 'once'
-      return once ? s.name || `工作表${i + 1}` : null
-    })
-    .filter(Boolean)
-})
+const sheetRows = computed(() =>
+  (store.content.sheets || []).map((s, i) => {
+    const cfg = pageConfigOf(store.content, i)
+    return {
+      index: i,
+      name: s.name || `工作表${i + 1}`,
+      current: i === store.sheetIndex,
+      own: !!store.content.pageConfigs?.[String(i)],
+      paper: `${cfg.paperSize} ${cfg.orientation === 'landscape' ? '横向' : '纵向'}`,
+      printArea: cfg.printArea || '',
+      titleRows: cfg.titleRows || '',
+      once: splits.value[String(i)] === 'once'
+    }
+  })
+)
+
+/** 草稿里哪几张是清单页（在「输出」「工作表」两个页签里都要回显） */
+const onceSheetNames = computed(() =>
+  !canSplitSheet.value ? [] : sheetRows.value.filter((r) => r.once).map((r) => r.name)
+)
+
+/** 勾/取消「清单页」：只存标了的那些，取消就删掉 key（跟着拆是缺省） */
+function toggleOnce(index, once) {
+  const next = { ...splits.value }
+  if (once) next[String(index)] = 'once'
+  else delete next[String(index)]
+  splits.value = next
+}
 
 /* ------------------------------ 导出 ------------------------------ */
 
@@ -584,14 +710,6 @@ function useSelectionRows() {
   form.value.titleRows = `${range.r1 + 1}:${range.r2 + 1}`
 }
 
-/** 撤掉当前 sheet 的单独设置，改回跟随报表级 */
-function followReport() {
-  store.clearPageConfig()
-  form.value = normalizePageConfig(JSON.parse(JSON.stringify(store.pageConfig)))
-  emit('applied')
-  ElMessage.success(`「${sheetName.value}」已改回跟随报表设置`)
-}
-
 function onConfirm() {
   if (form.value.printArea && !parseA1Range(form.value.printArea)) {
     ElMessage.warning('打印区域格式不合法，应形如 A1:F30')
@@ -609,22 +727,28 @@ function onConfirm() {
       return
     }
   }
-  store.setPageConfig(form.value, scope.value)
-  // 输出方式是报表级的，跟「作用范围」无关，单独写；
-  // 里头的 once 只落在当前这张 sheet 上（多模板 + 真的在拆时才写，见 canSplitSheet）
+  // 三条路互斥：写本表 / 推给全部（顺带清掉各表的独立设置）/ 撤掉本表的独立设置
+  if (scope.value === 'follow') {
+    store.clearPageConfig()
+  } else {
+    store.setPageConfig(form.value, scope.value)
+  }
+  // 输出方式与导出文件名是报表级的，跟「作用范围」无关；
+  // 「哪几张是清单页」按 sheet 存，整份草稿一起写回（在「工作表」页签里勾的）
   store.setSheetSplit(
     canSplit.value
-      ? { ...split.value, once: canSplitSheet.value ? split.value.once : undefined }
+      ? { ...split.value, sheetSplits: canSplitSheet.value ? splits.value : {} }
       : { splitMode: 'single' }
   )
-  // 导出文件名也是报表级的一份，与「作用范围」无关
   store.setExportConfig(exportCfg.value)
   emit('applied')
   visible.value = false
   ElMessage.success(
     scope.value === 'all' && multiSheet.value
       ? '打印设置已更新（全部工作表）'
-      : `「${sheetName.value}」的打印设置已更新`
+      : scope.value === 'follow'
+        ? `「${sheetName.value}」已改回跟随报表设置`
+        : `「${sheetName.value}」的打印设置已更新`
   )
 }
 </script>
@@ -694,6 +818,14 @@ function onConfirm() {
 }
 .tips p {
   margin: 0;
+}
+/* 「工作表」页签里没有 label 那一列，tips 不必跟着缩进 96px */
+.tips-flush {
+  padding-left: 0;
+  padding-top: 8px;
+}
+.row-current {
+  font-weight: 600;
 }
 .wm-preview {
   display: flex;

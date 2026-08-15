@@ -186,6 +186,11 @@
         {{ pageConfig.orientation === 'landscape' ? '横向' : '纵向' }}
         <template v-if="store.hasOwnPageConfig"> · 本表单独设置</template>
       </span>
+      <!--
+        拆分时这张跟不跟着拆。画布上看不出来，而它决定的是「这张出一份还是出 N 份」——
+        比纸张方向还要紧，值得占状态栏一格（改在打印设置 → 工作表页签）。
+      -->
+      <span v-if="splitRole" class="sb-item sb-muted">{{ splitRole }}</span>
       <span class="sb-item dirty-indicator" :class="{ dirty: store.dirty }">
         {{ store.dirty ? '● 未保存' : '已保存' }}
       </span>
@@ -676,7 +681,12 @@ function handleLinkDelete(index) {
 function onSheetChange(sheets) {
   // content 未就绪时不接受工作簿回写，避免空白模板覆盖尚未回填的设计
   if (!contentReady.value) return
-  store.setSheets(sheets)
+  const { dropped } = store.setSheets(sheets) || {}
+  // 删掉一张工作表，它的单元格绑定/打印设置/清单页标记也跟着没了 —— 画布上一点痕迹都没有，
+  // 而这一步不在 FortuneSheet 的撤销栈里（撤销回来的是一张没有绑定的空表），说一声
+  if (dropped?.length) {
+    ElMessage.warning(`已删除「${dropped.join('、')}」，其单元格绑定与打印设置一并移除`)
+  }
   enforceWidthLimit()
   autoFitWrapRows()
 }
@@ -778,6 +788,19 @@ function onInsertAll(ds) {
 const pageConfig = computed(() => store.pageConfig)
 const currentSheet = computed(() => store.content.sheets?.[store.sheetIndex] || null)
 const pageBreaks = computed(() => computePageBreaks(currentSheet.value, pageConfig.value))
+
+/**
+ * 状态栏里这张工作表在拆分里的角色，没在拆分就不显示。
+ *
+ * 「跟着拆 = 一条数据一份」「只出一份 = 清单列表、拿全量数据」这件事画布上完全看不出来，
+ * 而它决定的是这张模板出一份还是出 N 份 —— 比纸张方向还要紧。
+ */
+const splitRole = computed(() => {
+  const mode = store.content.splitMode
+  if (mode !== 'perRow' && mode !== 'perRowPage') return ''
+  if (!store.content.primaryDataset) return ''
+  return store.sheetSplitOnce ? '清单页 · 只出一份' : '跟着拆 · 每条数据一份'
+})
 
 /** 采样出的画布坐标，交给叠加层绘制：{ cols: {idx:[x1,x2]}, rows: {...}, zoomX, zoomY } */
 const geometry = ref(null)
