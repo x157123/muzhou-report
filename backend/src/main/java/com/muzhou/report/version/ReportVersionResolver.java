@@ -21,34 +21,38 @@ import java.util.function.BiFunction;
  * <p>纯 POJO，不依赖 Spring 与数据库（照 {@code RenderEngineTest} 的路子直接测）。
  * 渲染引擎完全不知道有版本这回事 —— 选中哪一版是在进引擎**之前**定好的。
  *
- * <p>判定分**两维**：版本自带的**匹配条件**（{@link VersionMatchRuleDTO}，类型/区域这类离散维度）
- * 与**生效时间**（{@code effectiveFrom} ~ {@code effectiveTo} 这个左闭右开的区间，两端都可为空
- * = 不限）。条件先筛、时间后判。
+ * <p>判定分**两维**：**生效时间**（{@code effectiveFrom} ~ {@code effectiveTo} 这个左闭右开的
+ * 区间，两端都可为空 = 不限）与版本自带的**匹配条件**（{@link VersionMatchRuleDTO}，类型/区域这类
+ * 离散维度）。<b>先用时间范围圈出候选模板，再用匹配条件从候选里定位唯一那一份</b>。
  *
  * <p>算法（见 docs/CONTRACT.md §4.1「版本」）：
  * <ol>
  *   <li>显式 versionId（设计器/预览指定）→ 直接用它，<b>含停用版本</b>，不走下面的规则；</li>
  *   <li>启用版本 ≤ 1 个 → 就是它（或默认版本）—— 这一条同时省掉了下面那次探测取数，
  *       绝大多数报表只有一版，不该为版本功能多打一次 SQL；</li>
- *   <li><b>条件筛选</b>：一个版本的条件要<b>全部</b>满足才算匹配（没配条件 = 无条件匹配）；
- *       匹配到的版本里只留<b>条件数最多</b>的那一批（特异度优先，见 {@link #decide}），
- *       后面的时间判定只在这一批里做；一个都不匹配 → {@code fallback}；</li>
- *   <li>取判定值：{@code field} 主接口第一行的该字段 / {@code param} 报表参数 / {@code now} 渲染当日；</li>
- *   <li>归一化成 {@link LocalDateTime}（见 {@link #toDateTime}），解析不了当作取不到；</li>
- *   <li>取不到 → {@code fallback}：{@code default} 用默认版本 / {@code error} 抛 {@link BizException}
- *       （消息里带上是哪个字段没取到）。<b>但条件已经把那一批筛成唯一一版时就用它</b> ——
- *       条件够定案了，不该再被时间这一维推翻；</li>
- *   <li>命中 = 判定值落在 {@code [effectiveFrom, effectiveTo)} 里的版本。<b>允许多版重叠</b>，
- *       重叠时<b>起点更晚的赢</b>（同起点则版本号大的赢，见 {@link #covers}）；一版都没盖住
- *       （落在空洞里、或晚于所有结束时刻）→ 默认版本（条件筛过的那一批则退回本批里最早的一版
- *       —— 退回默认版本会违背已经命中的条件）。</li>
+ *   <li>时间这一维参不参与由判定依据（{@code source}/{@code field}）决定；参与时先取判定值
+ *       并归一化成 {@link LocalDateTime}（见 {@link #toDateTime}），<b>取不到直接 fallback</b>
+ *       （{@code default} 用默认版本 / {@code error} 抛 {@link BizException}，消息里带上是哪个
+ *       字段没取到）—— 时间排在条件前面，判定值都拿不到就没有资格再往下比条件；</li>
+ *   <li><b>时间圈候选</b>：留下生效区间盖住判定值的那些版本（时间不参与时全员是候选），
+ *       并按**时间优先级**排序 —— <b>起点更晚的排前面</b>，起点相同则**版本号大的**排前面
+ *       （同 {@link #BY_TIME_PRECEDENCE}，与「重叠时起点更晚的赢」是同一条规则）；</li>
+ *   <li><b>条件定位唯一一份</b>：照这个次序逐个试匹配条件，<b>第一个条件全满足的版本就是它</b>
+ *       （没配条件 = 无条件匹配，天然满足，于是它就是同一时间段里的兜底）；</li>
+ *   <li>扫完一个都没命中 → {@code fallback}：{@code default} 用默认版本 / {@code error} 抛
+ *       {@link BizException}。</li>
  * </ol>
+ *
+ * <p><b>没有「特异度优先」这回事</b>：条件更多的版本不会天然压过更宽泛的，谁先被试到只看上面
+ * 那条时间优先级。同一时间段里想让带条件的版本先于兜底版被试到，给它一个**更大的版本号**
+ * （后建的版本天然如此）。
  *
  * <p><b>结束时刻是后加的</b>：早先只存起点、右端靠排序推，说不了「这一版 8/1 到期，之后谁也不接」，
  * 也表达不了两版共用同一段时间。而「重叠时起点更晚的赢」与原先那条「取起点 ≤ 判定值的最后一个」
- * 是同一条规则，所以**老数据（结束时刻全为空）行为一字不变**。
+ * 是同一条规则，所以**老数据（结束时刻全为空、也没配条件）行为一字不变**。
  *
- * <p><b>没配判定字段（只按条件选）时时间这一维直接不参与</b>，取匹配那批里生效最晚的一版。
+ * <p><b>没配判定字段（只按条件选）时时间这一维直接不参与</b>，照时间优先级扫一遍，
+ * 第一个条件满足的版本命中；此时若**一版条件都没配**，那就没什么可判的了，直接用默认版本。
  *
  * <p><b>停用的版本不参与推导</b>，它那段落回别的版本 —— 这正是「临时回滚版式」想要的行为。
  */
@@ -60,6 +64,19 @@ public final class ReportVersionResolver {
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"),
             DateTimeFormatter.ofPattern("yyyy-MM-dd")
     };
+
+    /**
+     * 时间优先级：**起点更晚的排前面**，起点相同则**版本号大的**排前面（起点为空 = 左端不限，
+     * 排最后 —— 它是「全时段那一版」，理应最后才轮到）。
+     *
+     * <p>这与「重叠时起点更晚的赢、同起点版本号大的赢」是同一条规则，只是从「挑一个」变成
+     * 「排个序」：条件筛选就沿着这个次序逐个试，第一个满足的即命中。
+     */
+    private static final Comparator<Candidate> BY_TIME_PRECEDENCE = Comparator
+            .<Candidate, LocalDateTime>comparing(Candidate::effectiveFrom,
+                    Comparator.nullsFirst(Comparator.<LocalDateTime>naturalOrder()))
+            .thenComparingInt(ReportVersionResolver::no)
+            .reversed();
 
     private ReportVersionResolver() {
     }
@@ -109,7 +126,10 @@ public final class ReportVersionResolver {
             return out;
         }
 
-        /** 特异度 = 有效条件数。多版同时匹配时**条件更具体的压过更宽泛的**。 */
+        /**
+         * 有效条件数，**只用来给 {@code reason} 拼一句「条件[...]」**——不再影响谁赢，
+         * 选择顺序纯按版本号，见 {@link ReportVersionResolver#decide}。
+         */
         public int specificity() {
             return validRules().size();
         }
@@ -191,11 +211,10 @@ public final class ReportVersionResolver {
     }
 
     /**
-     * 两维一起定案：先按匹配条件筛，再在筛出来的那一批里按时间区间推。
+     * 两维一起定案：**先用时间范围圈出候选，再用匹配条件从候选里定位唯一一份**。
      *
-     * <p><b>特异度优先</b>：匹配到的版本里只留条件数最多的那一批 —— 「类型=A 且 区域=华东」
-     * 压过「类型=A」，压过「无条件」。没有这一条的话，「无条件的那一版」会跟专门配了条件的版本
-     * 平起平坐，谁赢要看生效时间，配条件这件事就白做了。
+     * <p>不再有「特异度优先」——条件更多的版本不会天然压过更宽泛的，谁先被试到只看
+     * {@link #BY_TIME_PRECEDENCE}（起点更晚的先、同起点版本号大的先）。
      *
      * @param raw    时间判定值的原始形态
      * @param row    主接口那一行（{@code source=field} 的匹配条件从它取值），可为 null
@@ -212,82 +231,56 @@ public final class ReportVersionResolver {
         }
         Candidate fallbackVersion = defaultVersion(versions);
         String label = cfg.getField() == null || cfg.getField().isBlank() ? "判定值" : cfg.getField();
+        List<Candidate> enabled = versions.stream().filter(Candidate::enabled).toList();
 
-        // 4. 条件筛选：全部满足才算匹配，再只留特异度最高的那一批
-        List<Candidate> group = new ArrayList<>();
-        int specificity = -1;
-        for (Candidate c : versions) {
-            if (!c.enabled() || !matches(c, row, params)) {
-                continue;
-            }
-            int spec = c.specificity();
-            if (spec > specificity) {
-                specificity = spec;
-                group.clear();
-            }
-            if (spec == specificity) {
-                group.add(c);
-            }
-        }
-        if (group.isEmpty()) {
-            // 每一版都带条件，而这次的数据一条也不满足
-            if (cfg.isFallbackError()) {
-                throw new BizException("没有哪一版的匹配条件满足本次数据，请检查各版本的匹配条件");
-            }
-            return new Resolution(fallbackVersion, null,
-                    "没有版本的匹配条件满足，用默认版本 " + fallbackVersion.label());
-        }
-        // 起点升序（null 排最前 = 不限左端），同起点按版本号升序：**排在后面的赢**，
-        // 于是「重叠时起点更晚的赢、同起点后配的赢」就是从头扫一遍留下最后一个命中的
-        group.sort(Comparator
-                .comparing(Candidate::effectiveFrom, Comparator.nullsFirst(Comparator.<LocalDateTime>naturalOrder()))
-                .thenComparingInt(ReportVersionResolver::no));
-
-        // 5. 只按条件选（判定字段没配）：时间这一维不参与，取本批里生效最晚的那一版
-        if (specificity > 0 && !timeEnabled(cfg)) {
-            Candidate hit = group.get(group.size() - 1);
-            return new Resolution(hit, null, reason(hit, null, label) + " 命中 " + hit.label());
-        }
-
-        // 6. 归一化时间判定值
+        // 4. 先把时间判定值拿到手。**时间参不参与看的是「有没有值」而不只是配没配** ——
+        //    resolveByValue 那条路（判定值由调用方直接给）压根不看 cfg.field
         LocalDateTime value = toDateTime(raw);
         if (value == null) {
-            // 条件已经筛成唯一一版：条件够定案了，不必再问时间
-            if (specificity > 0 && group.size() == 1) {
-                Candidate hit = group.get(0);
-                return new Resolution(hit, null, reason(hit, null, label) + " 命中 " + hit.label()
-                        + "（判定值[" + label + "]取不到，条件已唯一命中）");
+            // 配了判定字段却取不到值：时间排在条件前面，这就没有资格再往下比条件了
+            if (timeEnabled(cfg)) {
+                if (cfg.isFallbackError()) {
+                    throw new BizException("版本切换取不到判定值[" + label + "]"
+                            + (raw == null ? "" : "（值 " + raw + " 解析不成日期）")
+                            + "，请检查报表的版本切换规则");
+                }
+                return new Resolution(fallbackVersion, null,
+                        "判定值[" + label + "]取不到，用默认版本 " + fallbackVersion.label());
             }
-            if (cfg.isFallbackError()) {
-                throw new BizException("版本切换取不到判定值[" + label + "]"
-                        + (raw == null ? "" : "（值 " + raw + " 解析不成日期）")
-                        + "，请检查报表的版本切换规则");
+            // 判定字段留空（= 只按条件选），而一版条件也没配：两维都没得判，用默认版本
+            if (enabled.stream().noneMatch(c -> c.specificity() > 0)) {
+                return new Resolution(fallbackVersion, null,
+                        "没有配置版本切换规则，用默认版本 " + fallbackVersion.label());
             }
-            return new Resolution(fallbackVersion, null,
-                    "判定值[" + label + "]取不到，用默认版本 " + fallbackVersion.label());
         }
 
-        // 7. 命中 = 判定值落在 [effectiveFrom, effectiveTo) 里的版本。**允许重叠**，
-        //    group 已按「起点升序、同起点按版本号升序」排好，从头扫到尾留下的就是起点最晚的那一版
-        Candidate hit = null;
-        for (Candidate c : group) {
-            if (covers(c, value)) {
-                hit = c;
+        // 5. 时间圈候选：生效区间盖住判定值的那些（没有判定值时全员是候选），按时间优先级排序
+        LocalDateTime at = value;
+        List<Candidate> candidates = enabled.stream()
+                .filter(c -> at == null || covers(c, at))
+                .sorted(BY_TIME_PRECEDENCE)
+                .toList();
+
+        // 6. 条件定位唯一一份：照这个次序逐个试，第一个条件全满足的就是它
+        //    （没配条件 = 无条件匹配，于是它是同一时间段里的兜底）
+        for (Candidate c : candidates) {
+            if (matches(c, row, params)) {
+                return new Resolution(c, value, reason(c, value, label) + " 命中 " + c.label());
             }
         }
-        if (hit == null) {
-            if (specificity > 0) {
-                // 条件已经命中了这一批，退回默认版本等于把条件推翻 —— 用本批里最早的那一版
-                Candidate first = group.get(0);
-                return new Resolution(first, value, reason(first, value, label)
-                        + " 不在本批任何版本的生效区间内，用其中最早的 " + first.label());
-            }
-            // 落在空洞里（或早于/晚于所有区间），又没有一版是「全时段」的 —— 只能退回默认版本
-            return new Resolution(fallbackVersion, value,
-                    label + "=" + format(value) + " 不在任何版本的生效区间内，用默认版本 "
-                            + fallbackVersion.label());
+
+        // 7. 一个都没命中：分清是「时间就没圈出人」还是「圈出来了但条件都不满足」
+        boolean noneInRange = candidates.isEmpty();
+        if (cfg.isFallbackError()) {
+            throw new BizException(noneInRange
+                    ? "判定值[" + label + "]=" + format(value) + " 不在任何版本的生效时间内，请检查各版本的生效时间段"
+                    : "没有哪一版的匹配条件满足本次数据，请检查各版本的匹配条件");
         }
-        return new Resolution(hit, value, reason(hit, value, label) + " 命中 " + hit.label());
+        String why = noneInRange
+                ? label + "=" + format(value) + " 不在任何版本的生效时间内"
+                : (value == null ? "没有哪一版的匹配条件满足"
+                                 : label + "=" + format(value) + " 圈出的版本里没有哪一版的匹配条件满足");
+        return new Resolution(fallbackVersion, value, why + "，用默认版本 " + fallbackVersion.label());
     }
 
     /** 给人看的那半句：{@code 条件[类型=A 且 区域∈华东,华南] + order_date=2026-06-01}。 */
@@ -315,7 +308,8 @@ public final class ReportVersionResolver {
      * 判定值在不在这一版的生效区间里：<b>左闭右开</b>，两端为 null 表示那一端不限。
      *
      * <p>两端都为 null = 全时段，恒命中（老数据、以及「只按条件选」的那些版本就是这种）。
-     * 区间是**可以重叠**的，谁赢由调用处的排序定（起点更晚的赢），这里只回答「盖没盖住」。
+     * 区间是**可以重叠**的，重叠时谁先被试到由 {@link #BY_TIME_PRECEDENCE} 定（起点更晚的先），
+     * 这里只回答「盖没盖住」。
      */
     private static boolean covers(Candidate c, LocalDateTime value) {
         if (c.effectiveFrom() != null && c.effectiveFrom().isAfter(value)) {

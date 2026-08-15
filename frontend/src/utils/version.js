@@ -2,14 +2,16 @@
  * 报表版本的小工具：显示名、匹配条件、生效区间与重叠提示。
  *
  * 生效区间**两端都由用户填**（`effectiveFrom` ~ `effectiveTo`，左闭右开，两端都可空 = 不限），
- * 所以这里不再推导右端。**允许多版共用同一段时间**，重叠时的胜负规则必须和后端
- * `ReportVersionResolver#covers` 一致：**起点更晚的赢，起点相同则版本号大的赢**；
- * **停用的版本不参与**。这份规则在界面上只用来提示「这一段其实归谁」——
- * 用户配得出重叠，就得看得见重叠。
+ * 所以这里不再推导右端。**允许多版共用同一段时间**，谁先被试到的规则必须和后端
+ * `ReportVersionResolver#BY_TIME_PRECEDENCE` 一致：**起点更晚的先，起点相同则版本号大的先**；
+ * **停用的版本不参与**。
  *
- * 版本还有**匹配条件**这一维（类型/区域这类离散维度，见 CONTRACT §4.1）：条件先筛、时间后判。
- * 所以**重叠只在「条件相同的那几版」之间算**（`versionIntervals` 按条件分组）——
- * 「类型 A 的 5 月版」和「类型 B 的 5 月版」时间上叠着，却根本不竞争，报重叠是误导。
+ * 选版本是**先按生效时间圈候选、再按匹配条件定唯一一份**（CONTRACT §4.1）。所以
+ * **「先轮到」不等于「赢」**：排在前面那一版的条件不满足时，仍会轮到被它盖住的那一版。
+ * 于是重叠提示只在**盖住它的那一版是「无条件」**（任何数据都满足，后面的永远轮不到）时才报
+ * —— 盖住它的那版自己也带条件的话，被盖的那版仍有机会，报重叠是误导。
+ * 早先是「按条件指纹分组、只在同组内算重叠」，那是「条件先筛 + 特异度优先」时代的规则，
+ * 与现在的算法对不上了。
  */
 
 /**
@@ -77,11 +79,9 @@ export function rulesText(rules) {
     .join(' 且 ')
 }
 
-/** 条件的指纹：条件相同的版本才在同一条时间轴上竞争（重叠也只在这几版之间算） */
-function ruleKey(version) {
-  return validRules(version.matchRules)
-    .map((r) => `${r.source || 'field'}|${r.field}|${r.op || 'eq'}|${r.value ?? ''}`)
-    .join('&&')
+/** 无条件 = 任何数据都匹配：它一旦排在前面，后面同段的版本就永远轮不到了 */
+function unconditional(version) {
+  return validRules(version.matchRules).length === 0
 }
 
 /** 界面上的名字：没起名就是 v3 */
@@ -108,7 +108,7 @@ function overlaps(a, b) {
   return true
 }
 
-/** 重叠时谁赢：起点更晚的赢，起点相同则版本号大的赢（同后端 `decide` 的排序） */
+/** 重叠时谁先被试到：起点更晚的先，起点相同则版本号大的先（同后端 `BY_TIME_PRECEDENCE`） */
 function beats(a, b) {
   const av = a.effectiveFrom || ''
   const bv = b.effectiveFrom || ''
@@ -124,8 +124,9 @@ function beats(a, b) {
  * 给每一版算出界面上要显示的那几样：区间、条件、以及**被谁盖住了**。
  *
  * 区间不再推导（两端都是用户填的），这里做的是**重叠提示**：允许多版共用同一段时间，
- * 那就得告诉用户重叠那一段实际归谁。判断只在「匹配条件相同」的那几版之间做 ——
- * 条件不同的版本压根不竞争（后端也是先按条件筛出一批再在那批里判）。
+ * 那就得告诉用户重叠那一段实际归谁。选版本是「时间圈候选 + 条件定唯一」，所以
+ * **只有排在前面的那一版是「无条件」时，被盖的那一版才真的永远轮不到** ——
+ * 对方也带条件的话，它的条件不满足时仍会轮到这一版，报重叠是误导。
  *
  * @param versions 版本列表（后端 /report/{id}/version 的返回）
  * @returns [{ ...version, label, from, to, enabled, isDefault, rules, condition, coveredBy, note }]，
@@ -133,24 +134,15 @@ function beats(a, b) {
  */
 export function versionIntervals(versions) {
   const list = Array.isArray(versions) ? versions : []
-  const groups = new Map()
-  list
-    .filter((v) => v.status !== 0)
-    .forEach((v) => {
-      const key = ruleKey(v)
-      if (!groups.has(key)) groups.set(key, [])
-      groups.get(key).push(v)
-    })
+  const active = list.filter((v) => v.status !== 0)
 
-  // 每一版被同组里哪几版盖过（重叠且对方赢）
+  // 每一版被哪几版真正挡死了：时间上叠着、对方先被试到、且对方无条件（任何数据都满足）
   const covered = {}
-  groups.forEach((group) => {
-    group.forEach((v) => {
-      const winners = group
-        .filter((o) => o.id !== v.id && overlaps(v, o) && beats(o, v))
-        .map(versionLabel)
-      if (winners.length) covered[v.id] = winners
-    })
+  active.forEach((v) => {
+    const winners = active
+      .filter((o) => o.id !== v.id && overlaps(v, o) && beats(o, v) && unconditional(o))
+      .map(versionLabel)
+    if (winners.length) covered[v.id] = winners
   })
 
   return list.map((v) => {
@@ -169,7 +161,7 @@ export function versionIntervals(versions) {
       coveredBy: winners || [],
       note: isEnabled
         ? winners
-          ? `重叠段被 ${winners.join('、')} 盖过（起点更晚的赢）`
+          ? `重叠段被无条件的 ${winners.join('、')} 挡住（它起点更晚、又匹配任何数据）`
           : ''
         : '已停用，不参与自动选择'
     }

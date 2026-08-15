@@ -73,6 +73,14 @@ class ReportVersionResolverTest {
         return ReportVersionResolver.resolveByRow(versions, cfg, row, Map.of()).version().id();
     }
 
+    /**
+     * 只按条件选：判定字段留空 = 时间这一维不参与（CONTRACT §4.1 里那条「留空就是只按条件选」）。
+     * 时间与条件两维叠加的用例用 {@link #pickRow}。
+     */
+    private String pickByRules(List<Candidate> versions, Map<String, Object> row) {
+        return ReportVersionResolver.resolveByRow(versions, new VersionConfigDTO(), row, Map.of()).version().id();
+    }
+
     private List<Candidate> three() {
         List<Candidate> list = new ArrayList<>();
         list.add(v("v1", 1, null, true, true));
@@ -253,32 +261,41 @@ class ReportVersionResolverTest {
     @Test
     @DisplayName("按条件选：类型 A 走 v2，类型 B + 华东走 v3，都不沾边落回无条件的 v1")
     void picksByMatchRules() {
-        assertEquals("v2", pickRow(byType(), Map.of("order_type", "A", "area", "华东")));
-        assertEquals("v3", pickRow(byType(), Map.of("order_type", "B", "area", "华南")));
+        assertEquals("v2", pickByRules(byType(), Map.of("order_type", "A", "area", "华东")));
+        assertEquals("v3", pickByRules(byType(), Map.of("order_type", "B", "area", "华南")));
         // 类型对上了、区域没对上 —— v3 的两条是 AND，只能落回 v1
-        assertEquals("v1", pickRow(byType(), Map.of("order_type", "B", "area", "华北")));
-        assertEquals("v1", pickRow(byType(), Map.of("order_type", "C")));
+        assertEquals("v1", pickByRules(byType(), Map.of("order_type", "B", "area", "华北")));
+        assertEquals("v1", pickByRules(byType(), Map.of("order_type", "C")));
         // 字段整个缺失同样不算满足
-        assertEquals("v1", pickRow(byType(), Map.of()));
+        assertEquals("v1", pickByRules(byType(), Map.of()));
     }
 
     @Test
-    @DisplayName("特异度优先：条件多的压过条件少的，两者都压过无条件的那一版")
-    void moreSpecificWins() {
+    @DisplayName("没有特异度优先：同一时间段里谁先被试到只看版本号，条件多的不会天然压过宽泛的")
+    void noSpecificityPriority() {
         List<Candidate> list = new ArrayList<>();
         list.add(v("v1", 1, null, true, true));
-        list.add(v("v2", 2, null, false, true, rule("order_type", "eq", "A")));
-        list.add(v("v3", 3, null, false, true,
+        // 条件更具体的那一版版本号更**小** —— 早先按特异度它会赢，现在轮不到它
+        list.add(v("窄", 2, null, false, true,
                 rule("order_type", "eq", "A"), rule("area", "eq", "华东")));
-        // 两条的那版赢 —— 没有这一条的话「谁赢」要看生效时间，配条件就白配了
-        assertEquals("v3", pickRow(list, Map.of("order_type", "A", "area", "华东")));
-        assertEquals("v2", pickRow(list, Map.of("order_type", "A", "area", "华北")));
-        assertEquals("v1", pickRow(list, Map.of("order_type", "B", "area", "华东")));
+        list.add(v("宽", 3, null, false, true, rule("order_type", "eq", "A")));
+        assertEquals("宽", pickByRules(list, Map.of("order_type", "A", "area", "华东")));
+        // 宽的那版条件不满足时才轮到别人：这里两版都不满足，落回无条件的 v1
+        assertEquals("v1", pickByRules(list, Map.of("order_type", "B", "area", "华东")));
+
+        // 反过来把版本号调换（后建的更具体），它就先被试到 —— 界面上新建的版本号天然更大
+        List<Candidate> swapped = new ArrayList<>();
+        swapped.add(v("v1", 1, null, true, true));
+        swapped.add(v("宽", 2, null, false, true, rule("order_type", "eq", "A")));
+        swapped.add(v("窄", 3, null, false, true,
+                rule("order_type", "eq", "A"), rule("area", "eq", "华东")));
+        assertEquals("窄", pickByRules(swapped, Map.of("order_type", "A", "area", "华东")));
+        assertEquals("宽", pickByRules(swapped, Map.of("order_type", "A", "area", "华北")));
     }
 
     @Test
-    @DisplayName("条件 + 时间叠加：先按条件筛，再在筛出来的那一批里推时间区间")
-    void rulesThenTime() {
+    @DisplayName("时间先圈候选、条件再定唯一：时间窗口没盖住的版本压根不参与，哪怕条件对得上")
+    void timeFirstThenRules() {
         List<Candidate> list = new ArrayList<>();
         list.add(v("v1", 1, null, true, true));
         // 同一个类型的两版：5/1 起换版式
@@ -288,37 +305,36 @@ class ReportVersionResolverTest {
 
         assertEquals("A旧", pickRow(list, Map.of("order_type", "A", "order_date", "2026-04-01")));
         assertEquals("A新", pickRow(list, Map.of("order_type", "A", "order_date", "2026-06-01")));
-        // 类型 B 那一批只有一版，8/1 之前的数据也归它 —— 条件已经命中，退回默认版本会把条件推翻
-        assertEquals("B版", pickRow(list, Map.of("order_type", "B", "order_date", "2026-06-01")));
+        // 类型 B 的那一版 8/1 才生效：6 月的数据先被时间挡在候选之外，落回无条件的 v1
+        assertEquals("v1", pickRow(list, Map.of("order_type", "B", "order_date", "2026-06-01")));
         assertEquals("B版", pickRow(list, Map.of("order_type", "B", "order_date", "2026-09-01")));
-        // 条件谁也不满足 -> 无条件的 v1（它是这一批里唯一一个）
+        // 条件谁也不满足 -> 无条件的 v1
         assertEquals("v1", pickRow(list, Map.of("order_type", "C", "order_date", "2026-06-01")));
     }
 
     @Test
-    @DisplayName("只按条件选（没配判定字段）：时间这一维不参与，取匹配那批里生效最晚的一版")
+    @DisplayName("只按条件选（没配判定字段）：时间这一维不参与，按时间优先级取第一个条件满足的")
     void rulesOnlyIgnoresTime() {
         List<Candidate> list = new ArrayList<>();
         list.add(v("v1", 1, null, true, true));
         list.add(v("A旧", 2, null, false, true, rule("order_type", "eq", "A")));
         list.add(v("A新", 3, MAY, false, true, rule("order_type", "eq", "A")));
-        // 判定字段留空 = 用户压根不想按时间选
-        VersionConfigDTO cfg = new VersionConfigDTO();
-        assertEquals("A新", ReportVersionResolver
-                .resolveByRow(list, cfg, Map.of("order_type", "A"), Map.of()).version().id());
-        // 一条条件都没匹配上时，行为不变：还是那条老路（判定值取不到 -> 默认版本）
-        assertEquals("v1", ReportVersionResolver
-                .resolveByRow(list, cfg, Map.of("order_type", "C"), Map.of()).version().id());
+        // 判定字段留空 = 用户压根不想按时间选；起点更晚的 A新 排在前面
+        assertEquals("A新", pickByRules(list, Map.of("order_type", "A")));
+        // 一条条件都没匹配上时落回无条件的那一版
+        assertEquals("v1", pickByRules(list, Map.of("order_type", "C")));
     }
 
     @Test
-    @DisplayName("条件已把那批筛成唯一一版时，判定值取不到也照用它")
-    void uniqueByRulesSurvivesMissingValue() {
+    @DisplayName("判定依据配了字段却取不到值：直接 fallback（不再有「条件唯一命中」那条救济）")
+    void missingTimeValueFallsBackEvenWhenRulesMatch() {
         List<Candidate> list = new ArrayList<>();
         list.add(v("v1", 1, null, true, true));
         list.add(v("v2", 2, MAY, false, true, rule("order_type", "eq", "A")));
-        // order_date 整个没有 —— 但条件已经定案了，不该再被时间这一维推翻
-        assertEquals("v2", pickRow(list, Map.of("order_type", "A")));
+        // 时间排在条件前面：order_date 取不到，就没有资格再往下比条件
+        assertEquals("v1", pickRow(list, Map.of("order_type", "A")));
+        // 想让条件单独定案，就把判定字段留空（只按条件选）
+        assertEquals("v2", pickByRules(list, Map.of("order_type", "A")));
     }
 
     @Test
@@ -327,12 +343,26 @@ class ReportVersionResolverTest {
         List<Candidate> list = new ArrayList<>();
         list.add(v("v1", 1, null, true, true, rule("order_type", "eq", "A")));
         list.add(v("v2", 2, MAY, false, true, rule("order_type", "eq", "B")));
-        assertEquals("v1", pickRow(list, Map.of("order_type", "C")));
+        assertEquals("v1", pickByRules(list, Map.of("order_type", "C")));
 
         VersionConfigDTO cfg = new VersionConfigDTO();
         cfg.setFallback(VersionConfigDTO.FALLBACK_ERROR);
         assertThrows(BizException.class, () -> ReportVersionResolver
                 .resolveByRow(list, cfg, Map.of("order_type", "C"), Map.of()));
+    }
+
+    @Test
+    @DisplayName("时间圈完候选是空的（落在所有区间外面）：fallback=error 的消息要说清是时间没对上")
+    void emptyCandidatesReportTheTimeReason() {
+        List<Candidate> list = new ArrayList<>();
+        list.add(v("旧", 1, null, MAY, true, true));
+        list.add(v("新", 2, AUG, null, false, true));
+        VersionConfigDTO cfg = new VersionConfigDTO();
+        cfg.setField("order_date");
+        cfg.setFallback(VersionConfigDTO.FALLBACK_ERROR);
+        BizException e = assertThrows(BizException.class, () -> ReportVersionResolver
+                .resolveByRow(list, cfg, Map.of("order_date", "2026-06-01"), Map.of()));
+        assertTrue(e.getMessage().contains("生效时间"), e.getMessage());
     }
 
     @Test
@@ -383,17 +413,17 @@ class ReportVersionResolverTest {
         List<Candidate> list = new ArrayList<>();
         list.add(v("普通", 1, null, true, true));
         list.add(v("大额", 2, null, false, true, rule("amount", "ge", "100000")));
-        assertEquals("大额", pickRow(list, Map.of("amount", 120000)));
-        assertEquals("大额", pickRow(list, Map.of("amount", "100000.00")));
-        assertEquals("普通", pickRow(list, Map.of("amount", 9999)));
+        assertEquals("大额", pickByRules(list, Map.of("amount", 120000)));
+        assertEquals("大额", pickByRules(list, Map.of("amount", "100000.00")));
+        assertEquals("普通", pickByRules(list, Map.of("amount", 9999)));
 
         // 同一版里再挂一条离散条件：金额那条跳过了，类型那条照旧要满足
         List<Candidate> both = new ArrayList<>();
         both.add(v("普通", 1, null, true, true));
         both.add(v("大额", 2, null, false, true,
                 rule("order_type", "eq", "A"), rule("amount", "ge", "100000")));
-        assertEquals("大额", pickRow(both, Map.of("order_type", "A", "amount", "—")));
-        assertEquals("普通", pickRow(both, Map.of("order_type", "B", "amount", 120000)));
+        assertEquals("大额", pickByRules(both, Map.of("order_type", "A", "amount", "—")));
+        assertEquals("普通", pickByRules(both, Map.of("order_type", "B", "amount", 120000)));
     }
 
     @Test
@@ -438,7 +468,7 @@ class ReportVersionResolverTest {
         List<Candidate> list = new ArrayList<>();
         list.add(v("v1", 1, null, true, true));
         list.add(v("v2", 2, null, false, true, rule("ORDER_TYPE", "eq", "A")));
-        assertEquals("v2", pickRow(list, Map.of("order_type", "A")));
+        assertEquals("v2", pickByRules(list, Map.of("order_type", "A")));
     }
 
     @Test
@@ -525,8 +555,8 @@ class ReportVersionResolverTest {
     }
 
     @Test
-    @DisplayName("条件 + 两端区间：条件先筛，再在那一批里按区间判，两批各走各的时间轴")
-    void rulesThenExplicitRange() {
+    @DisplayName("条件 + 两端区间：时间先圈出这一刻生效的那几版，再在其中按条件定唯一一份")
+    void rulesWithinExplicitRange() {
         List<Candidate> list = new ArrayList<>();
         list.add(v("兜底", 1, null, null, true, true));
         list.add(v("A促销", 2, MAY, AUG, false, true, rule("order_type", "eq", "A")));
@@ -535,9 +565,10 @@ class ReportVersionResolverTest {
 
         assertEquals("A促销", pickRow(list, Map.of("order_type", "A", "order_date", "2026-06-01")));
         assertEquals("A常规", pickRow(list, Map.of("order_type", "A", "order_date", "2026-09-01")));
-        // 类型 B 那一批只有一版，9 月的数据落在它的区间外面 —— 条件已经命中，
-        // 退回默认版本会把条件推翻，所以用本批里最早的那一版
-        assertEquals("B版", pickRow(list, Map.of("order_type", "B", "order_date", "2026-09-01")));
+        // B 版 8/1 就到期了：9 月的数据先被时间挡掉，A 常规的条件也不满足，落回兜底
+        assertEquals("兜底", pickRow(list, Map.of("order_type", "B", "order_date", "2026-09-01")));
+        // 促销期内的 B 单据仍走 B 版（它在候选里，且条件对得上）
+        assertEquals("B版", pickRow(list, Map.of("order_type", "B", "order_date", "2026-06-01")));
         assertEquals("兜底", pickRow(list, Map.of("order_type", "C", "order_date", "2026-06-01")));
     }
 

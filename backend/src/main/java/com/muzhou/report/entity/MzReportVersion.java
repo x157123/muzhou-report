@@ -53,8 +53,9 @@ public class MzReportVersion implements Serializable {
      * 匹配条件（{@code VersionMatchRuleDTO} 的 JSON 数组），空 = 无条件匹配。
      *
      * <p>时间那一维只说得清「什么时候起换版式」，说不清「类型 A 走这版、类型 B 走那版」，
-     * 所以再给每一版挂一组条件（同一版内多条是 AND）：**条件先筛、时间后推**，
-     * 多版同时匹配时条件更具体的压过更宽泛的。见 CONTRACT §4.1。
+     * 所以再给每一版挂一组条件（同一版内多条是 AND）：**先按生效时间圈出候选，再按条件
+     * 从候选里定唯一一份**（没有「条件更具体的赢」这回事，谁先被试到只看时间优先级）。
+     * 见 CONTRACT §4.1。
      */
     private String matchRules;
 
