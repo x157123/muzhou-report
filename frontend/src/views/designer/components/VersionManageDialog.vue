@@ -1,12 +1,3 @@
-<!--
-  版本管理弹窗：一张报表的几份**版式**（content）在这里管。
-
-  版本化的是版式，不是数据集 —— 数据集是「取数」，跨版本共用。所以这里能改的是
-  「哪一版在什么时间段生效」「哪一版是兜底的默认版本」，改 SQL 请去数据集面板。
-
-  生效时间段两端都由用户填（左闭右开，两端可空 = 不限），**允许多版共用同一段时间**，
-  所以每一行还要提示「这一段是不是被别人盖住了」—— 配得出重叠，就得看得见重叠。
--->
 <template>
   <el-dialog v-model="visible" title="版本管理" width="1100px" :close-on-click-modal="false" destroy-on-close>
     <div class="tips">
@@ -41,7 +32,7 @@
     </div>
 
     <el-table :data="rows" size="small" v-loading="loading" border>
-      <el-table-column label="版本" width="50">
+      <el-table-column label="版本" width="100">
         <template #default="{ row }">
           <span class="mono" v-if="row.id !== currentId">{{ row.label }}</span>
           <span class="mono select-version" v-if="row.id === currentId" >{{ row.label }}</span>
@@ -68,22 +59,22 @@
       <el-table-column label="生效时间段" width="300">
         <template #header>
           <div class="col-head">
-            <span>生效时间段</span>
+            <span class="col-title">生效时间段</span>
             <el-select
-              v-model="versionConfig.field"
-              placeholder="判定字段（空 = 不按时间筛）"
-              clearable
-              filterable
-              size="small"
-              :disabled="!primary"
-              class="field-select"
-              @change="applyVersionConfig"
+                v-model="versionConfig.field"
+                placeholder="判定字段（空=不按时间筛）"
+                clearable
+                filterable
+                size="small"
+                :disabled="!primary"
+                class="field-select"
+                @change="applyVersionConfig"
             >
               <el-option
-                v-for="f in primaryFields"
-                :key="f.fieldName"
-                :label="`${f.fieldText || f.fieldName} (${f.fieldName})`"
-                :value="f.fieldName"
+                  v-for="f in primaryFields"
+                  :key="f.fieldName"
+                  :label="`${f.fieldText || f.fieldName} (${f.fieldName})`"
+                  :value="f.fieldName"
               />
             </el-select>
             <div v-if="!primary" class="hint text-muted">
@@ -94,43 +85,39 @@
         <template #default="{ row }">
           <div class="range">
             <el-date-picker
-              :model-value="row.effectiveFrom"
-              type="datetime"
-              size="small"
-              placeholder="开始（空=不限）"
-              value-format="YYYY-MM-DD HH:mm:ss"
-              @update:model-value="(v) => saveMeta(row, { effectiveFrom: v || null })"
+                :model-value="row.effectiveFrom"
+                type="datetime"
+                size="small"
+                placeholder="开始（空=不限）"
+                value-format="YYYY-MM-DD HH:mm:ss"
+                @update:model-value="(v) => saveMeta(row, { effectiveFrom: v || null })"
             />
             <span class="sep">~</span>
             <el-date-picker
-              :model-value="row.effectiveTo"
-              type="datetime"
-              size="small"
-              placeholder="结束（空=不限）"
-              value-format="YYYY-MM-DD HH:mm:ss"
-              @update:model-value="(v) => saveMeta(row, { effectiveTo: v || null })"
+                :model-value="row.effectiveTo"
+                type="datetime"
+                size="small"
+                placeholder="结束（空=不限）"
+                value-format="YYYY-MM-DD HH:mm:ss"
+                @update:model-value="(v) => saveMeta(row, { effectiveTo: v || null })"
             />
           </div>
-<!--          <div v-if="!row.enabled" class="hint text-muted">{{ row.note }}</div>-->
-<!--          <div v-else-if="row.coveredBy.length" class="hint warn">{{ row.note }}</div>-->
-<!--          <div v-else class="hint text-muted">{{ intervalText(row) }}</div>-->
         </template>
       </el-table-column>
 
       <el-table-column label="名称" min-width="130">
         <template #default="{ row }">
           <el-input
-            v-model="rawVersion(row.id).name"
-            size="small"
-            :placeholder="`留空显示 v${row.versionNo}`"
-            @change="(v) => saveMeta(row, { name: v })"
+              v-model="rawVersion(row.id).name"
+              size="small"
+              :placeholder="`留空显示 v${row.versionNo}`"
+              @change="(v) => saveMeta(row, { name: v })"
           />
         </template>
       </el-table-column>
 
       <el-table-column label="状态" width="70">
         <template #default="{ row }">
-
           <el-switch
               :model-value="row.enabled"
               :disabled="row.isDefault"
@@ -142,22 +129,19 @@
         </template>
       </el-table-column>
 
-<!--      <el-table-column label="更新时间" width="160" prop="updateTime" />-->
-
       <el-table-column label="操作" width="180" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click="emitOpen(row)">打开</el-button>
           <el-button link type="primary" size="small" @click="doCopy(row)">复制</el-button>
           <el-button
-            link
-            type="primary"
-            size="small"
-            :disabled="row.isDefault"
-            @click="doSetDefault(row)"
+              link
+              type="primary"
+              size="small"
+              :disabled="row.isDefault"
+              @click="doSetDefault(row)"
           >
             设为默认
           </el-button>
-<!--          <el-button link type="primary" size="small" @click="doCheck(row)">校验</el-button>-->
           <el-button link type="danger" size="small" :disabled="row.isDefault" @click="doRemove(row)">
             删除
           </el-button>
@@ -347,16 +331,16 @@ async function doSetDefault(row) {
 
 function doRemove(row) {
   ElMessageBox.confirm(`确定删除 ${row.label} 吗？这一版的版式会一并删除。`, '提示', { type: 'warning' })
-    .then(async () => {
-      try {
-        await deleteVersion(row.id)
-        ElMessage.success('已删除')
-        await load()
-      } catch (e) {
-        // 错误已提示
-      }
-    })
-    .catch(() => {})
+      .then(async () => {
+        try {
+          await deleteVersion(row.id)
+          ElMessage.success('已删除')
+          await load()
+        } catch (e) {
+          // 错误已提示
+        }
+      })
+      .catch(() => {})
 }
 
 async function doCheck(row) {
@@ -394,16 +378,31 @@ function emitOpen(row) {
 .tips p {
   margin: 0;
 }
-/* 表头里塞了一个字段选择框：标题一行、选择框一行，别把日期那两列挤窄 */
+/* 表头里塞了一个字段选择框：标题和选择框同行显示，不换行 */
 .col-head {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  align-items: center;
+  gap: 6px;
   padding: 2px 0;
+  flex-wrap: nowrap;
+}
+.col-head .col-title {
+  white-space: nowrap;
+  font-weight: 600;
+  font-size: 13px;
 }
 .col-head .field-select {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   font-weight: normal;
+}
+/* 未设主接口的提示——让它换行显示在下面 */
+.col-head .hint {
+  font-size: 11px;
+  color: var(--el-text-color-secondary);
+  margin-top: 2px;
+  flex-basis: 100%;
+  white-space: normal;
 }
 .mono {
   margin-right: 6px;
