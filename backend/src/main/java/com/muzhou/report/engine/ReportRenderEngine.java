@@ -171,7 +171,7 @@ public class ReportRenderEngine {
         long primaryFetched = System.currentTimeMillis();
 
         // 模板按「参不参与按行拆分」切成连续的几段（清单段 / 单据段），见 Segment
-        List<Segment> segments = segments(content, templates);
+        List<Segment> baseSegments = segments(content, templates);
 
         // 主接口一条数据都没有：退回普通渲染出一份空模板，比给个没有 sheet 的工作簿友好
         if (rows.isEmpty()) {
@@ -183,8 +183,8 @@ public class ReportRenderEngine {
             List<PageConfigDTO> pageConfigs = new ArrayList<>();
             List<Integer> docIndexes = new ArrayList<>();
             List<Integer> segmentIds = new ArrayList<>();
-            for (int segIndex = 0; segIndex < segments.size(); segIndex++) {
-                for (SheetTemplate st : segments.get(segIndex).templates()) {
+            for (int segIndex = 0; segIndex < baseSegments.size(); segIndex++) {
+                for (SheetTemplate st : baseSegments.get(segIndex).templates()) {
                     outSheets.add(toSheet(st, expandProcessor.process(st, empty, params)));
                     sheetTemplates.add(st);
                     pageConfigs.add(content.pageConfigOf(st.getSheetIndex()));
@@ -240,8 +240,8 @@ public class ReportRenderEngine {
         int perRowSeq = -1;
         boolean warnedSegment = false;
 
-        for (int segIndex = 0; segIndex < segments.size(); segIndex++) {
-            Segment seg = segments.get(segIndex);
+        for (int segIndex = 0; segIndex < baseSegments.size(); segIndex++) {
+            Segment seg = baseSegments.get(segIndex);
 
             if (!seg.perRow()) {
                 // 清单段：主接口给**全量**（就是手上这份 rows，不再打一次接口），整段只渲染一次。
@@ -277,8 +277,9 @@ public class ReportRenderEngine {
                 if (rowTemplates.isEmpty()) {
                     throw new BizException("第 " + (i + 1) + " 条数据选中的版式是空模板");
                 }
-                List<SheetTemplate> segTemplates = rowContent == content ? seg.templates()
-                        : perRowSegment(rowContent, rowTemplates, segmentCache, perRowSeq);
+                List<Segment> rowSegments = rowContent == content ? baseSegments
+                        : segmentCache.computeIfAbsent(rowContent, c -> segments(c, rowTemplates));
+                List<SheetTemplate> segTemplates = perRowSegment(rowSegments, perRowSeq);
                 if (segTemplates.isEmpty()) {
                     // 那一版把这一段整段标成了 once（或压根没有这么多段）：这一行在本段没有输出。
                     // 一批数据里只警告一次，500 条不该刷 500 行日志
@@ -311,7 +312,10 @@ public class ReportRenderEngine {
                     sheet.put("id", st.getId() + "_" + (i + 1));
                     sheet.put("order", outSheets.size());
                     sheet.put("status", outSheets.isEmpty() ? 1 : 0);
-                    sheet.put("name", splitSheetName(docName, st, segTemplates.size(), usedNames));
+                    // 补不补模板名看的是「这一条数据一共出几张单据」，不是本段几张 ——
+                    // 清单夹在中间时（详情A / 清单 / 详情B）两个段各只有一张，
+                    // 按段数判就都叫「SO-1」，去重后成了「SO-1」和「SO-1(2)」，分不出哪张是哪张
+                    sheet.put("name", splitSheetName(docName, st, perRowCount(rowSegments), usedNames));
                     outSheets.add(sheet);
                     sheetTemplates.add(st);
                     // 打印设置取**这一行选中的那一版**的（模板下标是那一版里的下标）
@@ -359,15 +363,13 @@ public class ReportRenderEngine {
     }
 
     /**
-     * 逐行换版式时，这一行的那一版里**第 {@code perRowSeq} 个按行拆分的段**是哪几张模板。
+     * 这一版的**第 {@code perRowSeq} 个按行拆分的段**是哪几张模板。
      *
-     * <p>各版的模板张数与拆分标记都可以不一样，「第几张模板」说不清是哪一段，所以按
-     * **段序号**配对。绝大多数报表只有一个 perRow 段（清单 + 明细就是），配对是平凡的；
+     * <p>逐行换版式时各版的模板张数与拆分标记都可以不一样，「第几张模板」说不清是哪一段，
+     * 所以按**段序号**配对。绝大多数报表只有一个 perRow 段（清单 + 明细就是），配对是平凡的；
      * 那一版段数不够时返回空，调用方跳过这一行并记一次 warn —— 猜一个段用上去只会出错版式。
      */
-    private List<SheetTemplate> perRowSegment(ReportContentDTO rowContent, List<SheetTemplate> rowTemplates,
-                                              Map<ReportContentDTO, List<Segment>> cache, int perRowSeq) {
-        List<Segment> segs = cache.computeIfAbsent(rowContent, c -> segments(c, rowTemplates));
+    private List<SheetTemplate> perRowSegment(List<Segment> segs, int perRowSeq) {
         int seq = -1;
         for (Segment s : segs) {
             if (s.perRow() && ++seq == perRowSeq) {
@@ -375,6 +377,17 @@ public class ReportRenderEngine {
             }
         }
         return List.of();
+    }
+
+    /** 这一版里跟着拆的模板一共几张（= 一条数据出几张单据），跨段累加。 */
+    private int perRowCount(List<Segment> segs) {
+        int n = 0;
+        for (Segment s : segs) {
+            if (s.perRow()) {
+                n += s.templates().size();
+            }
+        }
+        return n;
     }
 
     /**

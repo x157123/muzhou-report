@@ -126,6 +126,29 @@ class RenderSplitSegmentTest {
         return content;
     }
 
+    /** 清单夹在中间：详情A / 清单(once) / 详情B —— 两个按行拆的段被隔开。 */
+    private ReportContentDTO contentListInMiddle(String splitMode) {
+        List<Map<String, Object>> sheets = new ArrayList<>();
+        sheets.add(sheet("详情A", 0, List.of(cd(0, 0, "#{orders.no}"))));
+        sheets.add(sheet("清单", 1, List.of(cd(0, 0, "订单清单"), cd(1, 0, "#{orders.no}"))));
+        sheets.add(sheet("详情B", 2, List.of(cd(0, 0, "#{orders.no}"))));
+
+        Map<String, CellConfigDTO> cellConfigs = new LinkedHashMap<>();
+        cellConfigs.put("0_0_0", ordersCfg("none"));
+        cellConfigs.put("1_1_0", ordersCfg("down"));
+        cellConfigs.put("2_0_0", ordersCfg("none"));
+
+        ReportContentDTO content = new ReportContentDTO();
+        content.setSheets(sheets);
+        content.setCellConfigs(cellConfigs);
+        content.setPrimaryDataset("orders");
+        content.setSplitMode(splitMode);
+        content.setSheetNameField("no");
+        content.setPageConfig(page("A4"));
+        content.getSheetSplits().put("1", "once");
+        return content;
+    }
+
     private BiFunction<String, Map<String, Object>, List<Map<String, Object>>> fetcher() {
         return (code, params) -> {
             if ("orders".equals(code)) {
@@ -219,6 +242,44 @@ class RenderSplitSegmentTest {
         assertEquals(6, result.getSheets().size());
         assertEquals(List.of("SO-1-清单", "SO-1-详情", "SO-2-清单", "SO-2-详情", "SO-3-清单", "SO-3-详情"),
                 names(result));
+    }
+
+    @Test
+    @DisplayName("清单夹在中间：两个按行拆的段各自展开，sheet 名照旧带得出是哪张模板")
+    void listSheetInTheMiddleSplitsIntoTwoSegments() {
+        RenderResultDTO result = engine.render(contentListInMiddle("perRow"), Map.of(), fetcher());
+
+        // 段0（详情A）三份 → 清单一份 → 段2（详情B）三份
+        assertEquals(List.of("SO-1-详情A", "SO-2-详情A", "SO-3-详情A", "清单",
+                "SO-1-详情B", "SO-2-详情B", "SO-3-详情B"), names(result));
+        assertEquals(List.of("订单清单", "SO-1", "SO-2", "SO-3"), texts(result.getSheets().get(3)));
+    }
+
+    @Test
+    @DisplayName("交给 Excel/PDF/Word 的那几样按 sheet 的标记：一一对应、单据号相邻不重复")
+    void perSheetMarkersStayAlignedForExporters() {
+        // 导出三条路都是「按结果 sheet 下标取」：打印设置来自 sheetPageConfigs、
+        // 页码重编来自 mzDocBreaks、${sheet} 来自 mzDocNames，错位一个下标就全串
+        RenderResultDTO result = engine.render(contentListInMiddle("perRowPage"), Map.of(), fetcher());
+
+        List<Map<String, Object>> sheets = result.getSheets();
+        // 三段各自成张（段屏障），打印设置与 sheets 一一对应
+        assertEquals(3, sheets.size());
+        assertEquals(sheets.size(), result.getSheetPageConfigs().size());
+        for (Map<String, Object> sheet : sheets) {
+            // 老结果的兜底路径认它（ReportContentDTO#pageConfigOfSheet）
+            assertTrue(sheet.get("mzTemplateIndex") instanceof Integer, "每张都要说明出自哪张模板");
+            // 同一张里 mzDocBreaks 与 mzDocNames 必须等长：PDF 按下标配对取名
+            List<?> breaks = (List<?>) sheet.get("mzDocBreaks");
+            List<?> docNames = (List<?>) sheet.get("mzDocNames");
+            assertEquals(breaks.size(), docNames.size(), "单据起点与单据名要一一对应");
+        }
+        // 清单那张：自成一份单据（页码从 1 数起）、名字是模板名
+        assertEquals(List.of(0), sheets.get(1).get("mzDocBreaks"));
+        assertEquals(List.of("清单"), sheets.get(1).get("mzDocNames"));
+        // 详情那两张各拼了三份单据
+        assertEquals(3, ((List<?>) sheets.get(0).get("mzDocBreaks")).size());
+        assertEquals(3, ((List<?>) sheets.get(2).get("mzDocBreaks")).size());
     }
 
     /* ------------------------------ 断言辅助 ------------------------------ */
