@@ -14,6 +14,15 @@
         <span v-if="elapsed !== null" class="text-muted">耗时 {{ elapsed }} ms</span>
       </div>
 
+      <!--
+        没挂全时说一句：这里只是预览挂不下，**导出的文件是完整的**。
+        不说的话就是「我配了每条数据一个 sheet，怎么只出 10 张」。
+      -->
+      <div v-if="sheetTruncated" class="sheet-limit-tip">
+        共 {{ sheetTotal }} 张工作表，预览只显示前 {{ PREVIEW_MAX_SHEETS }} 张（全挂上会卡住浏览器）；
+        导出的文件仍是完整的 {{ sheetTotal }} 张。
+      </div>
+
       <div class="preview-sheet-wrap">
         <el-result v-if="errorMsg" icon="error" :title="'渲染失败'" :sub-title="errorMsg" />
         <FortuneSheet
@@ -50,6 +59,7 @@ import FortuneSheet from '@/components/FortuneSheet.vue'
 import ParamForm from '@/components/ParamForm.vue'
 import { renderPreview } from '@/api/render'
 import { applyCellImages } from '@/utils/cellImage'
+import { limitPreviewSheets, PREVIEW_MAX_SHEETS } from '@/utils/sheet'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -82,6 +92,9 @@ const pageNo = ref(1)
 const pageSize = ref(20)
 const loading = ref(false)
 const errorMsg = ref('')
+/** 这次渲染一共几张工作表 / 预览是不是没挂全，见 utils/sheet.js#limitPreviewSheets */
+const sheetTotal = ref(0)
+const sheetTruncated = ref(false)
 
 watch(visible, (v) => {
   if (v) doRender()
@@ -103,8 +116,12 @@ async function doRender() {
       props.versionId
     )
     total.value = res.total ?? null
+    // 先截断再摊图片：几百张 sheet 逐格遍历一遍就够把页面卡住了（拆分模式下一条数据一张）
+    const limited = limitPreviewSheets(res.sheets)
+    sheetTotal.value = limited.total
+    sheetTruncated.value = limited.truncated
     // 图片单元格要摊成 FortuneSheet 的浮动图片才画得出来，见 utils/cellImage.js
-    renderedSheets.value = applyCellImages(res.sheets || [])
+    renderedSheets.value = applyCellImages(limited.sheets)
     elapsed.value = res.elapsed ?? null
     await sheetRef.value?.reload(renderedSheets.value)
   } catch (e) {
@@ -135,6 +152,15 @@ defineExpose({ doRender })
   flex: 1;
   min-height: 0;
   overflow: hidden;
+}
+.sheet-limit-tip {
+  padding: 6px 10px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--el-color-warning);
+  background: var(--el-color-warning-light-9);
+  border-radius: 4px;
 }
 .preview-pager {
   display: flex;

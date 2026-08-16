@@ -441,6 +441,42 @@ export function normalizeSheets(sheets) {
   }))
 }
 
+/**
+ * 网页预览一次最多挂多少张工作表。
+ *
+ * 「每条数据一个 sheet」那个输出方式能出成百上千张（一条数据一张单据），**整份挂进
+ * FortuneSheet 会把浏览器卡死**：标签栏要建同样多的 DOM，而挂载之前 `applyWrapRowHeights`
+ * 还要拿 canvas 的 measureText 把每一格量一遍 —— 那是一次几十万次的同步调用，
+ * 页面直接没响应（不是慢，是卡住）。
+ */
+export const PREVIEW_MAX_SHEETS = 10
+
+/**
+ * 预览用的工作表截断：**只留前 N 张**。
+ *
+ * 只作用于「网页预览」这一条路 —— 导出的 Excel / PDF / Word 是后端出的整本，
+ * 一张都不会少；预览页的 PDF 视图同样是整本（iframe 里的 PDF 阅读器是惰性渲染的，不卡）。
+ * 所以这是**显示上限，不是数据上限**，调用方必须把这件事在界面上说出来，
+ * 否则就是「我的单据怎么只剩 10 张」。
+ *
+ * 取前 N 张而不是抽样：结果 sheet 的顺序就是出纸顺序，前 N 张正好是「第一批要看的」，
+ * 而且下标 0..N-1 与整份结果一一对应 —— 打印设置（`sheetPageConfigs`）按下标取值，
+ * 抽样的话下标就对不上了。
+ *
+ * @returns {{sheets: Array, total: number, truncated: boolean}} total 是截断前的张数
+ */
+export function limitPreviewSheets(sheets, max = PREVIEW_MAX_SHEETS) {
+  const all = Array.isArray(sheets) ? sheets : []
+  if (all.length <= max) return { sheets: all, total: all.length, truncated: false }
+  const kept = all.slice(0, max)
+  // 保险：FortuneSheet 靠 status=1 决定挂出来先显示哪一张，一张都没有的话是空白画布。
+  // 引擎恒把第一张标成 1（所以正常走不到这里），但手工构造的结果不一定守这条
+  if (!kept.some((s) => s?.status === 1)) {
+    kept[0] = { ...kept[0], status: 1 }
+  }
+  return { sheets: kept, total: all.length, truncated: true }
+}
+
 /* ------------------------- 按下标寻址的配置跟随 sheet ------------------------- */
 
 /**

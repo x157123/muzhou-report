@@ -73,15 +73,29 @@
       </template>
 
       <!-- 表格预览：v-if 而不是 v-show —— FortuneSheet 的 data 只在挂载时读一次，重新挂载才拿得到最新数据 -->
-      <FortuneSheet
-        v-else
-        ref="sheetRef"
-        :data="sheets"
-        :allow-edit="false"
-        :show-toolbar="false"
-        :show-formula-bar="false"
-        @sheet-activate="onSheetActivate"
-      />
+      <template v-else>
+        <!--
+          没挂全时必须说一句，否则就是「我的单据怎么只剩 10 张」。
+          三件事都要写清楚：一共几张、这里只显示几张、以及**导出和 PDF 预览不受影响**。
+        -->
+        <div v-if="sheetTruncated" class="sheet-limit-tip no-print">
+          <el-icon><Warning /></el-icon>
+          <span>
+            共 {{ sheetTotal }} 张工作表，表格预览只显示前 {{ PREVIEW_MAX_SHEETS }} 张（全挂上会卡住浏览器）。
+            <b>导出的文件与 PDF 预览都是完整的 {{ sheetTotal }} 张</b>，要看后面的请切到 PDF 或直接导出。
+          </span>
+          <el-button link type="primary" size="small" @click="viewMode = 'pdf'">切到 PDF 看整本</el-button>
+        </div>
+        <FortuneSheet
+          ref="sheetRef"
+          class="preview-sheet"
+          :data="sheets"
+          :allow-edit="false"
+          :show-toolbar="false"
+          :show-formula-bar="false"
+          @sheet-activate="onSheetActivate"
+        />
+      </template>
     </div>
 
     <!--
@@ -117,13 +131,13 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { ArrowLeft, ArrowDown, Search, Download, Printer } from '@element-plus/icons-vue'
+import { ArrowLeft, ArrowDown, Search, Download, Printer, Warning } from '@element-plus/icons-vue'
 
 import FortuneSheet from '@/components/FortuneSheet.vue'
 import ParamForm from '@/components/ParamForm.vue'
 import { getReport } from '@/api/report'
 import { renderReport, getReportParams, exportExcel, exportPdf, exportWord } from '@/api/render'
-import { downloadBlob, fileNameFromResponse } from '@/utils/sheet'
+import { downloadBlob, fileNameFromResponse, limitPreviewSheets, PREVIEW_MAX_SHEETS } from '@/utils/sheet'
 import { normalizePageConfig, pageConfigOfResult, paperSizeMm } from '@/utils/print'
 import { printPdfBlob, disposePrintFrame } from '@/utils/printPdf'
 import { applyWrapRowHeights } from '@/utils/wrapHeight'
@@ -195,6 +209,16 @@ const pdfError = ref('')
 let pdfStale = true
 /** 第几次取 PDF：回来时对不上号就丢掉，见 loadPdf */
 let pdfSeq = 0
+
+/**
+ * 这次渲染一共出了几张工作表，以及表格视图里是不是没挂全（见 `limitPreviewSheets`）。
+ *
+ * 「每条数据一个 sheet」能出成百上千张，整份挂进 FortuneSheet 会把浏览器卡死，
+ * 所以表格视图只挂前 `PREVIEW_MAX_SHEETS` 张。**这是显示上限不是数据上限** ——
+ * 导出与 PDF 视图都是整本，所以截了就得在界面上说一句，否则就是「我的单据怎么少了」。
+ */
+const sheetTotal = ref(0)
+const sheetTruncated = ref(false)
 
 /**
  * **表格视图**下当前显示的是渲染结果里的第几张 sheet。
@@ -413,8 +437,14 @@ async function doRender() {
       ? `当前版本 ${res.versionName || 'v' + res.versionNo}`
       : res.versionMatch || ''
     versionMatch.value = res.versionMatch || ''
+    // **先截断再算行高/图片**：这两步都是逐格遍历（`applyWrapRowHeights` 还要拿 canvas
+    // measureText 量每一格），几百张 sheet 全过一遍就是几十万次同步调用，页面当场没响应。
+    // 放在后面截的话卡死照旧发生，只是最后少挂几张而已
+    const limited = limitPreviewSheets(res.sheets)
+    sheetTotal.value = limited.total
+    sheetTruncated.value = limited.truncated
     // 图片摆位要在行高定下来之后：撑高过的行会让它下面的图片整体下移
-    sheets.value = applyCellImages(applyWrapRowHeights(res.sheets || []))
+    sheets.value = applyCellImages(applyWrapRowHeights(limited.sheets))
     // reload 会重挂工作簿，显示的又是第一张 —— 打印用的下标和纸张设置都要跟着回到第一张
     activeSheetIndex.value = 0
     applyPrintStyle(pageConfigOfResult(res, 0, reportContent.value))
@@ -546,6 +576,30 @@ function goDesigner() {
   flex: 1;
   min-height: 0;
   overflow: hidden;
+  /* 表格视图下多了一条提示，工作簿要占掉剩下的高度 —— 不铺开的话它按内容高度算，几乎看不见 */
+  display: flex;
+  flex-direction: column;
+}
+.preview-sheet {
+  flex: 1;
+  min-height: 0;
+}
+
+/* 没挂全的提示条：显眼但不喧宾夺主，一行放不下就换行 */
+.sheet-limit-tip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--el-color-warning);
+  background: var(--el-color-warning-light-9);
+  border-bottom: 1px solid var(--el-color-warning-light-5);
+}
+.sheet-limit-tip b {
+  font-weight: 600;
 }
 
 /* 浏览器自带的 PDF 阅读器：铺满预览区，缩放/翻页/它自己那个打印按钮都归它管 */

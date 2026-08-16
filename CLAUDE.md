@@ -117,6 +117,16 @@ PDF 视图下就是屏幕上那份整本（直接复用手上的 blob，不再�
 PDF 视图下**一次查询打两次后端**（JSON 渲染 + 导出 PDF，`refresh()` 里并行发）：分页条的
 总条数与版本标签只有渲染结果带得回来，导出接口只还字节流。别为了省这一次就把分页条摘了。
 
+**表格视图只挂前 10 张 sheet**（`utils/sheet.js#limitPreviewSheets`，预览页与设计器预览抽屉
+两处共用）：「每条数据一个 sheet」能出成百上千张，整份挂进 FortuneSheet 会**把浏览器卡死** ——
+标签栏要建同样多的 DOM，而挂载之前 `applyWrapRowHeights` 还要拿 canvas 的 measureText
+把每一格量一遍，几十万次同步调用下来页面直接没响应。**所以截断必须排在
+`applyWrapRowHeights` / `applyCellImages` 之前**，放在后面截等于白截（卡照旧发生，
+只是最后少挂几张）。这是**显示上限不是数据上限**：导出的三种格式与 PDF 视图都是整本，
+所以截了就得在界面上说一句「共 N 张、这里只显示前 10 张、导出不受影响」——
+不说就是「我的单据怎么少了」这类报障。取**前 N 张**而不是抽样：结果 sheet 的顺序就是出纸
+顺序，而且下标 0..N-1 与整份结果一一对应，`sheetPageConfigs` 按下标取的打印设置才不会错位。
+
 **打印设置是按 sheet 生效的**：`content.pageConfigs[sheetIndex]` 是该 sheet 的覆盖值，
 没设过就退回报表级的 `content.pageConfig`（老报表只有后者）。取值一律走
 `ReportContentDTO#pageConfigOf` / `utils/print.js#pageConfigOf`，别直接读 `content.pageConfig`
