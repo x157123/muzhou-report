@@ -13,13 +13,25 @@ import java.util.Locale;
  * <p><b>为什么单独有这么一个类</b>：图表是 AWT 画出来的，字也画在图里，服务器上没有中文字体
  * 就是**一堆方框** —— 这是这条路上最容易踩的坑，而且只有出纸那一刻才看得见。
  *
- * <p>三级往下找、先找到的赢：
+ * <p>四级往下找、先找到的赢：
  * <ol>
  *   <li>{@link #configure} 指定的那一款（复用 {@code muzhou.report.pdf.font-path}，
  *       由 {@code ExpandProcessor} 在启动时传进来 —— 报表里的字体已经配过一次了，不该再配一遍）；</li>
+ *   <li><b>逻辑字体 {@link Font#SANS_SERIF}，前提是它显示得出中文</b>（见下）；</li>
  *   <li>{@link #CANDIDATES} 里探测得到的第一款；</li>
- *   <li>都没有就退回 {@link Font#SANS_SERIF} 并记一条 warn。</li>
+ *   <li>都没有就退回逻辑字体并记一条 warn（那时中文多半是方框，但也没别的辙了）。</li>
  * </ol>
+ *
+ * <p><b>为什么逻辑字体排在探测到的中文字体前面</b>：中文字体几乎都是**等宽**的 ——
+ * 一个 ASCII 字符也占满半个汉字的格子。黑体的逗号、句点、百分号字宽都是 0.5em，
+ * 而墨迹只有 0.09em 宽，于是「1,944,998.13」这种数字串排出来两边全是空档，
+ * 看着像「1, 944, 998. 13」（图表上到处是刻度和数值标签，这个毛病特别显眼）。
+ * 逻辑字体的逗号只占 0.28em、数字更宽，读起来才是正常的比例。
+ * 而中文靠 JDK 的字体配置自己回退到系统中文字体（Windows / macOS 上一定有），
+ * 所以这一档**既要中文显示得出来、又能让数字好看** —— 用 {@link #canDisplayChinese}
+ * 验一遍再用，验不过才往下走探测。
+ *
+ * <p>反过来说，**用户显式配了字体就一定听他的**（第 1 档在最前）：那是他自己挑的字。
  *
  * <p><b>候选清单与 {@code PdfExporter#FONT_CANDIDATES} 是两份，故意的</b>：AWT 的
  * {@link Font#createFont} <b>读不了 {@code .ttc} 字体集</b>（OpenPDF 读得了，还能用 {@code 路径,序号}
@@ -109,6 +121,12 @@ public final class ChartFonts {
                 return f;
             }
         }
+        // 逻辑字体显示得出中文就用它 —— 中文由 JDK 的字体配置回退给系统字体，
+        // 数字与标点则是正常的西文字宽（中文字体是等宽的，数字串会排得一格一格的，见类注释）
+        Font logical = new Font(Font.SANS_SERIF, Font.PLAIN, 10);
+        if (canDisplayChinese(logical)) {
+            return logical;
+        }
         for (String candidate : CANDIDATES) {
             Font f = tryLoad(candidate, false);
             if (f != null) {
@@ -118,12 +136,13 @@ public final class ChartFonts {
         }
         if (!resolved) {
             resolved = true;
-            log.warn("图表字体：没有找到可用的中文字体文件，已退回逻辑字体 SansSerif。"
-                    + "系统本身装了中文字体时它照样显示得出中文；如果图上是一片方框，"
-                    + "请安装中文字体(如 fonts-wqy-zenhei)或用 muzhou.report.pdf.font-path 指一个 .ttf/.otf"
-                    + "（注意 AWT 读不了 .ttc，那种要另找一份 .ttf/.otf）");
+            // 走到这里说明逻辑字体也显示不出中文、候选清单又一个都不在 —— 图上的中文**就是方框**，
+            // 话要说死，别让人以为「可能没事」
+            log.warn("图表字体：这台机器上找不到任何中文字体，图表里的中文会显示成方框。"
+                    + "请安装中文字体(如 fonts-wqy-zenhei)，或用 muzhou.report.pdf.font-path 指一个"
+                    + " .ttf/.otf 文件（注意 AWT 读不了 .ttc 字体集，那种要另找一份 .ttf/.otf）");
         }
-        return new Font(Font.SANS_SERIF, Font.PLAIN, 10);
+        return logical;
     }
 
     /**
@@ -155,6 +174,19 @@ public final class ChartFonts {
             }
             return null;
         }
+    }
+
+    /**
+     * 这款字体显示得出中文吗。
+     *
+     * <p>对逻辑字体（{@code SansSerif} 这种）问的是**整条回退链**（JDK 里它是复合字体），
+     * 所以装了中文字体的机器上返回 true —— 这正是要判的那件事。
+     *
+     * <p>验三个字符：常用汉字、生僻些的汉字、全角标点。只验一个的话，某些只带少量汉字的
+     * 西文字体（图标字体、带几个 CJK 兼容字形的）会蒙混过关，出纸时才发现整段是方框。
+     */
+    private static boolean canDisplayChinese(Font font) {
+        return font.canDisplay('中') && font.canDisplay('销') && font.canDisplay('（');
     }
 
     /** 剥掉 PDF 那边 {@code 路径,序号} 写法里的序号（.ttc 字体集用的，这里读不了但要认得出）。 */

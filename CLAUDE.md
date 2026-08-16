@@ -96,7 +96,11 @@ npm run build
   `[图表] xxx` 占位文本会印到纸上。拆分（`perRow` / `sheetSplits`）与父子关联下图表天然正确
   —— 那两件事都是**换取数函数**做的，详情页的图自动只画这一条单据的数据、清单页拿全量。
   字体走 `engine/ChartFonts`（复用 `muzhou.report.pdf.font-path`，**AWT 读不了 `.ttc`**，
-  那种情况退回兜底字体并 warn），出图前钉死 `java.awt.headless=true`。
+  那种情况退回下一档并 warn），出图前钉死 `java.awt.headless=true`。
+  **没有显式配置时优先用逻辑字体 `SANS_SERIF`（先验它显示得出中文）而不是探测到的中文字体**：
+  中文字体几乎都是等宽的，一个逗号也占满半个汉字的格子（黑体的逗号字宽 0.5em、墨迹只有 0.09em），
+  于是「1,944,998.13」排出来像「1, 944, 998. 13」—— 图表上到处是刻度和数值标签，这个毛病特别显眼。
+  逻辑字体的西文比例正常，中文则由 JDK 的字体配置自己回退给系统字体。
 - 公式两条路：`!{}` 走 Aviator（`FormulaEvaluator` + `GridFunctions`，区间函数在**渲染后的网格**上求值），
   `=` 原生公式只做 A1 引用偏移（`A1RefUtils`）后交给 FortuneSheet 前端算。
 - `RenderServiceImpl` 手写构造器而非 `@RequiredArgsConstructor`：容器里有两个 `ObjectMapper`，
