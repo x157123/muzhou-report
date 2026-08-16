@@ -26,6 +26,28 @@
         <hutool.version>5.8.32</hutool.version>
         <openpdf.version>3.0.5</openpdf.version>
         <zxing.version>3.5.3</zxing.version>
+        <!--
+          覆盖 spring-boot-starter-parent 管理的 Lombok 版本（3.3.5 给的是 1.18.34）。
+
+          Lombok 靠反射摸进 javac 内部，**每出一个新 JDK 都要跟一版**；用比它新的 JDK 编译会在
+          `java.lang.ExceptionInInitializerError: com.sun.tools.javac.code.TypeTag :: UNKNOWN`
+          上整个挂掉 —— 不是某个文件编不过，是一行都编不了，报错也完全看不出跟 Lombok 有关。
+          项目本身是 JDK 21（见上面的 java.version），但开发机上装的往往是更新的 JDK，
+          所以这里锁一个新版本：它同时支持 21 与更高版本，两边都不必改环境。
+          换更新的 JDK 又编不过时，先来这里升这个版本号。
+        -->
+        <lombok.version>1.18.46</lombok.version>
+        <!--
+          同理覆盖 Mockito 与它底下的 ByteBuddy（parent 3.3.5 给的是 5.11.0 / 1.14.19）。
+
+          ByteBuddy 是靠**认得出 class 文件版本号**来改字节码的，JDK 出新版它就要跟一版；
+          跟不上时 Mockito 造不出 mock，报的是「Mockito cannot mock this class」——
+          看着像测试写错了，其实一行代码都没问题。两个一起升：只升 ByteBuddy 的话
+          Mockito 5.11 未必配得上，只升 Mockito 的话 parent 的 dependencyManagement
+          会把 ByteBuddy 钉回 1.14.19。
+        -->
+        <mockito.version>5.23.0</mockito.version>
+        <byte-buddy.version>1.18.11</byte-buddy.version>
     </properties>
 
     <dependencies>
