@@ -783,8 +783,16 @@ Excel 里那一块；`WordExporter#readPictures` 只取「占了哪几行哪几�
 没有登录态（图片地址要 cookie 时会拿回一个登录页，日志里会写明）、或者拿到的是相对路径
 （要配 `muzhou.report.image.base-url` 才知道去哪个站点取）。
 
+**出纸顺序按 `order` 排，不是数组顺序**：设计器里拖动标签重排工作表时，FortuneSheet 只改各
+sheet 的 `order`、**不动 `sheets` 数组的顺序**（标签栏也是照 `order` 显示的），所以
+`TemplateParser#parse` 解析完要按 `order` 稳定排一次，排完的顺序就是渲染结果、Excel / PDF / Word
+三条导出路的顺序。照数组顺序出纸的话就是「拖完保存了，导出的还是原来的顺序」。
+`order` 缺失时退回数组下标，相同 `order` 的保持原数组顺序 —— 老报表（`order` 恒等于下标）
+行为一字不变。结果 sheet 的 `order` / `status` 由引擎按**输出位置**重编（第 0 张才是 `status=1`）。
+
 **按下标寻址**：`cellConfigs` 与 `pageConfigs` 的 key 里的 sheetIndex 都是 **`sheets` 数组的下标**，
-不是 sheet 的 `id`、也不是 `order`（标签页的显示顺序按 `order` 排，与数组顺序无关）。
+不是 sheet 的 `id`、也不是 `order`（**它只管顺序，不管寻址**：跟着排就等于把所有绑定与打印设置
+挪到别人身上，老报表还得跟着洗数据）。
 下标寻址的前提是**写入方负责在 sheets 增删后把 key 对齐**：删除一张 sheet 会让它后面每张的
 下标往前挪一位，设计器按 sheet `id` 比对前后两份 sheets 并搬 key
 （`utils/sheet.js#sheetIndexRemap` / `remapCellConfigs` / `remapPageConfigs`，在
@@ -1081,6 +1089,8 @@ api 类型数据集的**接口地址**里同样写 `${paramName}`，替换时对
 ## 7. 渲染引擎算法（必须按此实现）
 
 1. **解析**：`sheets[i].celldata` → `TemplateCell{r,c,rawValue,config}`；合并单元格信息取自 `sheets[i].config.merge`。
+   解析完的模板列表**按 `order` 稳定排序**（= 出纸顺序，见 §4「出纸顺序按 `order` 排」），
+   但每张的 `sheetIndex` 仍是**数组下标** —— `cellConfigs` / `pageConfigs` / `sheetSplits` 照它寻址。
 2. **取数**：收集所有 cellConfig 用到的 `datasetCode` → 逐个执行数据集（带报表参数映射到数据集参数，同名传递）→ `Map<String, List<Map<String,Object>>>`。
    `datasetCode` 按 §3.2 的作用范围**由窄到宽**解析：先找当前这一版自己的数据集，
    再找本报表全版本共用的，最后才是公共数据集。

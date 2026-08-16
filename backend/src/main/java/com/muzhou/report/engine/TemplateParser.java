@@ -7,6 +7,7 @@ import com.muzhou.report.engine.model.TemplateCell;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -41,6 +42,22 @@ public class TemplateParser {
      */
     private static final Set<String> VALUE_KEYS = Set.of("v", "m", "ct", "f", "mc");
 
+    /**
+     * 解析出模板列表，**顺序就是出纸顺序** —— 按各 sheet 的 {@code order} 排，不是数组顺序。
+     *
+     * <p>设计器里拖动标签重排工作表时，FortuneSheet 只改各 sheet 的 {@code order}、
+     * <b>不动 sheets 数组的顺序</b>（见 @fortune-sheet/react 的 SheetTab.onDrop：它把
+     * 排好序的那一份重编 order 写回去，数组本身原地不动），标签栏也是按 {@code order} 显示的。
+     * 照数组顺序出纸的话，设计器/预览上看到的是拖过的顺序、导出的 Excel/PDF/Word 仍是老顺序
+     * —— 「拖完保存了，导出还是原来的顺序」就是这么来的。
+     *
+     * <p><b>{@code sheetIndex} 仍是数组下标，不跟着排</b>：{@code cellConfigs} 与
+     * {@code pageConfigs} 都按数组下标寻址（CONTRACT §4），跟着排就等于把所有绑定和打印设置
+     * 挪到别人身上。于是「谁先出纸」与「配置怎么寻址」各归各的，两边都不必迁移老数据。
+     *
+     * <p>排序是稳定的：{@code order} 缺失时退回数组下标（见 {@link #parseSheet}），
+     * 相同 {@code order} 的按原数组顺序 —— 老报表（order 恒等于下标）行为一字不变。
+     */
     public List<SheetTemplate> parse(ReportContentDTO content) {
         List<SheetTemplate> templates = new ArrayList<>();
         List<Map<String, Object>> sheets = content.getSheets();
@@ -50,6 +67,7 @@ public class TemplateParser {
         for (int i = 0; i < sheets.size(); i++) {
             templates.add(parseSheet(sheets.get(i), i, content.getCellConfigs()));
         }
+        templates.sort(Comparator.comparingInt(SheetTemplate::getOrder));
         return templates;
     }
 

@@ -11,9 +11,11 @@ import java.util.Map;
 @Data
 public class SheetTemplate {
 
+    /** 在 `content.sheets` 数组里的下标 —— `cellConfigs` / `pageConfigs` 都按它寻址 */
     private int sheetIndex;
     private String name = "Sheet1";
     private String id = "sheet_1";
+    /** 出纸顺序（设计器标签栏的显示顺序），拖动标签重排改的就是它，见 {@code TemplateParser#parse} */
     private int order;
 
     /** 模板单元格，按 r 再按 c 分组 */

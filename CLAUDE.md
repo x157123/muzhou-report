@@ -817,6 +817,17 @@ formula 先于 param、手写的数据格默认 `expandType=down`），否则面
 **所以 sheets 数组只能经 `setSheets` 改**，别在别处直接动 `content.sheets`。
 拖动标签重排只改各 sheet 的 `order` 字段、不动数组顺序，但上面这套按 id 对齐，顺序真变了也对。
 
+**由此分出两条线，别混**：**下标管寻址、`order` 管顺序**。出纸顺序认 `order` ——
+`TemplateParser#parse` 解析完按它稳定排一次（缺失退回下标、相同的保持原顺序，
+所以老报表一个字不变），排完的顺序就是渲染结果与 Excel / PDF / Word 三条导出路的顺序；
+不排的话设计器标签栏（它照 `order` 显示）拖过之后**保存了导出还是老顺序**，这是报障来源。
+`SheetTemplate#sheetIndex` **不跟着排**，它恒是数组下标，`cellConfigs` / `pageConfigs` /
+`sheetSplits` 与 `mzTemplateIndex` 照旧按它取 —— 跟着排就等于把所有绑定和打印设置挪到别人身上，
+还得洗老数据。结果 sheet 的 `order` / `status` 由 `toSheet` 按**输出位置**重编（拆分时一张模板
+出好几份，模板上那两个值本来就不作数了）。前端凡是列工作表的地方也要照 `order` 排
+（`PrintConfigDialog` 的「工作表」页签），否则那张表与标签栏对不上，而「清单页」勾的是
+**连续的模板段**，看错顺序就配错了。
+
 **行列这一维同理，但只能从 `op` 事件里认**：插入/删除行列时 FortuneSheet 只挪它自己那份数据
 （celldata / merge / rowlen / borderInfo），`cellConfigs` 的 `r`/`c` 与 `pageConfig.printArea`
 原地不动 —— 删掉顶上一行，占位符文本整体上移、配置留在原处，那个格子成了「有占位符没配置」，

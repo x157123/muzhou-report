@@ -633,21 +633,29 @@ const canSplitSheet = computed(() => canSplit.value && split.value.splitMode !==
  * **清单页那一列直接在这里勾**（草稿，点确定才写回），它本来就是跨表的一项。
  * 纸张/页边距这些仍然是「谁生效改谁」，所以只读 —— 要改还是切到那张去改，
  * 否则这张表就变成第二个打印设置界面了，两处说同一件事迟早对不齐。
+ *
+ * **按 `order` 排，不是数组顺序**：拖动标签重排只改 `order`（标签栏与出纸顺序都认它，
+ * 见后端 `TemplateParser#parse`），照数组顺序列的话这张表和标签栏对不上，
+ * 而「清单页」勾的是连续的模板段（清单在最前面还是夹在中间），看错顺序就配错了。
+ * `index` 仍是**数组下标** —— 打印设置与清单页标记都按它寻址。
  */
 const sheetRows = computed(() =>
-  (store.content.sheets || []).map((s, i) => {
-    const cfg = pageConfigOf(store.content, i)
-    return {
-      index: i,
-      name: s.name || `工作表${i + 1}`,
-      current: i === store.sheetIndex,
-      own: !!store.content.pageConfigs?.[String(i)],
-      paper: `${cfg.paperSize} ${cfg.orientation === 'landscape' ? '横向' : '纵向'}`,
-      printArea: cfg.printArea || '',
-      titleRows: cfg.titleRows || '',
-      once: splits.value[String(i)] === 'once'
-    }
-  })
+  (store.content.sheets || [])
+    .map((s, i) => {
+      const cfg = pageConfigOf(store.content, i)
+      return {
+        index: i,
+        order: Number.isFinite(Number(s.order)) ? Number(s.order) : i,
+        name: s.name || `工作表${i + 1}`,
+        current: i === store.sheetIndex,
+        own: !!store.content.pageConfigs?.[String(i)],
+        paper: `${cfg.paperSize} ${cfg.orientation === 'landscape' ? '横向' : '纵向'}`,
+        printArea: cfg.printArea || '',
+        titleRows: cfg.titleRows || '',
+        once: splits.value[String(i)] === 'once'
+      }
+    })
+    .sort((a, b) => a.order - b.order || a.index - b.index)
 )
 
 /** 草稿里哪几张是清单页（在「输出」「工作表」两个页签里都要回显） */

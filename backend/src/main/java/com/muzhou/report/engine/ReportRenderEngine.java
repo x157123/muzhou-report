@@ -113,7 +113,7 @@ public class ReportRenderEngine {
         List<PageConfigDTO> pageConfigs = new ArrayList<>();
         for (SheetTemplate st : templates) {
             RenderGrid grid = expandProcessor.process(st, datasets, params);
-            outSheets.add(toSheet(st, grid));
+            outSheets.add(toSheet(st, grid, outSheets.size()));
             pageConfigs.add(content.pageConfigOf(st.getSheetIndex()));
         }
         result.setSheets(outSheets);
@@ -185,7 +185,7 @@ public class ReportRenderEngine {
             List<Integer> segmentIds = new ArrayList<>();
             for (int segIndex = 0; segIndex < baseSegments.size(); segIndex++) {
                 for (SheetTemplate st : baseSegments.get(segIndex).templates()) {
-                    outSheets.add(toSheet(st, expandProcessor.process(st, empty, params)));
+                    outSheets.add(toSheet(st, expandProcessor.process(st, empty, params), outSheets.size()));
                     sheetTemplates.add(st);
                     pageConfigs.add(content.pageConfigOf(st.getSheetIndex()));
                     // 一条数据都没有，那份空模板整个算作一份单据
@@ -251,10 +251,9 @@ public class ReportRenderEngine {
                         LinkedDataFetcher.wrap(links, wholeFetcher(primary, rows, shared, dataFetcher),
                                 props.getMaxLinkRows()));
                 for (SheetTemplate st : seg.templates()) {
-                    Map<String, Object> sheet = toSheet(st, expandProcessor.process(st, datasets, params));
-                    // 只出一份，id 不会撞车，照用模板的；order/status 得跟着结果顺序重编
-                    sheet.put("order", outSheets.size());
-                    sheet.put("status", outSheets.isEmpty() ? 1 : 0);
+                    // 只出一份，id 不会撞车，照用模板的；order/status 由 toSheet 跟着结果顺序重编
+                    Map<String, Object> sheet = toSheet(st, expandProcessor.process(st, datasets, params),
+                            outSheets.size());
                     sheet.put("name", uniqueName(st.getName(), usedNames));
                     outSheets.add(sheet);
                     sheetTemplates.add(st);
@@ -307,11 +306,11 @@ public class ReportRenderEngine {
                 // 这一条数据（= 这份单据）叫什么：sheet 名与页头页尾里的 ${sheet} 共用这一个值
                 String docName = docName(row, content.getSheetNameField(), i);
                 for (SheetTemplate st : segTemplates) {
-                    Map<String, Object> sheet = toSheet(st, expandProcessor.process(st, datasets, params));
                     // id / order / status 必须重新编：模板的那份在 N 个副本之间会撞车
+                    // （order / status 由 toSheet 按输出位置给）
+                    Map<String, Object> sheet = toSheet(st, expandProcessor.process(st, datasets, params),
+                            outSheets.size());
                     sheet.put("id", st.getId() + "_" + (i + 1));
-                    sheet.put("order", outSheets.size());
-                    sheet.put("status", outSheets.isEmpty() ? 1 : 0);
                     // 补不补模板名看的是「这一条数据一共出几张单据」，不是本段几张 ——
                     // 清单夹在中间时（详情A / 清单 / 详情B）两个段各只有一张，
                     // 按段数判就都叫「SO-1」，去重后成了「SO-1」和「SO-1(2)」，分不出哪张是哪张
@@ -709,13 +708,21 @@ public class ReportRenderEngine {
         }
     }
 
-    /** 把渲染网格组装回 FortuneSheet 的 Sheet 结构。 */
-    private Map<String, Object> toSheet(SheetTemplate st, RenderGrid grid) {
+    /**
+     * 把渲染网格组装回 FortuneSheet 的 Sheet 结构。
+     *
+     * <p>{@code order} / {@code status} 按**输出位置**重编，不照抄模板那份：模板已经按 order
+     * 排过（{@link TemplateParser#parse}），拆分时一张模板还会出好几份，模板上那两个值都不作数了。
+     * 第 0 份标 {@code status=1} —— 工作簿打开时显示的就是它。
+     *
+     * @param outIndex 这是结果里的第几张 sheet
+     */
+    private Map<String, Object> toSheet(SheetTemplate st, RenderGrid grid, int outIndex) {
         Map<String, Object> sheet = new LinkedHashMap<>(st.getRaw());
         sheet.put("name", st.getName());
         sheet.put("id", st.getId());
-        sheet.put("order", st.getOrder());
-        sheet.put("status", st.getSheetIndex() == 0 ? 1 : 0);
+        sheet.put("order", outIndex);
+        sheet.put("status", outIndex == 0 ? 1 : 0);
         // 这张结果 sheet 是从第几张模板出来的。拆分/拼接之后结果下标与模板下标对不上，
         // 取打印设置一律认这个值（见 ReportContentDTO#pageConfigOfSheet），别再靠下标推算
         sheet.put("mzTemplateIndex", st.getSheetIndex());
