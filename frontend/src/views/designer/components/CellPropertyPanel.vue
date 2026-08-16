@@ -28,6 +28,155 @@
           图片等比例装进格子并居中（不拉伸），要显示得更大就拖高这一行或合并几格
         </div>
 
+        <!-- 图表：取的是整个数据集，不随行扩展；画在整个合并区里 -->
+        <div v-if="isChart" class="text-muted type-hint">
+          图表画在<b>整个合并区</b>里：先框选一片区域合并，再设成图表格。<br />
+          数据取自整个数据集（不随行扩展），由服务端出图 —— 预览、Excel、PDF、Word 是同一张。
+        </div>
+
+        <template v-if="isChart">
+          <el-form-item label="数据集">
+            <el-select
+              :model-value="config?.datasetCode"
+              placeholder="请选择数据集"
+              filterable
+              style="width: 100%"
+              @change="onChange('datasetCode', $event)"
+            >
+              <el-option
+                v-for="ds in datasets"
+                :key="ds.code"
+                :label="`${ds.name} (${ds.code})${ds.reportId ? ' · 本报表' : ''}`"
+                :value="ds.code"
+              />
+            </el-select>
+          </el-form-item>
+
+          <el-form-item label="图表类型">
+            <el-select :model-value="chart.chartType" style="width: 100%" @change="onChartChange('chartType', $event)">
+              <el-option v-for="t in CHART_TYPES" :key="t.value" :label="t.label" :value="t.value" />
+            </el-select>
+          </el-form-item>
+
+          <el-form-item :label="chart.chartType === 'pie' ? '扇区字段' : '类目轴字段'">
+            <el-select
+              :model-value="chart.categoryField"
+              placeholder="按哪个字段分组"
+              filterable
+              :filter-method="(q) => (categoryQuery = q)"
+              style="width: 100%"
+              @change="onChartChange('categoryField', $event)"
+              @visible-change="(v) => v || (categoryQuery = '')"
+            >
+              <el-option
+                v-for="f in filteredCategoryFields"
+                :key="f.fieldName"
+                :label="f.fieldText || f.fieldName"
+                :value="f.fieldName"
+              />
+            </el-select>
+          </el-form-item>
+
+          <!-- 数值系列：饼图只用第一条（一个饼说不了两组数） -->
+          <el-form-item label="数值系列">
+            <div class="series-list">
+              <div v-for="(s, i) in chart.series" :key="i" class="series-row">
+                <el-select
+                  :model-value="s.field"
+                  placeholder="字段"
+                  filterable
+                  size="small"
+                  class="series-field"
+                  @change="onSeriesChange(i, 'field', $event)"
+                >
+                  <el-option
+                    v-for="f in currentFields"
+                    :key="f.fieldName"
+                    :label="f.fieldText || f.fieldName"
+                    :value="f.fieldName"
+                  />
+                </el-select>
+                <el-select
+                  :model-value="s.aggregate"
+                  size="small"
+                  class="series-agg"
+                  @change="onSeriesChange(i, 'aggregate', $event)"
+                >
+                  <el-option v-for="a in CHART_AGGREGATES" :key="a.value" :label="a.label" :value="a.value" />
+                </el-select>
+                <el-button
+                  link
+                  type="danger"
+                  size="small"
+                  :disabled="chart.series.length <= 1"
+                  @click="removeSeries(i)"
+                >
+                  删除
+                </el-button>
+                <el-input
+                  :model-value="s.name"
+                  size="small"
+                  class="series-name"
+                  placeholder="图例名称（留空用字段名）"
+                  @change="onSeriesChange(i, 'name', $event)"
+                />
+              </div>
+              <el-button link type="primary" size="small" :disabled="chart.chartType === 'pie'" @click="addSeries">
+                + 添加系列
+              </el-button>
+              <div v-if="chart.chartType === 'pie' && chart.series.length > 1" class="text-muted series-hint">
+                饼图只画第一条系列
+              </div>
+            </div>
+          </el-form-item>
+
+          <el-form-item label="标题">
+            <el-input :model-value="chart.title" placeholder="留空不显示标题" @change="onChartChange('title', $event)" />
+          </el-form-item>
+
+          <template v-if="chart.chartType !== 'pie'">
+            <el-form-item label="横轴标题">
+              <el-input :model-value="chart.categoryAxisTitle" @change="onChartChange('categoryAxisTitle', $event)" />
+            </el-form-item>
+            <el-form-item label="纵轴标题">
+              <el-input :model-value="chart.valueAxisTitle" @change="onChartChange('valueAxisTitle', $event)" />
+            </el-form-item>
+          </template>
+
+          <el-form-item label="图例">
+            <el-select :model-value="legendValue" style="width: 100%" @change="onLegendChange">
+              <el-option v-for="p in LEGEND_POSITIONS" :key="p.value" :label="p.label" :value="p.value" />
+            </el-select>
+          </el-form-item>
+
+          <el-form-item label="配色">
+            <el-select :model-value="chart.theme" style="width: 100%" @change="onChartChange('theme', $event)">
+              <el-option v-for="t in CHART_THEMES" :key="t.value" :label="t.label" :value="t.value" />
+            </el-select>
+          </el-form-item>
+
+          <el-form-item :label="chart.chartType === 'pie' ? '扇区上印百分比' : '柱顶/点上印数值'">
+            <el-switch
+              :model-value="chart.showValueLabels"
+              @change="onChartChange('showValueLabels', $event)"
+            />
+          </el-form-item>
+
+          <el-form-item label="类目上限">
+            <el-input-number
+              :model-value="chart.maxCategories"
+              :min="2"
+              :max="200"
+              :step="5"
+              size="small"
+              @change="onChartChange('maxCategories', $event)"
+            />
+          </el-form-item>
+          <div class="text-muted format-hint">
+            超出的类目不画（后端记一条 warn）。一张纸上挤几百根柱子本来也看不清
+          </div>
+        </template>
+
         <template v-if="isDataBound">
           <el-form-item label="数据集">
             <el-select
@@ -166,14 +315,14 @@
 
         <el-divider style="margin: 12px 0" />
 
-        <!-- 格式化是给文字用的，图片格没有文字 -->
-        <el-form-item v-if="!isImage" label="格式化类型">
+        <!-- 格式化是给文字用的，图片格与图表格都没有文字 -->
+        <el-form-item v-if="!isImage && !isChart" label="格式化类型">
           <el-select :model-value="config?.formatType" style="width: 100%" @change="onFormatTypeChange">
             <el-option v-for="t in FORMAT_TYPES" :key="t.value" :label="t.label" :value="t.value" />
           </el-select>
         </el-form-item>
         <!-- 模板只有金额与日期可配：数值/百分比/文本按各自的默认模板出，没什么可选的 -->
-        <template v-if="!isImage && isCurrency">
+        <template v-if="!isImage && !isChart && isCurrency">
           <el-form-item label="金额样式">
             <el-select
               :model-value="config?.formatPattern || '¥#,##0.00'"
@@ -188,7 +337,7 @@
             1234.56 出成「壹仟贰佰叁拾肆元伍角陆分」；四舍五入到分，导出到 Excel 是文本
           </div>
         </template>
-        <template v-if="!isImage && isDate">
+        <template v-if="!isImage && !isChart && isDate">
           <el-form-item label="日期格式">
             <!-- allow-create：下拉里没有的格式直接敲进去 -->
             <el-select
@@ -273,6 +422,11 @@ import {
   CURRENCY_PATTERNS,
   DATE_PATTERNS,
   CN_UPPER_PATTERN,
+  CHART_TYPES,
+  CHART_AGGREGATES,
+  CHART_THEMES,
+  LEGEND_POSITIONS,
+  defaultChartConfig,
   defaultFormatPattern
 } from '@/utils/sheet'
 import { pxToMm, MIN_CELL_SIZE, MAX_ROW_HEIGHT, MAX_COL_WIDTH } from '@/utils/print'
@@ -298,6 +452,52 @@ const isImage = computed(() => IMAGE_TYPES.includes(props.config?.type))
 const isBarcode = computed(() => BARCODE_TYPES.includes(props.config?.type))
 /** 按数据集字段取值：数据格与几种图片格共用同一套绑定配置 */
 const isDataBound = computed(() => DATA_BOUND_TYPES.includes(props.config?.type))
+/** 图表格：取的是整个数据集，不按行取字段，所以不在 DATA_BOUND_TYPES 里 */
+const isChart = computed(() => props.config?.type === 'chart')
+
+/**
+ * 当前图表配置。老报表/刚切过来的格子上可能还没有这一份，兜一份默认值，
+ * 表单就不用到处判空（真正写回去是在 onChartChange 里，那时才落到 config 上）。
+ */
+const chart = computed(() => ({ ...defaultChartConfig(), ...(props.config?.chart || {}) }))
+
+/** 图例：位置与「显不显示」在界面上合成一个下拉，配起来少一步 */
+const legendValue = computed(() => (chart.value.showLegend ? chart.value.legendPosition : 'none'))
+
+const categoryQuery = ref('')
+const filteredCategoryFields = computed(() => matchFields(currentFields.value, categoryQuery.value))
+
+/** 改图表配置：整份写回去（cellConfig.chart 是个嵌套对象，父组件只做浅合并） */
+function onChartChange(field, value) {
+  emit('update', { chart: { ...chart.value, [field]: value } })
+}
+
+function onLegendChange(value) {
+  emit('update', {
+    chart: {
+      ...chart.value,
+      showLegend: value !== 'none',
+      legendPosition: value === 'none' ? chart.value.legendPosition : value
+    }
+  })
+}
+
+function onSeriesChange(index, field, value) {
+  const series = chart.value.series.map((s, i) => (i === index ? { ...s, [field]: value } : s))
+  emit('update', { chart: { ...chart.value, series } })
+}
+
+function addSeries() {
+  emit('update', {
+    chart: { ...chart.value, series: [...chart.value.series, { field: '', name: '', aggregate: 'sum' }] }
+  })
+}
+
+function removeSeries(index) {
+  // 至少留一条：一条都没有的图表画不出来，界面上也就没地方再加回去了
+  if (chart.value.series.length <= 1) return
+  emit('update', { chart: { ...chart.value, series: chart.value.series.filter((_, i) => i !== index) } })
+}
 
 const TYPE_HINTS = {
   img: '字段值是图片地址（http/https）。导出时由服务端去下载，内网地址要服务器也能访问',
@@ -424,6 +624,12 @@ function onTypeChange(value) {
   if (!IMAGE_TYPES.includes(value) && props.config?.fallbackField) {
     patch.fallbackField = ''
   }
+  // 切成图表格时先给一份默认配置，表单才有东西可显示。
+  // 切走时**不清**这份配置（与上面那几项不同）：系列、标题这些配起来费工夫，
+  // 手滑切错类型再切回来还在；它只在 type=chart 时被读到，留着不影响出纸
+  if (value === 'chart' && !props.config?.chart) {
+    patch.chart = defaultChartConfig()
+  }
   emit('update', patch)
 }
 
@@ -465,6 +671,34 @@ function onFormatTypeChange(value) {
 }
 .cell-form :deep(.el-form-item) {
   margin-bottom: 12px;
+}
+/* 数值系列：字段 + 聚合 + 删除一行，图例名称另起一行（面板窄，挤一行会看不清） */
+.series-list {
+  width: 100%;
+}
+.series-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px dashed var(--el-border-color-lighter);
+}
+.series-field {
+  flex: 1 1 46%;
+  min-width: 0;
+}
+.series-agg {
+  flex: 1 1 34%;
+  min-width: 0;
+}
+.series-name {
+  flex: 1 1 100%;
+}
+.series-hint {
+  margin-top: 4px;
+  line-height: 1.5;
 }
 .cell-size {
   margin-bottom: 12px;

@@ -16,7 +16,7 @@ public class CellConfigDTO implements Serializable {
     private Integer r;
     private Integer c;
 
-    /** text | data | formula | param | img | base64 | barcode | qrcode */
+    /** text | data | formula | param | img | base64 | barcode | qrcode | chart */
     private String type = "text";
 
     /** 数据集编码 */
@@ -71,6 +71,25 @@ public class CellConfigDTO implements Serializable {
      * （`export/ImageLoader`），那条路上兜不了底 —— 见 docs/CONTRACT.md §4。
      */
     private String fallbackField = "";
+
+    /**
+     * 图表配置（{@code type=chart} 时有效），见 {@link ChartConfigDTO}。
+     *
+     * <p>嵌一层而不是平铺进本类：图表的配置项比一个格子的其它属性加起来还多，平铺会把本类撑爆。
+     */
+    private ChartConfigDTO chart;
+
+    /**
+     * 是否为图表单元格：值不是取自某一行的某个字段，而是**整个数据集**画成的一张图。
+     *
+     * <p>输出形态与图片格完全相同（挂到 {@code GridCell#image} 上、文字置空），
+     * 于是预览、Excel、PDF、Word 四条路一行都不用改 —— 它们只认 {@code v.mzImg.src}，
+     * 认不出这张图是下载来的、编成码的、还是画出来的（同 {@code engine/BarcodeGenerator}）。
+     * 但**取值方式完全不同**，所以不进 {@link #isDataBound()} 也不进 {@link #isImage()}。
+     */
+    public boolean isChart() {
+        return "chart".equals(type);
+    }
 
     /**
      * 是否「值取自数据集的某个字段」。

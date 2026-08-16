@@ -36,6 +36,18 @@ public class ExpandProcessor {
     private final FormulaEvaluator evaluator;
     private final MzProperties props;
 
+    /**
+     * 图表里的字用哪款字体 —— **复用 PDF 那份配置**（`muzhou.report.pdf.font-path`）。
+     *
+     * <p>「这台服务器上的中文字体在哪」是同一件事，没道理让人为图表再配一遍；配了 PDF 却发现
+     * 图表还是方框，那才是最难查的。{@link ChartFonts} 是静态的（同 {@link BarcodeGenerator}
+     * 那样的纯工具类，测试里直接调不必起 Spring），所以在这里把配置递进去一次。
+     */
+    @jakarta.annotation.PostConstruct
+    void configureChartFont() {
+        ChartFonts.configure(props.getPdf() == null ? null : props.getPdf().getFontPath());
+    }
+
     /** 待求值的 Aviator 单元格（必须等整个网格生成后才能算区间函数）。 */
     private record PendingFormula(int r, int c, String expression, Map<String, Object> rowData,
                                   CellConfigDTO config) {
@@ -54,6 +66,9 @@ public class ExpandProcessor {
         RenderGrid grid = new RenderGrid();
         List<PendingFormula> pending = new ArrayList<>();
         List<int[]> nativeFormulaCells = new ArrayList<>();
+        // 图表格同样「先占位、末尾统一处理」：出图要按格子的实际像素来，
+        // 而那要等扩展做完、合并与行高列宽都偏移过了才定得下来（见 ChartProcessor）
+        List<ChartProcessor.ChartCell> charts = new ArrayList<>();
 
         int outRow = 0;
         for (int tr = 0; tr <= st.getMaxRow(); tr++) {
@@ -67,7 +82,7 @@ public class ExpandProcessor {
 
             String bandDataset = findBandDataset(cells);
             if (bandDataset == null) {
-                emitRow(grid, cells, outRow, null, -1, datasets, params, pending, nativeFormulaCells);
+                emitRow(grid, cells, outRow, null, -1, datasets, params, pending, nativeFormulaCells, charts);
                 grid.mapRow(tr, outRow);
                 outRow++;
             } else {
@@ -80,7 +95,7 @@ public class ExpandProcessor {
                 checkCapacity(grid.size() + (long) n * cells.size());
                 for (int i = 0; i < n; i++) {
                     Map<String, Object> rowData = i < rows.size() ? rows.get(i) : null;
-                    emitRow(grid, cells, outRow, rowData, i, datasets, params, pending, nativeFormulaCells);
+                    emitRow(grid, cells, outRow, rowData, i, datasets, params, pending, nativeFormulaCells, charts);
                     grid.mapRow(tr, outRow);
                     outRow++;
                 }
@@ -96,6 +111,8 @@ public class ExpandProcessor {
         applyMergeMarkers(grid);
         shiftNativeFormulas(grid, nativeFormulaCells, st);
         evaluatePending(grid, pending, params, datasets);
+        // 排在最后：出图要按格子的实际像素来，行高列宽与合并要等上面几步都搬完才作数
+        ChartProcessor.process(grid, charts, datasets);
         return grid;
     }
 
@@ -130,7 +147,8 @@ public class ExpandProcessor {
                          Map<String, List<Map<String, Object>>> datasets,
                          Map<String, Object> params,
                          List<PendingFormula> pending,
-                         List<int[]> nativeFormulaCells) {
+                         List<int[]> nativeFormulaCells,
+                         List<ChartProcessor.ChartCell> charts) {
         int colOffset = 0;
         for (TemplateCell tc : cells) {
             CellConfigDTO cfg = tc.getConfig();
@@ -171,6 +189,9 @@ public class ExpandProcessor {
                 nativeFormulaCells.add(new int[]{outRow, outC, tc.getR(), tc.getC()});
             }
             grid.put(cell);
+            if (cfg != null && cfg.isChart()) {
+                charts.add(new ChartProcessor.ChartCell(outRow, outC, cfg));
+            }
             grid.getColMapping().putIfAbsent(tc.getC(), outC);
         }
     }

@@ -78,6 +78,25 @@ npm run build
   `ErrorCorrectionLevel`，Aztec / PDF417 收的是整数，一律塞进去它们会在 `Integer.parseInt("M")`
   上抛出来；② **编不出码只让这一格出空白并记 warn**（EAN_13 只收 13 位数字、CODE_39 不认小写），
   500 行里有一条脏数据就整份渲染失败没法交代 —— 同 `ImageLoader` 对坏图链的态度。
+- **图表（`chart`）是同一条延长线上的第二段**：`engine/ChartRenderer` 用 **Java2D 自己画**
+  （柱/横向柱/折线/面积/饼五种，零新依赖 —— 出图就是「算刻度 + 画矩形/折线/扇形」，
+  引一个图表库要连着它的许可、体积、升级一起背，PDF 那条路上已经因为 Aspose 栽过一次），
+  画完照旧归一化成 `data:` URI 挂到 `v.mzImg.src`，四条出纸路一行都不用改。
+  **与条码唯一的实质差异是尺寸**：条码固定尺寸出图、再由 `ImageFit#contain` 等比装进格子
+  （等比缩放不失真），而图表的轴文字、图例、数值标签是**画在图里**的，等比放大 3 倍字就大得
+  离谱、缩到 1/3 就糊 —— 所以图表**按目标框的实际像素出图**（框 = 那一格，落在合并区里就是整块），
+  `contain` 算出来的缩放系数正好是 1。**由此决定了它排在最后**：框有多大要等扩展做完
+  （行带复制会把下方所有行的 `r` / `merge` / `rowlen` 整体偏移）才定得下来，所以出图是
+  `ExpandProcessor#process` 末尾的一个独立 pass（`engine/ChartProcessor`），
+  收集方式与公式一样是「先占位、末尾统一处理」。三件事容易漏：
+  ① **图表格取的是整个数据集**，不按行取字段、不参与行带扩展，所以它不进 `isDataBound()`；
+  ② **聚合挂在每条系列上**（`chart.series[].aggregate`），因为数据集给的往往是明细行、
+  而图表要的是「按类目汇总」，格子上那个 `aggregate` 是「整列算成一个值」的另一回事；
+  ③ **画完必须把格子文字置空**（连画不出来的时候也要），否则设计器写在画布上的那段
+  `[图表] xxx` 占位文本会印到纸上。拆分（`perRow` / `sheetSplits`）与父子关联下图表天然正确
+  —— 那两件事都是**换取数函数**做的，详情页的图自动只画这一条单据的数据、清单页拿全量。
+  字体走 `engine/ChartFonts`（复用 `muzhou.report.pdf.font-path`，**AWT 读不了 `.ttc`**，
+  那种情况退回兜底字体并 warn），出图前钉死 `java.awt.headless=true`。
 - 公式两条路：`!{}` 走 Aviator（`FormulaEvaluator` + `GridFunctions`，区间函数在**渲染后的网格**上求值），
   `=` 原生公式只做 A1 引用偏移（`A1RefUtils`）后交给 FortuneSheet 前端算。
 - `RenderServiceImpl` 手写构造器而非 `@RequiredArgsConstructor`：容器里有两个 `ObjectMapper`，

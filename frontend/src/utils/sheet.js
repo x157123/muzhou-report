@@ -247,8 +247,11 @@ export function parseFieldToken(text) {
   return m ? { datasetCode: m[1], field: m[2] } : null
 }
 
-/** 值来自单元格里那串占位符（`#{}` / `!{}` / `${}`）的配置类型（图片/条码格的绑定写法同 data） */
-const BOUND_TYPES = new Set(['data', 'formula', 'param', 'img', 'base64', 'barcode', 'qrcode'])
+/**
+ * 值来自单元格里那串文字的配置类型（图片/条码格的绑定写法同 data，图表是那段 `[图表] xxx` 占位文本）
+ * —— 格子清空了就等于这条配置作废，见 `pruneEmptyCellConfigs`。
+ */
+const BOUND_TYPES = new Set(['data', 'formula', 'param', 'img', 'base64', 'barcode', 'qrcode', 'chart'])
 
 const isBlankValue = (x) => x === null || x === undefined || String(x) === ''
 
@@ -674,8 +677,84 @@ export const CELL_TYPES = [
   { label: '图片（地址）', value: 'img' },
   { label: '图片（Base64）', value: 'base64' },
   { label: '条形码', value: 'barcode' },
-  { label: '二维码', value: 'qrcode' }
+  { label: '二维码', value: 'qrcode' },
+  { label: '图表', value: 'chart' }
 ]
+
+/**
+ * 图表类型。后端 `engine/ChartRenderer` 按同一批取值出图，加类型要两边一起加。
+ */
+export const CHART_TYPES = [
+  { label: '柱状图', value: 'bar' },
+  { label: '横向柱状图', value: 'hbar' },
+  { label: '折线图', value: 'line' },
+  { label: '面积图', value: 'area' },
+  { label: '饼图', value: 'pie' }
+]
+
+/**
+ * 图表系列的聚合方式 —— **按类目分组之后**在组内怎么把多行算成一个数。
+ *
+ * 与格子上那个 `aggregate`（整列算成一个值）不是一回事，别混用。
+ */
+export const CHART_AGGREGATES = [
+  { label: '求和 SUM', value: 'sum' },
+  { label: '平均 AVG', value: 'avg' },
+  { label: '最大 MAX', value: 'max' },
+  { label: '最小 MIN', value: 'min' },
+  { label: '计数 COUNT', value: 'count' },
+  { label: '不聚合（取首条）', value: 'none' }
+]
+
+export const LEGEND_POSITIONS = [
+  { label: '下方', value: 'bottom' },
+  { label: '上方', value: 'top' },
+  { label: '左侧', value: 'left' },
+  { label: '右侧', value: 'right' },
+  { label: '不显示', value: 'none' }
+]
+
+/** 配色主题，取值与后端 `ChartRenderer#THEMES` 一一对应 */
+export const CHART_THEMES = [
+  { label: '默认', value: 'default' },
+  { label: 'Office', value: 'office' },
+  { label: '单色蓝', value: 'mono' }
+]
+
+/** 一份默认的图表配置，切到图表类型时用它兜底 */
+export function defaultChartConfig() {
+  return {
+    chartType: 'bar',
+    categoryField: '',
+    series: [{ field: '', name: '', aggregate: 'sum' }],
+    title: '',
+    categorvalueAxisTitle: '',
+    valueAxisTitle: '',
+    showLegend: true,
+    legendPosition: 'bottom',
+    showValueLabels: false,
+    theme: 'default',
+    maxCategories: 30
+  }
+}
+
+/**
+ * 图表格在画布上显示的那段占位文本。
+ *
+ * 图表格的值不来自占位符，但**「格子空了就等于绑定没了」这条规矩要守住**
+ * （见 `pruneEmptyCellConfigs`）：没有这段文字，画布上那片合并区什么都看不见，
+ * 用户也没法靠删格子来撤销图表。渲染时后端会把它清空（`ChartProcessor`），出纸上只有图。
+ *
+ * 故意**不写成 `#{...}` 的样子** —— 那会被 `autoBindCellConfigs` 认成数据格，两套推断打架。
+ */
+export function chartPlaceholderText(cfg) {
+  const chart = cfg?.chart
+  const title = chart?.title?.trim()
+  if (title) return `[图表] ${title}`
+  const category = chart?.categoryField
+  if (cfg?.datasetCode && category) return `[图表] ${cfg.datasetCode}.${category}`
+  return '[图表] 未配置'
+}
 
 /** 值当条码画的单元格类型（值是要编成码的那串字，后端出图） */
 export const BARCODE_TYPES = ['barcode', 'qrcode']

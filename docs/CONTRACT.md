@@ -478,7 +478,8 @@ status / is_default）—— 漏了后者，副本会是一张没有版式的报
     // key = `${sheetIndex}_${r}_${c}`，sheetIndex 是 sheets 数组的下标，见下方「按下标寻址」
     "0_3_1": {
       "sheetIndex": 0, "r": 3, "c": 1,
-      // data | formula | param | text | img | base64 | barcode | qrcode
+      // data | formula | param | text | img | base64 | barcode | qrcode | chart
+      // chart = **图表单元格**：值是整个数据集画成的一张图，见下面的 `chart` 子对象
       // img / base64 / barcode / qrcode = **图片单元格**：取数方式与 data 完全一样
       // （datasetCode + field + expandType + groupType），区别只在于取到的值是当图片画还是当文字写。
       //   img     值是图片地址（http/https）
@@ -532,7 +533,34 @@ status / is_default）—— 漏了后者，副本会是一张没有版式的报
       "barcodeFormat": "",
       "qrLevel": "",              // 二维码纠错级别 L/M/Q/H，空按 M。**只有 QR_CODE 收**
                                   // （Aztec/PDF417 的纠错参数是整数，塞 ErrorCorrectionLevel 会编不出码）
-      "barcodeText": true         // 条形码下方印不印那串原文，默认印；二维码无此概念
+      "barcodeText": true,        // 条形码下方印不印那串原文，默认印；二维码无此概念
+      // 以下只对 type=chart 有意义（engine/ChartRenderer + engine/ChartProcessor）。
+      // **图表格取的是整个数据集**（datasetCode 那一份的全部行），不按行取字段、不参与行带扩展
+      // —— 所以它不进 isDataBound()，field / expandType / groupType / aggregate 对它都无意义。
+      // 输出形态与图片单元格**完全相同**（挂 v.mzImg.src、文字置空），于是预览与三条导出路
+      // 一行都不用改：它们只认 mzImg，认不出这张图是下载来的、编成码的、还是画出来的。
+      // 图画在**整个合并区**上（同图片格），出图尺寸 = 那片区域的实际像素 × 超采样倍数
+      // —— 与条码不同，图表**不能**先固定尺寸再等比缩放：轴文字与图例是画在图里的，
+      // 缩放会让字大得离谱或糊成一团。
+      // 画不出来（没配全、数据为空、类目字段取不到）记一条 warn 后出空白，不让整份渲染失败。
+      "chart": {
+        "chartType": "bar",       // bar 柱状 | hbar 横向柱状 | line 折线 | area 面积 | pie 饼图
+        "categoryField": "month", // 类目轴字段（饼图是扇区名）；按它分组，顺序 = 首次出现的顺序
+        // 数值系列。**聚合挂在每条系列上**：数据集给的往往是明细行，图表要的是「按类目汇总」，
+        // 而「金额求和 + 单量计数」同图也常见。none = 不聚合，同类目取第一条。
+        // 饼图只画第一条（一个饼说不了两组数）。
+        "series": [
+          { "field": "amount", "name": "销售额", "aggregate": "sum" }
+        ],
+        "title": "",              // 图表标题，空 = 不画标题带
+        "categoryAxisTitle": "",  // 类目轴标题
+        "valueAxisTitle": "",     // 数值轴标题（横向柱状图时两者对调的是位置，不是含义）
+        "showLegend": true,
+        "legendPosition": "bottom", // top | bottom | left | right（设计器把「不显示」也并进这个下拉）
+        "showValueLabels": false,   // 柱顶/点上印数值；饼图是扇区上印百分比
+        "theme": "default",         // default | office | mono，与 ChartRenderer#THEMES 一一对应
+        "maxCategories": 30         // 类目上限，超出截断并 warn（一张纸上挤几百根柱子看不清）
+      }
     }
   },
   "params": [
@@ -767,6 +795,14 @@ Excel 里那一块；`WordExporter#readPictures` 只取「占了哪几行哪几�
 把那串字编成 PNG，归一化成一个 `data:` URI 挂到同一个 `v.mzImg.src` 上），
 所以预览、Excel、PDF、Word 拿到的是同一张图，谁也认不出它是画的还是取回来的。
 放到前端画的话导出那头（三条路都在服务端）还得再实现一遍，两份实现迟早对不齐。
+
+**图表同理，也不是第五条路**：`chart` 的图同样是渲染时在服务端画好的
+（`engine/ChartRenderer` 用 Java2D 画，`engine/ChartProcessor` 负责算尺寸并挂上去），
+落到的还是那个 `v.mzImg.src`。与条码的**唯一实质差异**是尺寸：条码固定尺寸出图、再由
+`ImageFit#contain` 等比装进格子（等比缩放不失真），而图表的轴文字与图例画在图里，
+必须**按目标框的实际像素出图**（框 = 那一格，落在合并区里就是整块），
+于是 `contain` 算出来的缩放系数正好是 1。**因此图表出图排在扩展之后**：
+行带复制会把下方所有行的 `r` / `merge` / `rowlen` 整体偏移，框有多大要等那时才定得下来。
 
 图片取不回来时**只跳过这一张并记一条 warn**（导出不中断）。「预览里看得到、导出的文件里没有」
 基本都出在这里：预览是**浏览器**去拉图，导出是**服务端**去拉 —— 服务端可能没有代理
@@ -1093,6 +1129,14 @@ api 类型数据集的**接口地址**里同样写 `${paramName}`，替换时对
    金额中文大写则整格标成文本（`{fa:"@",t:"s"}`，`v` 仍是数字），见 §4。
    数据单元格的文本里带前后缀时（见 §5「数据单元格的前后缀」）改为「先格式化、再拼前后缀」，
    拼出来的整段文本同时写进 `v` 与 `m`，`ct` 用 `General`。
+8. **图表出图**（`type=chart` 的格子，`engine/ChartProcessor`）：**必须排在最后** ——
+   出图要按格子的实际像素来，而「这一格多宽多高、合并到了哪里」要等第 3~5 步把
+   `merge` / `rowlen` / `columnlen` 都偏移完才定得下来。逐个图表格：算出它占的框
+   （合并区就是整块，没设过行高列宽时按设计器默认的 73px / 19px），
+   把 `datasetCode` 那份数据按 `chart.categoryField` 分组、每条系列在组内按自己的 `aggregate`
+   算一个数，画成 PNG 挂到 `v.mzImg.src` 上，**并把格子文字置空**
+   （设计器在画布上写的那段 `[图表] xxx` 占位文本不该印到纸上；画不出来时也要置空）。
+   一次渲染画出的图表数有上限（`ChartProcessor#MAX_CHARTS`），超出的留空并 warn。
 
 `content.datasetLinks` 配了父子关联时，**第 2 步套一层取数装饰器**（`engine/LinkedDataFetcher`），
 1、3~8 步一律不变：要子表数据时先取主表（主表自己也可能是别人的子表，递归），

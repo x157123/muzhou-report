@@ -263,6 +263,7 @@ import {
   fieldToken,
   getCellText,
   replaceToken,
+  chartPlaceholderText,
   toA1,
   DATA_BOUND_TYPES,
   FIELD_DRAG_MIME
@@ -1124,6 +1125,13 @@ const cellLabel = computed(() => (store.activeCell ? toA1(store.activeCell.r, st
  */
 function syncCellText(r, c, cfg) {
   if (!cfg) return
+  // 图表格没有单字段绑定，凭据是一段整格替换的占位文本（不走 replaceToken —— 它认的是
+  // `#{}` 那几种正则；也别把这段文字写成占位符的样子，会被 autoBindCellConfigs 认成数据格）。
+  // 渲染时后端 ChartProcessor 会把它清空，纸上只有图
+  if (cfg.type === 'chart') {
+    sheetRef.value?.setCellValue(r, c, chartPlaceholderText(cfg))
+    return
+  }
   let text = null
   if (DATA_BOUND_TYPES.includes(cfg.type) && cfg.datasetCode && cfg.field) {
     text = fieldToken(cfg.datasetCode, cfg.field)
