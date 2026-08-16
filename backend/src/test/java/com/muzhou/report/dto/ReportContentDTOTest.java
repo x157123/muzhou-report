@@ -42,9 +42,12 @@ class ReportContentDTOTest {
     }
 
     @Test
-    @DisplayName("两种拆分模式都要有主接口，没设主接口一律不拆")
+    @DisplayName("两种拆分模式都要有主接口，还得真有模板参与拆分")
     void splitNeedsPrimaryDataset() {
         ReportContentDTO content = new ReportContentDTO();
+        // 得真有一张模板：`splitByRow` 现在还要求「至少一张模板参与拆分」
+        // （拆分下放到模板级之后加的，见 splitsSheet），一张模板都没有时拆分无从谈起
+        content.getSheets().add(java.util.Map.of("name", "单据"));
         content.setSplitMode("perRow");
         assertFalse(content.splitByRow(), "没设主接口就不知道按谁拆");
 
@@ -59,6 +62,13 @@ class ReportContentDTOTest {
         content.setSplitMode("single");
         assertFalse(content.splitByRow());
         assertFalse(content.concatPerRow());
+
+        // 整份模板都标了 once（全是清单页）时拆分是恒等变换，退回普通渲染那条路
+        // —— 少一次主接口探测，也少给下游一堆「一份单据」的标记
+        content.setSplitMode("perRow");
+        assertTrue(content.splitByRow());
+        content.getSheetSplits().put("0", "once");
+        assertFalse(content.splitByRow(), "没有一张模板参与拆分，就不该走拆分那条路");
     }
 
     @Test
