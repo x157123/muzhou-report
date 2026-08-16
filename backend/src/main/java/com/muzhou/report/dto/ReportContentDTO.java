@@ -105,11 +105,13 @@ public class ReportContentDTO implements Serializable {
      * 导出的文件名（不含扩展名）。没配过导出设置的老报表就是报表名本身。
      *
      * @param reportName 报表名
-     * @param row        主接口第一行，可以为 null（没有主接口、没配字段、或者一条数据都没取到）
+     * @param row        主接口那一行，可以为 null（没有主接口、没配字段、一条数据都没取到、
+     *                   或者<b>主接口不止一行</b>，见 {@link ExportConfigDTO#nameRow}）
+     * @param params     这次渲染用的参数，`${参数名}` 那几段从这里取；可以为 null
      */
-    public String exportFileName(String reportName, Map<String, Object> row) {
+    public String exportFileName(String reportName, Map<String, Object> row, Map<String, Object> params) {
         ExportConfigDTO cfg = exportConfig == null ? new ExportConfigDTO() : exportConfig;
-        return cfg.resolve(reportName, row);
+        return cfg.resolve(reportName, row, params);
     }
 
     /** 取第 {@code sheetIndex} 张 sheet 实际生效的打印设置。 */

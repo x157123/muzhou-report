@@ -100,17 +100,20 @@ export const useDesignerStore = defineStore('designer', {
       return [...set]
     },
     /**
-     * 按 code 找数据集（含 fields）。
+     * 按 code 找数据集（含 fields 与 params）。
      *
      * 接口返回的是 DatasetDetailDTO（{dataset, fields, params}），也兼容已经拍平的形态 ——
      * 两种都认，调用方不必关心 store 里存的是哪一种。
+     * `params` 是数据集自己声明的参数，导出文件名那里要拿它列「主接口参数」。
      */
     datasetByCode(state) {
       return (code) => {
         if (!code) return null
         for (const item of state.datasets) {
           const ds = item?.dataset || item
-          if (ds?.code === code) return { ...ds, fields: item?.fields || ds.fields || [] }
+          if (ds?.code === code) {
+            return { ...ds, fields: item?.fields || ds.fields || [], params: item?.params || ds.params || [] }
+          }
         }
         return null
       }

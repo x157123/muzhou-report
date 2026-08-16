@@ -344,19 +344,33 @@
               v-model="exportCfg.fields"
               multiple
               filterable
-              :disabled="!primary"
-              placeholder="取主接口的哪几个字段（可多选，按选中顺序拼）"
+              allow-create
+              default-first-option
+              placeholder="拼哪几段（可多选，按选中顺序拼）"
               style="width: 100%"
             >
-              <el-option
-                v-for="f in primaryFields"
-                :key="f.fieldName"
-                :label="`${f.fieldText || f.fieldName} (${f.fieldName})`"
-                :value="f.fieldName"
-              />
+              <el-option-group label="当前时间">
+                <el-option label="当前时间（yyyyMMddHHmmss）" value="${now}" />
+              </el-option-group>
+              <el-option-group v-if="primaryParams.length" label="主接口参数">
+                <el-option
+                  v-for="p in primaryParams"
+                  :key="p.paramName"
+                  :label="`${p.paramText || p.paramName} (\${${p.paramName}})`"
+                  :value="`\${${p.paramName}}`"
+                />
+              </el-option-group>
+              <el-option-group v-if="primaryFields.length" label="主接口字段">
+                <el-option
+                  v-for="f in primaryFields"
+                  :key="f.fieldName"
+                  :label="`${f.fieldText || f.fieldName} (${f.fieldName})`"
+                  :value="f.fieldName"
+                />
+              </el-option-group>
             </el-select>
             <span v-if="!primary" class="text-muted" style="margin-top: 4px">
-              未设主接口 —— 在左侧数据集面板点 ☆ 指定一个，这里才有字段可选
+              未设主接口 —— 在左侧数据集面板点 ☆ 指定一个，这里才有字段和参数可选（当前时间不受影响）
             </span>
           </el-form-item>
 
@@ -368,14 +382,21 @@
           <el-form-item label="示例">
             <span class="mono">{{ exportNameSample }}.xlsx</span>
             <span class="text-muted" style="margin-left: 8px">
-              （字段位置这里用<b>字段名</b>示意，实际是那一行的值）
+              （字段/参数位置这里用<b>名字</b>示意，实际是那一行的值；时间是真的当前时间）
             </span>
           </el-form-item>
 
           <div class="tips">
             <p>
-              导出的 <b>Excel / PDF / Word</b> 都用这个名字；字段值取的是<b>主接口第一行</b> ——
-              一次导出只出一个文件，按条拆单据时整批也仍是一份，所以拿第一条代表整份。
+              导出的 <b>Excel / PDF / Word</b> 都用这个名字。
+              <b>字段值只在主接口恰好取到一条数据时才拼</b> —— 取回 200 条时第一条代表不了整份，
+              拼出来的「销售出库单_SO-001」里其实装着 200 张单，名字反而误导，所以那几段整段跳过。
+            </p>
+            <p>
+              <b>「当前时间」和「主接口参数」不看数据，多条数据时照样拼得出来</b> ——
+              一批一批导出的报表靠它们分得清是哪次、哪个条件导的。参数取的是这次渲染实际用的值
+              （报表参数、全局参数、地址栏透传的都算，没传值的参数整段跳过）；下拉里没有的参数名
+              可以直接手打 <code>${参数名}</code> 回车。
             </p>
             <p>
               取不到值的字段整段跳过（不会留下空的连接符）；文件名里不能用的字符
@@ -592,6 +613,8 @@ watch(scope, (v, old) => {
 /** 当前报表的主接口（含字段），没设主接口时为 null */
 const primary = computed(() => store.datasetByCode(store.content.primaryDataset))
 const primaryFields = computed(() => primary.value?.fields || [])
+/** 主接口自己声明的参数 —— 导出文件名可以拼 `${参数名}`，那一段不看数据、多条时照样在 */
+const primaryParams = computed(() => primary.value?.params || [])
 /**
  * 只有「主接口是集合型」才拆得动：分页型自己就在按页取数，再按行拆 sheet 是两套分页打架。
  */

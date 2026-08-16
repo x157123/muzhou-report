@@ -299,30 +299,32 @@ public class RenderServiceImpl implements RenderService {
     }
 
     /**
-     * 这份文件叫什么（不含扩展名）：报表名 + 主接口若干字段值，规则在
-     * {@link com.muzhou.report.dto.ExportConfigDTO} 里，本方法只负责把那一行数据找出来。
+     * 这份文件叫什么（不含扩展名）：报表名 + 配置的那几段（主接口字段 / `${now}` / `${参数}`），
+     * 规则在 {@link com.muzhou.report.dto.ExportConfigDTO} 里，本方法只负责把那一行数据找出来。
      *
-     * <p>那一行取的是**主接口第一行**，而且是从刚才渲染用的同一个取数函数里要的 ——
-     * 主接口已经被 {@link CachingDataFetcher} 记着（key = code + 合并后的参数），
-     * 所以这一问通常直接命中缓存、不会多打一次接口。取不到数据、接口报错都只是「少一段名字」，
-     * 决不能让导出本身失败 —— 文件已经生成好了，为了个名字把它丢掉说不过去。
+     * <p>那一行是从刚才渲染用的同一个取数函数里要的 —— 主接口已经被
+     * {@link CachingDataFetcher} 记着（key = code + 合并后的参数），所以这一问通常直接命中缓存、
+     * 不会多打一次接口。取不到数据、接口报错都只是「少一段名字」，决不能让导出本身失败
+     * —— 文件已经生成好了，为了个名字把它丢掉说不过去。
      */
     private String exportFileName(Rendered rendered) {
         ReportContentDTO content = rendered.content();
         Map<String, Object> row = null;
         ExportConfigDTO cfg = content.getExportConfig();
         if (cfg != null && cfg.needsRow() && StringUtils.hasText(content.getPrimaryDataset())) {
-            row = firstPrimaryRow(rendered);
+            row = primaryNameRow(rendered);
         }
-        return content.exportFileName(rendered.reportName(), row);
+        return content.exportFileName(rendered.reportName(), row, rendered.params());
     }
 
-    /** 主接口第一行；没有数据或取数出错都返回 null（文件名少那几段而已）。 */
-    private Map<String, Object> firstPrimaryRow(Rendered rendered) {
+    /**
+     * 拿来拼名字的主接口那一行：**恰好一行时才有**（{@link ExportConfigDTO#nameRow}），
+     * 多于一行时字段那几段一律不拼；没有数据或取数出错同样返回 null（文件名少那几段而已）。
+     */
+    private Map<String, Object> primaryNameRow(Rendered rendered) {
         try {
-            List<Map<String, Object>> rows = rendered.fetcher()
-                    .apply(rendered.content().getPrimaryDataset(), rendered.params());
-            return rows == null || rows.isEmpty() ? null : rows.get(0);
+            return ExportConfigDTO.nameRow(rendered.fetcher()
+                    .apply(rendered.content().getPrimaryDataset(), rendered.params()));
         } catch (Exception e) {
             log.warn("拼导出文件名时取主接口数据失败，文件名退回报表名: {}", e.getMessage());
             return null;

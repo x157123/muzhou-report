@@ -50,7 +50,7 @@ export function createEmptySheet(index = 0) {
 }
 
 /**
- * 导出设置（报表级）：导出的 Excel / PDF / Word 叫什么名字 —— 报表名 + 主接口若干字段值，
+ * 导出设置（报表级）：导出的 Excel / PDF / Word 叫什么名字 —— 报表名 + 若干段，
  * 用 `separator` 拼起来。见 CONTRACT §4，后端那份是 `dto/ExportConfigDTO`。
  *
  * 老报表没有这一项（等于「就叫报表名」），这里补全字段，弹窗里就不用到处判空。
@@ -65,10 +65,30 @@ export function normalizeExportConfig(cfg) {
 }
 
 /**
+ * 拼接段里的占位符：`${now}` 当前时间 / `${参数名}` 参数值，
+ * 与后端 `ExportConfigDTO` 里那个 TOKEN 是同一套写法。其余的都当主接口字段名。
+ */
+export const EXPORT_TOKEN = /^\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*}$/
+/** `${now}` 里的保留名 —— 同名参数让位给它 */
+export const EXPORT_NOW = '${now}'
+
+/**
+ * 当前时间那一段：紧凑时间戳 `yyyyMMddHHmmss`，与后端 `ExportConfigDTO#NOW_FORMAT` 一致
+ * —— 本身就不含 `:` `/` 这些文件名里不能用的字符。
+ */
+export function exportNowText(d = new Date()) {
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
+}
+
+/**
  * 照 `exportConfig` 拼一个文件名（不含扩展名）—— 设计器里那个「示例」用它现算，
  * 后端 `ExportConfigDTO#resolve` 是同一套规则（含洗掉 `\/:*?"<>|` 这些字符）。
  *
- * @param values 字段名 -> 值；设计器里没有真实数据，传字段的显示名当示意
+ * `${now}` 这一段这里算的是**真的当前时间**（前端也知道），其余段设计器里没有真实数据，
+ * 拿字段名/参数名当示意。
+ *
+ * @param values 字段名/参数名 -> 值；缺省就用名字本身示意
  */
 export function exportFileName(cfg, reportName, values = {}) {
   const c = normalizeExportConfig(cfg)
@@ -83,7 +103,11 @@ export function exportFileName(cfg, reportName, values = {}) {
       .trim()
   const parts = []
   if (c.withReportName) parts.push(clean(reportName))
-  c.fields.forEach((f) => parts.push(clean(values[f] ?? f)))
+  c.fields.forEach((f) => {
+    const m = EXPORT_TOKEN.exec(String(f).trim())
+    if (m && m[1] === 'now') parts.push(clean(exportNowText()))
+    else parts.push(clean(values[f] ?? (m ? m[1] : f)))
+  })
   const name = parts.filter((p) => p).join(clean(c.separator))
   return name || clean(reportName) || 'report'
 }

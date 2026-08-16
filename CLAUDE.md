@@ -524,13 +524,19 @@ Oracle 上那是语法错，而这份配置是所有类型的业务库共用的�
 重新渲染整张报表。
 
 主接口还管第二件事 —— **导出文件名**：`content.exportConfig`（打印设置弹窗的「导出」页签）= 报表名 +
-主接口若干字段值，拼法只有 `dto/ExportConfigDTO` 一处（洗掉 `\/:*?"<>|`、空字段整段跳过、
+若干段，拼法只有 `dto/ExportConfigDTO` 一处（洗掉 `\/:*?"<>|`、空字段整段跳过、
 拼不出来退回报表名），前端 `utils/sheet.js#exportFileName` 是设计器那个「示例」的同一套算法。
-两件事必须记住：① **名字随字节一起从 service 回来**（`RenderService.ExportFile`）——
+段有三种：**主接口字段** / `${now}` 当前时间（恒 `yyyyMMddHHmmss`）/ `${参数名}`（取这次渲染
+实际用的参数，`now` 是保留名）。三件事必须记住：
+① **字段那几段只在主接口恰好一行时才算数**（`ExportConfigDTO#nameRow`）—— 取回 200 条时
+第一行代表不了整份，「销售出库单_SO-001」里装着 200 张单是误导，所以多于一行一律跳过；
+`${now}` / `${参数}` 正是为这种批量导出而设的，它们不看数据，多条时照样拼得出来
+（于是 `needsRow()` 判的是「有没有**字段**段」，只配了这两种时一次数据都不必取）。
+② **名字随字节一起从 service 回来**（`RenderService.ExportFile`）——
 拼它要主接口那一行数据，controller 再去取一次就是白打一遍接口；那一行是从**这次渲染用的
-同一个取数函数**里要的（`RenderServiceImpl#firstPrimaryRow`，定版后 `rebind` 换过的话要用换过的
+同一个取数函数**里要的（`RenderServiceImpl#primaryNameRow`，定版后 `rebind` 换过的话要用换过的
 那个），于是通常直接命中 `CachingDataFetcher` 不多打一次。取不到只是少一段名字，**决不能让
-导出失败** —— 文件都生成好了。② **前端一律从 `Content-Disposition` 读**
+导出失败** —— 文件都生成好了。③ **前端一律从 `Content-Disposition` 读**
 （`utils/sheet.js#fileNameFromResponse`，controller 另外放出 `Access-Control-Expose-Headers`），
 自己拼一份必定和后端拼的不是一个名字。
 
