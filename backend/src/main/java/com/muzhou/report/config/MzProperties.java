@@ -87,6 +87,9 @@ public class MzProperties {
     /** 排队等导出名额的最长时间（秒），等不到就报错让用户稍后重试。 */
     private int exportWaitSeconds = 60;
 
+    /** 业务库连接池（运行时注册的那些数据源）。 */
+    private Pool pool = new Pool();
+
     /** 请求日志（调试用）。 */
     private Log log = new Log();
 
@@ -98,6 +101,88 @@ public class MzProperties {
 
     /** 上传字体的存放配置。 */
     private Font font = new Font();
+
+    /**
+     * 业务库连接池参数。见 {@link com.muzhou.report.datasource.DynamicDatasourceRegistry}。
+     *
+     * <p><b>这一份只管在「数据源管理」里加出来的业务库</b>，不含 master（本系统自己的元数据库，
+     * 它的池在 {@code spring.datasource.dynamic.hikari}）。两者分开是有意的：元数据库是本地
+     * 小库、连接就那么几条，业务库是别人家的生产库，能给多少连接由对方 DBA 说了算。
+     *
+     * <p><b>所有业务库共用这一份配置</b>——这里的每一项都会逐条写进 {@code DataSourceProperty#hikari}，
+     * 一项不留 null。留 null 的项会被 dynamic-datasource 拿 {@code spring.datasource.dynamic.hikari}
+     * （那是 master 的）补上，于是「改了 master 的池，业务库跟着变」，两边说不清谁管谁。
+     */
+    @Data
+    public static class Pool {
+
+        /**
+         * 单个业务库的最大连接数（HikariCP {@code maximumPoolSize}）。
+         *
+         * <p><b>池是定长的，超出上限的请求排队等 {@link #connectionTimeout} 而不是再开新连接</b> ——
+         * 报表场景一次渲染可能同时打好几个数据集（{@code fetchParallelism}）、还有导出并发
+         * （{@code exportConcurrency}），不封顶的话业务库那边看到的就是连接数一路涨。
+         * 调大之前先确认对方的 {@code max_connections} 扛得住：**每个数据源各占一份这个上限**，
+         * 10 个数据源就是最多 10×这个数。
+         */
+        private int maximumPoolSize = 10;
+
+        /**
+         * 常驻的空闲连接数（{@code minimumIdle}）。
+         *
+         * <p>默认 1：报表是低频高峰型的负载，常驻一条免掉「每次渲染都重新握手 + 登录」这一下，
+         * 又不至于让十来个数据源白占几十条连接。设成 0 = 完全空闲时一条不留（连接数最省，
+         * 代价是每次冷启动多一次建连）；设成与 {@link #maximumPoolSize} 相等 = 真正的定长池，
+         * 此时 {@link #idleTimeout} 不再起作用。
+         */
+        private int minimumIdle = 1;
+
+        /** 等一条空闲连接的最长时间（毫秒），等不到就报错。池满时排队等的就是它。 */
+        private long connectionTimeout = 30000;
+
+        /** 借出连接前做存活校验的超时（毫秒），必须小于 {@link #connectionTimeout}。 */
+        private long validationTimeout = 5000;
+
+        /**
+         * 空闲连接多久后被回收（毫秒），0 = 不回收。
+         *
+         * <p>只在 {@link #minimumIdle} 小于 {@link #maximumPoolSize} 时有意义 ——
+         * 高峰期涨上去的那些连接靠它退回去，否则报表跑完一次高峰，连接就一直占着。
+         */
+        private long idleTimeout = 600000;
+
+        /**
+         * 一条连接的最长寿命（毫秒），0 = 不限。
+         *
+         * <p>务必**小于**数据库/中间件那边的空闲断连时间（MySQL 的 {@code wait_timeout} 默认
+         * 28800s，但云上的负载均衡常砍到几分钟）：被对方悄悄掐掉的连接，池子自己不换就要等到
+         * 借出去用的时候才发现，表现是「偶发一次 Communications link failure」。
+         */
+        private long maxLifetime = 1800000;
+
+        /**
+         * 空闲连接的保活间隔（毫秒），0 = 关闭；开启时不得小于 30000。
+         *
+         * <p>连接被防火墙按「空闲多久」掐的场合才需要它 —— 隔一会儿探一下，让连接不算空闲。
+         */
+        private long keepaliveTime = 0;
+
+        /**
+         * 连接借出超过多少毫秒未归还就打一条疑似泄漏的日志，0 = 关闭；开启时不得小于 2000。
+         *
+         * <p>排查「连接池被占满」时打开它，日志里会带上借走没还的那处调用栈。
+         */
+        private long leakDetectionThreshold = 0;
+
+        /**
+         * 存活校验 SQL，**留空 = 走 JDBC4 的 {@code Connection.isValid()}**（推荐）。
+         *
+         * <p>别图省事统一填 {@code SELECT 1}：Oracle 上它是语法错误（要 {@code SELECT 1 FROM DUAL}），
+         * 而这一份配置是所有业务库共用的，填死一句就等于挑数据库类型。只有老到不支持
+         * {@code isValid()} 的驱动才需要填，而且那时你的库类型多半只有一种。
+         */
+        private String connectionTestQuery;
+    }
 
     /**
      * 上传字体配置。见 {@link com.muzhou.report.service.FontService}。

@@ -36,12 +36,16 @@ spring:
     dynamic:
       primary: master
       strict: false
+      # 换掉某个数据源的连接信息时，老池等它上面的连接跑完再关（异步），
+      # 而不是当场 close 把别人正在跑的查询掐断
+      grace-destroy: true
+      # 注意：这一段只管下面显式列出的 master（本系统自己的元数据库）。
+      # 「数据源管理」里加出来的业务库走的是 muzhou.report.pool，两边分开配，见那一节的注释
       hikari:
         connection-timeout: 30000
         max-lifetime: 1800000
         maximum-pool-size: 10
         minimum-idle: 2
-        connection-test-query: SELECT 1
       datasource:
         master:
           driver-class-name: org.h2.Driver
@@ -87,6 +91,34 @@ muzhou:
     # 线程池全应用共用一个、空闲即回收。并发压力落在业务库连接池与下游接口上，调大前先确认扛得住。
     # 配了父子关联的报表不受此项影响（关联取数有先后依赖，先主后子）
     fetch-parallelism: 4
+    # 业务库连接池：在「数据源管理」里加出来的每个数据源（MySQL / PostgreSQL / Oracle / SQLServer / H2）
+    # 各建一个 HikariCP 池，**参数全部取自这里、所有业务库共用一份**（实现见 DynamicDatasourceRegistry）。
+    # 池是定长的：查询从池里借连接、用完还回去，借不到就排队等 connection-timeout，不会再往库上开新连接。
+    # 这一份不含 master（本系统自己的元数据库），它的池在 spring.datasource.dynamic.hikari
+    pool:
+      # 单个业务库的最大连接数。**每个数据源各占一份**，10 个数据源就是最多 10×这个数，
+      # 调大前先确认对方库的 max_connections 扛得住。一次渲染可能并行打几个数据集
+      # （fetch-parallelism），导出还有 export-concurrency，这两项越大越吃连接
+      maximum-pool-size: 10
+      # 常驻的空闲连接数。1 = 免掉每次渲染重新握手+登录这一下，又不至于十来个数据源白占几十条；
+      # 0 = 完全空闲时一条不留；等于 maximum-pool-size = 真正的定长池（此时 idle-timeout 不起作用）
+      minimum-idle: 1
+      # 等一条空闲连接的最长毫秒数，等不到就报错（池满时排队等的就是它）
+      connection-timeout: 30000
+      # 借出前做存活校验的超时（毫秒），必须小于 connection-timeout
+      validation-timeout: 5000
+      # 空闲连接多久后回收（毫秒），0 = 不回收。高峰期涨上去的连接靠它退回 minimum-idle
+      idle-timeout: 600000
+      # 一条连接的最长寿命（毫秒），0 = 不限。**要小于数据库那边的空闲断连时间**
+      # （MySQL 的 wait_timeout、云上负载均衡常砍到几分钟），否则偶发 Communications link failure
+      max-lifetime: 1800000
+      # 空闲连接的保活间隔（毫秒），0 = 关闭；开启时不得小于 30000。被防火墙按空闲时长掐连接时才需要
+      keepalive-time: 0
+      # 连接借出超过多少毫秒未归还就打一条疑似泄漏的日志（带调用栈），0 = 关闭；开启时不得小于 2000
+      leak-detection-threshold: 0
+      # 存活校验 SQL，**留空 = 走 JDBC4 的 Connection.isValid()**，各家数据库通吃，推荐留空。
+      # 别统一填 SELECT 1：Oracle 上那是语法错（要 SELECT 1 FROM DUAL），而这份配置是所有业务库共用的
+      connection-test-query: ''
     # 打开一张不存在的报表时是否当场建一张空白的（为「外部系统拿业务 KEY 直接开设计器」准备）。
     # 代价是 GET /api/report/{id} 带上了写副作用，不靠这个能力的部署应当关掉。
     # 只对设计器打开那条路生效，渲染/导出一律不建。

@@ -85,6 +85,28 @@ npm run dev
 并把 `spring.sql.init.schema-locations` 指向你自己的 MySQL 建表脚本（`schema-h2.sql` 的语法基本通用，
 需把 `CLOB` 换成 `LONGTEXT`、`MERGE INTO ... KEY(id)` 换成 `INSERT ... ON DUPLICATE KEY UPDATE`）。
 
+### 4. 业务库连接池
+
+在「数据源管理」里加出来的每个业务库（MySQL / PostgreSQL / Oracle / SQLServer / H2），
+首次被用到时才建一个 **HikariCP 连接池**（启动时不连，某个库连不上不影响启动）。
+**池是定长的**：查询从池里借连接、用完还回去，借不到就排队等 `connection-timeout`，
+不会再往数据库上开新连接。参数在 `application.yml` 的 `muzhou.report.pool.*`，**所有业务库共用一份**：
+
+| 配置项 | 默认 | 说明 |
+|---|---|---|
+| `maximum-pool-size` | 10 | 单个业务库的最大连接数。**每个数据源各占一份**，10 个数据源最多 10×10 条 |
+| `minimum-idle` | 1 | 常驻空闲连接。`0` = 空闲时一条不留；等于 `maximum-pool-size` = 真正的定长池 |
+| `connection-timeout` | 30000 | 池满时等一条空闲连接的最长毫秒数，等不到报错 |
+| `idle-timeout` | 600000 | 高峰期涨上去的连接多久退回 `minimum-idle`，`0` = 不回收 |
+| `max-lifetime` | 1800000 | 一条连接的最长寿命，**要小于库那边的 `wait_timeout`**，否则偶发 `Communications link failure` |
+| `keepalive-time` | 0 | 空闲保活间隔，被防火墙按空闲时长掐连接时才需要（开启不得小于 30000） |
+| `leak-detection-threshold` | 0 | 借出多久未归还就打一条带调用栈的疑似泄漏日志（开启不得小于 2000） |
+| `connection-test-query` | 空 | 留空走 JDBC4 的 `isValid()`。**别统一填 `SELECT 1`**——Oracle 上那是语法错 |
+
+调大 `maximum-pool-size` 之前先看对方库的 `max_connections`；一次渲染并行打几个数据集
+（`muzhou.report.fetch-parallelism`）、导出并发（`muzhou.report.export-concurrency`）越大越吃连接。
+`spring.datasource.dynamic.hikari` 是**另一回事**，那是本系统自己那个元数据库（`master`）的池。
+
 ---
 
 ## 五分钟做一张报表

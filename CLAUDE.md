@@ -477,6 +477,22 @@ code 只在同一作用范围内唯一，不同报表、同报表不同版都允
 新建内部数据集**默认归当前版本**，弹窗里的「作用范围」可以改成全版本共用。
 
 `DynamicDatasourceRegistry` 运行时注册/切换数据源（dynamic-datasource），`JdbcExecutor` 执行查询。
+
+**每个业务库一个定长 HikariCP 池，池参数全部来自 `muzhou.report.pool.*`**（`MzProperties.Pool`），
+所有业务库共用这一份、逐项显式写进 `DataSourceProperty#hikari`（`poolConfig()`）。**一项都不能留 null**：
+留 null 的项会被 dynamic-datasource 的 `HikariDataSourceCreator` 拿 `spring.datasource.dynamic.hikari`
+补上，而那一份配的是 **master 元数据库**的池 —— 混着用就成了「改了元数据库的池，业务库跟着变」。
+两处分开是有意的：元数据库是本地小库，业务库是别人家的生产库，能给多少连接由对方 DBA 说了算。
+`connection-test-query` **默认留空走 JDBC4 的 `isValid()`**，别统一填 `SELECT 1` ——
+Oracle 上那是语法错，而这份配置是所有类型的业务库共用的。
+
+**惰性建池按 code 串行**（`getOrRegister` 里那个 `registerLocks` + 双重检查）：并发的两次渲染同时
+发现某个 code 没注册就会各建一个池，后建的把先建的顶掉、先建那个已经开出去的连接白开一遍，
+先到的线程还可能拿到正在被关掉的池 —— 「明明配了 10 条上限，库那边看到二十几条」多半是这么来的。
+换连接信息时**不先 remove 再 add**：`DynamicRoutingDataSource#addDataSource` 自己会把老池换下来关掉，
+先 remove 只是多留一个「这个 code 不存在」的窗口。老池的关闭走
+`spring.datasource.dynamic.grace-destroy: true`，等它上面的连接跑完再关，不掐断别人正在跑的查询。
+
 `SqlParamParser` 是安全边界：`${param}` 转成 JDBC `?` 顺序绑定；`$!{param}` 才是字符串拼接，
 仅用于动态表名/排序且做标识符白名单校验。改这里必须同步 `SqlParamParserTest`。
 
