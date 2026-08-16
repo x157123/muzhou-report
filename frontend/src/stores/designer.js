@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import {
+  autoBindCellConfigs,
   cellKey,
   createEmptyContent,
   defaultCellConfig,
@@ -113,6 +114,18 @@ export const useDesignerStore = defineStore('designer', {
         }
         return null
       }
+    },
+    /**
+     * 字段类型（number / date / string…），取不到返回空串。
+     * 手写占位符自动补绑定时拿它定格式化类型，与拖字段落格（bindField）保持一致。
+     */
+    fieldTypeOf(state) {
+      return (code, field) => {
+        if (!code || !field) return ''
+        const ds = this.datasetByCode(code)
+        const f = (ds?.fields || []).find((x) => x.fieldName === field)
+        return f?.fieldType || ''
+      }
     }
   },
 
@@ -157,6 +170,11 @@ export const useDesignerStore = defineStore('designer', {
       content.pageConfigs = perSheet
       // 老报表里可能留着指向已删 sheet 的孤儿配置，清掉，别让新增的 sheet 继承过去
       pruneSheetConfigs(content)
+      // 手写占位符的老报表进来时就把绑定补齐，不必等用户先改一下才在面板上看得出绑定。
+      // **这里刻意不传字段类型**（不是因为数据集还没拉回来）：老报表的这些格子一直是按
+      // `formatType=text` 出纸的（后端按文本推断出来的就是它），顺手升级成 number/date
+      // 等于把人家印了很久的数字悄悄改成 `#,##0.00`。要格式化让用户在面板上自己选。
+      content.cellConfigs = autoBindCellConfigs(content.cellConfigs, content.sheets)
       this.content = content
       this.sheetIndex = 0
       this.activeCell = null
@@ -236,6 +254,9 @@ export const useDesignerStore = defineStore('designer', {
       // 删掉格子内容不会通知业务层（FortuneSheet 只是把格子置成 {}），绑定只能在这里
       // 对着最新的 sheets 回收 —— 否则格子空了数据照样渲染出来
       this.content.cellConfigs = pruneEmptyCellConfigs(this.content.cellConfigs, next)
+      // 反过来：格子里手写了 `#{code.field}` 之类的占位符却没有配置时补一条绑定，
+      // 否则那一格在属性面板上显示成「文本」，扩展方式与格式化都无从配起
+      this.content.cellConfigs = autoBindCellConfigs(this.content.cellConfigs, next, this.fieldTypeOf)
       this.dirty = true
       return { dropped }
     },

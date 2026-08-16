@@ -183,13 +183,18 @@ export function findCell(sheet, r, c) {
   return null
 }
 
+/** 单元格值对象 -> 显示文本（与后端 TemplateParser 一样，先 m 后 v） */
+function cellDisplayText(v) {
+  if (v === null || v === undefined) return ''
+  if (typeof v === 'string' || typeof v === 'number') return String(v)
+  return String(v.m ?? v.v ?? '')
+}
+
 /** 读取单元格显示文本 */
 export function getCellText(sheet, r, c) {
   const cell = findCell(sheet, r, c)
-  if (!cell || !cell.v) return ''
-  const v = cell.v
-  if (typeof v === 'string' || typeof v === 'number') return String(v)
-  return String(v.m ?? v.v ?? '')
+  if (!cell) return ''
+  return cellDisplayText(cell.v)
 }
 
 /**
@@ -204,12 +209,19 @@ export function fieldToken(datasetCode, field) {
   return `#{${datasetCode}.${field}}`
 }
 
-/** 三类占位符的匹配规则，与后端 TemplateParser 的 DATA/FORMULA/PARAM_TOKEN 对应 */
+/**
+ * 三类占位符的匹配规则，与后端 TemplateParser 的 DATA/FORMULA/PARAM_TOKEN **逐字对应**
+ * —— `autoBindCellConfigs` 照它推断出来的配置必须和后端 `resolveConfig` 推断的是同一份，
+ * 否则面板上显示的是一回事、出纸又是另一回事。捕获组是那边推断要用的（数据集/字段/表达式/参数名）。
+ */
 const TOKEN_PATTERNS = {
-  data: /#\{\s*[A-Za-z_]\w*\.[\w$]+\s*\}/,
-  formula: /!\{[\s\S]+?\}/,
-  param: /\$\{\s*[A-Za-z_]\w*\s*\}/
+  data: /#\{\s*([A-Za-z_]\w*)\.([A-Za-z_][\w$]*)\s*\}/,
+  formula: /!\{([\s\S]+?)\}/,
+  param: /\$\{\s*([A-Za-z_]\w*)\s*\}/
 }
+
+/** 文本里有没有占位符的粗筛（每次改动要扫全表，先挡掉绝大多数普通格子） */
+const HAS_TOKEN = /[#!$]\{/
 
 /** 图片单元格的绑定写法与数据格一样，都是 `#{code.field}` */
 const TOKEN_TYPE_ALIAS = { img: 'data', base64: 'data' }
@@ -218,11 +230,14 @@ const TOKEN_TYPE_ALIAS = { img: 'data', base64: 'data' }
  * 把单元格文本里已有的占位符换成新的，**用户手写在占位符前后的文字原样留着**
  * （`#{orders.amount}元` 改个格式化方式，不该把「元」一起冲掉）。
  * 文本里还没有该类占位符时，直接返回占位符本身。
+ *
+ * 替换用**函数**而不是字符串：正则带了捕获组（见 TOKEN_PATTERNS），字符串形态下新占位符里
+ * 万一出现 `$1`（表达式里写得出来）会被当成「回填第一个捕获组」，换出来的东西面目全非。
  */
 export function replaceToken(text, type, token) {
   const re = TOKEN_PATTERNS[TOKEN_TYPE_ALIAS[type] || type]
   const old = String(text ?? '')
-  return re && re.test(old) ? old.replace(re, token) : token
+  return re && re.test(old) ? old.replace(re, () => token) : token
 }
 
 /** 解析 `#{code.field}`，返回 {datasetCode, field} 或 null */
@@ -281,6 +296,88 @@ export function pruneEmptyCellConfigs(cellConfigs, sheets) {
     out[key] = cfg
   }
   return dropped ? out : cellConfigs
+}
+
+/** 遍历一张 sheet 的每个非空格子（celldata 与运行时二维 data 两种形态都认，同 findCell） */
+function forEachCellText(sheet, fn) {
+  if (Array.isArray(sheet?.celldata)) {
+    for (const cell of sheet.celldata) {
+      if (cell && Number.isInteger(cell.r) && Number.isInteger(cell.c)) fn(cell.r, cell.c, cellDisplayText(cell.v))
+    }
+    return
+  }
+  if (Array.isArray(sheet?.data)) {
+    sheet.data.forEach((row, r) => {
+      if (!Array.isArray(row)) return
+      row.forEach((v, c) => {
+        if (v !== null && v !== undefined) fn(r, c, cellDisplayText(v))
+      })
+    })
+  }
+}
+
+/**
+ * 照格子文本推断一条单元格配置，**规则与后端 `TemplateParser#resolveConfig` 一致**：
+ * data 先于 formula 先于 param，手写的数据格默认纵向扩展。认不出来返回 null。
+ *
+ * 格式化类型跟着字段类型走（同拖拽落格的 `bindField`）；字段类型不知道时按文本，
+ * 反正后端推断出来的也是 `formatType=text`。
+ */
+function inferCellConfig(sheetIndex, r, c, text, fieldTypeOf) {
+  const base = defaultCellConfig(sheetIndex, r, c)
+  const dm = TOKEN_PATTERNS.data.exec(text)
+  if (dm) {
+    const fieldType = fieldTypeOf ? fieldTypeOf(dm[1], dm[2]) : ''
+    const formatType = fieldType === 'number' ? 'number' : fieldType === 'date' ? 'date' : 'text'
+    return {
+      ...base,
+      type: 'data',
+      datasetCode: dm[1],
+      field: dm[2],
+      expandType: 'down',
+      formatType,
+      formatPattern: defaultFormatPattern(formatType)
+    }
+  }
+  const fm = TOKEN_PATTERNS.formula.exec(text)
+  if (fm) return { ...base, type: 'formula', expression: fm[1] }
+  const pm = TOKEN_PATTERNS.param.exec(text)
+  // 参数格的值走文本替换（后端 ExpandProcessor#substitute），field 只是给面板显示/回写用
+  if (pm) return { ...base, type: 'param', field: pm[1] }
+  return null
+}
+
+/**
+ * `pruneEmptyCellConfigs` 相反的那一半：格子里手写了 `#{code.field}` / `!{表达式}` / `${param}`
+ * 却没有配置时，照文本自动补一条绑定。
+ *
+ * 手写占位符本来就渲染得出来（后端 `TemplateParser#resolveConfig` 没有显式配置就按文本推断），
+ * 但**设计器右侧面板读的是 `cellConfigs`** —— 不补的话手写的那格在面板上显示成「文本」，
+ * 扩展方式、分组、格式化都无从配起，看着就是「没绑上」。所以这里把后端那份推断提前落成配置，
+ * 面板上看到的与出纸的是同一份。规则必须与后端一致，见 `inferCellConfig`。
+ *
+ * **只补没有配置的格子**，已有配置一律不动：那是用户在面板上明确设过的，包括「就是要把这串
+ * 占位符当普通文字印出来」（改成 text 类型之后不该被这里又绑回去）。
+ *
+ * @param fieldTypeOf 可选，`(datasetCode, field) => 'number'|'date'|...`，用来定格式化类型
+ * @returns 新的 cellConfigs；没有要补的则原样返回传入对象
+ */
+export function autoBindCellConfigs(cellConfigs, sheets, fieldTypeOf) {
+  if (!Array.isArray(sheets) || !sheets.length) return cellConfigs
+  const base = cellConfigs || {}
+  let out = null
+  sheets.forEach((sheet, sheetIndex) => {
+    forEachCellText(sheet, (r, c, text) => {
+      if (!text || !HAS_TOKEN.test(text)) return
+      const key = cellKey(sheetIndex, r, c)
+      if ((out || base)[key]) return
+      const cfg = inferCellConfig(sheetIndex, r, c, text, fieldTypeOf)
+      if (!cfg) return
+      if (!out) out = { ...base }
+      out[key] = cfg
+    })
+  })
+  return out || cellConfigs
 }
 
 /** 深拷贝（结构化克隆，退化到 JSON） */

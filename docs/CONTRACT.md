@@ -793,6 +793,12 @@ Excel 里那一块；`WordExporter#readPictures` 只取「占了哪几行哪几�
 （`utils/sheet.js#pruneEmptyCellConfigs`，只回收上面这三类，`text` 类配置只有格式化，
 用户可能先设格式再填内容，不动）。手写 content（如 `db/data-report.sql` 的演示报表）也要守这条。
 
+反向也成立：**格子里有占位符、却没有对应配置时，按文本推断出一条**。渲染端本来就这么做
+（`TemplateParser#resolveConfig`：data 先于 formula 先于 param，手写的数据格默认
+`expandType=down`），设计器同样在 `setSheets` / `setReport` 里补
+（`utils/sheet.js#autoBindCellConfigs`），好让属性面板显示的与出纸的是同一份 ——
+**两边的推断规则必须一致**。已有配置一律不动（`text` 类型就是「把这串占位符当普通文字印」）。
+
 **模板下标 `sheet.mzTemplateIndex`**（每张渲染结果 sheet 都带，值是它出自 `content.sheets`
 的第几张）：
 ```json

@@ -765,6 +765,17 @@ FortuneSheet 删内容只是把该格置成 `{}`，不删 celldata 条目也不�
 `text` 类配置只有格式化，用户可能先设格式再填内容，不回收。手写 content 也守这条
 （`db/mz_report.sql` 演示报表的合计行照样写 `#{orders.amount}`）。
 
+**反过来的那一半是「手写占位符自动补绑定」**（`utils/sheet.js#autoBindCellConfigs`，挂在
+`setSheets` 与 `setReport` 两处）：格子里手打 `#{orders.order_status}` 本来就渲染得出来
+（`TemplateParser#resolveConfig` 没有显式配置就按文本推断），但**右侧属性面板读的是
+`cellConfigs`** —— 不补的话那一格在面板上显示成「文本」，扩展方式、分组、格式化都无从配起。
+所以**推断规则必须与 `TemplateParser#resolveConfig` 逐字一致**（三条正则同源、data 先于
+formula 先于 param、手写的数据格默认 `expandType=down`），否则面板上写的是一回事、出纸又是
+另一回事。**只补没有配置的格子** —— 已有配置是用户在面板上明确设过的，包括「就是要把这串
+占位符当普通文字印出来」（改成 `text` 之后不该被这里又绑回去）。`setReport` 那处**刻意不传
+字段类型**：老报表的这些格子一直按 `formatType=text` 出纸，顺手升级成 number/date 等于把人家
+印了很久的数字悄悄改成 `#,##0.00`；新打的字有 `setSheets` 那处按字段类型给（同拖拽落格）。
+
 `cellConfigs` 和 `pageConfigs` 都**按 sheet 下标寻址**（数组下标，不是 `id` 也不是 `order`），
 所以 sheets 数组一变就得搬 key：删除工作表时 FortuneSheet 是把它 splice 掉的，
 后面每张的下标都往前挪一位，不搬 key 的话配置会对到别的 sheet 身上（打印设置、单元格绑定全串）。
