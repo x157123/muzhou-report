@@ -1,5 +1,4 @@
 package com.muzhou.report.engine;
-
 import com.muzhou.report.dto.CellConfigDTO;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -8,6 +7,7 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.math.RoundingMode;
 import java.text.DecimalFormat;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -43,6 +43,11 @@ public class CellFormatter {
      * 进不了 {@code ct.fa}，导出的 Excel 按 fa 重新格式化，符号就没了。
      */
     public static final String CN_UPPER = "[中文大写]";
+
+    /** Unix 时间戳按秒解读的下限：10^8 秒 = 1973-03-03 */
+    private static final long EPOCH_SECOND_MIN = 100_000_000L;
+    /** Unix 时间戳按毫秒解读的下限：10^11 毫秒 = 1973-03-03，12 位及以上一律当毫秒 */
+    private static final long EPOCH_MILLI_MIN = 100_000_000_000L;
 
     private static final char[] CN_DIGITS = "零壹贰叁肆伍陆柒捌玖".toCharArray();
     /** 节内单位：个十百千 */
@@ -242,7 +247,7 @@ public class CellFormatter {
         }
     }
 
-    /** 任意值 -> LocalDateTime，无法识别返回 null。 */
+    /** 任意值 -> LocalDateTime（含 Unix 秒/毫秒时间戳，见 {@link #fromEpoch}），无法识别返回 null。 */
     public static LocalDateTime toDateTime(Object v) {
         if (v == null) {
             return null;
@@ -262,9 +267,24 @@ public class CellFormatter {
         if (v instanceof Date d) {
             return LocalDateTime.ofInstant(d.toInstant(), ZoneId.systemDefault());
         }
+        if (v instanceof Instant ins) {
+            return LocalDateTime.ofInstant(ins, ZoneId.systemDefault());
+        }
+        // Unix 时间戳：接口返回的日期常是这个（1781488319000 / 1781488319）
+        if (v instanceof Number n) {
+            return fromEpoch(n.longValue());
+        }
         String s = String.valueOf(v).trim();
         if (s.isEmpty()) {
             return null;
+        }
+        // 纯数字串同样按 Unix 时间戳解，认不出来（位数不够）时返回 null，与原来一样原样输出
+        if (s.chars().allMatch(Character::isDigit)) {
+            try {
+                return fromEpoch(Long.parseLong(s));
+            } catch (NumberFormatException e) {
+                return null;
+            }
         }
         try {
             if (s.length() <= 10) {
@@ -274,6 +294,23 @@ public class CellFormatter {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    /**
+     * Unix 时间戳 -&gt; LocalDateTime：12 位及以上按毫秒（1781488319000），
+     * 9~11 位按秒（1781488319），按系统时区换算。
+     *
+     * <p>下限卡在 {@link #EPOCH_SECOND_MIN} 是为了不把 Excel 的日期序列号（45878 这种量级）
+     * 误判成 1970 年 —— 小于下限的数返回 null，交回「认不出的日期原样输出」。
+     */
+    private static LocalDateTime fromEpoch(long v) {
+        if (v >= EPOCH_MILLI_MIN) {
+            return LocalDateTime.ofInstant(Instant.ofEpochMilli(v), ZoneId.systemDefault());
+        }
+        if (v >= EPOCH_SECOND_MIN) {
+            return LocalDateTime.ofInstant(Instant.ofEpochSecond(v), ZoneId.systemDefault());
+        }
+        return null;
     }
 
     /** 数值四舍五入到指定小数位。 */
