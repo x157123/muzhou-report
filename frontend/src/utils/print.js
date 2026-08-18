@@ -5,7 +5,7 @@
  * 两者换算即可算出「一页装得下多少行/多少列」，进而得到分页线位置。
  */
 
-import { colToLetter, letterToCol } from './sheet'
+import { colToLetter, inlineStringText, letterToCol } from './sheet'
 
 /** 常用纸张尺寸（mm，纵向摆放） */
 export const PAPER_SIZES = {
@@ -854,7 +854,12 @@ function pageSpan(breaks, from, to) {
 
 function hasValue(v) {
   if (v === null || v === undefined) return false
-  if (typeof v === 'object') return v.v !== null && v.v !== undefined && v.v !== '' ? true : !!v.m
+  if (typeof v === 'object') {
+    // 富文本格（Alt+Enter 换过行的那种）的文字只在 ct.s 里，v / m 都是空的，
+    // 不看一眼就会把它排除在使用区域外 —— 它落在最后一行/最后一列时，打印区域会短一截
+    if (inlineStringText(v) !== null) return true
+    return v.v !== null && v.v !== undefined && v.v !== '' ? true : !!v.m
+  }
   return v !== ''
 }
 

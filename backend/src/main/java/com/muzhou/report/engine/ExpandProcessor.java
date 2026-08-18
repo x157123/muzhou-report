@@ -412,7 +412,36 @@ public class ExpandProcessor {
                 : formatter.format(value, cfg);
         cell.setDisplay(f.display());
         cell.setCt(f.ct());
+        applyInlineCt(cell, tc, affixed);
         return cell;
+    }
+
+    /**
+     * 富文本格（{@code ct.t=inlineStr}，格子里按过 Alt+Enter 的那种）把模板那份 {@code ct} 原样带出去。
+     *
+     * <p>文字已经由 {@link com.muzhou.report.engine.TemplateParser} 从 {@code ct.s} 拼回
+     * {@link TemplateCell#getText()}，值与显示文本这一路都是全的，三条导出路（都是从
+     * {@code ExcelExporter} 的产物出发）读的也是显示文本 —— 这里只管**预览**：FortuneSheet
+     * 画富文本格只看 {@code ct.s}，换成常规的 {@code ct.t=g} 之后，分行位置就只剩按格宽折出来的那些，
+     * 与设计器里手动断的那几刀对不上。
+     *
+     * <p>只在**格子的内容没被顶掉**时才带（值与模板文字一字不差）：格子里写了
+     * {@code #{ds.field}} 之类的绑定时，输出的是取回来的数据，模板那份 {@code ct.s} 记的还是
+     * 占位符原文，带出去等于把渲染结果又盖回成模板。带前后缀的那条路（{@code affixed}）同理。
+     */
+    private void applyInlineCt(GridCell cell, TemplateCell tc, String affixed) {
+        if (affixed != null || tc.getInlineCt() == null) {
+            return;
+        }
+        if (!Objects.equals(cell.getValue(), tc.getText())) {
+            return;
+        }
+        // 格式化器判成常规文本（t=g）的才让位：这一格被配成数字/日期格时，ct 上挂着的是
+        // Excel 那头要用的格式（{@code ct.fa}），换成 inlineStr 就等于把格式抹了
+        Map<String, Object> ct = cell.getCt();
+        if (ct == null || "g".equals(String.valueOf(ct.get("t")))) {
+            cell.setCt(tc.getInlineCt());
+        }
     }
 
     /**

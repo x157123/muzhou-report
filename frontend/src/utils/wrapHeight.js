@@ -13,6 +13,7 @@
  * 不自己按「字数 × 字宽」推算。
  */
 import { cellSizePx, colWidth, rowHeight, usedRange } from './print'
+import { inlineStringText } from './sheet'
 import { DEFAULT_FONT } from './fontList'
 
 /** FortuneSheet 的默认字号（pt），见 core 的 defaultSettings */
@@ -111,11 +112,11 @@ function cellReader(sheet) {
   return (r, c) => map.get(`${r}_${c}`)
 }
 
-/** 单元格文字 */
+/** 单元格文字（富文本格的文字只在 ct.s 里，见 `sheet.js#inlineStringText`） */
 function textOf(cell) {
   if (cell == null) return ''
   if (typeof cell === 'string' || typeof cell === 'number') return String(cell)
-  return String(cell.m ?? cell.v ?? '')
+  return inlineStringText(cell) ?? String(cell.m ?? cell.v ?? '')
 }
 
 /**

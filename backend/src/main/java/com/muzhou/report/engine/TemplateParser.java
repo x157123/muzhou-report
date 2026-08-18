@@ -128,6 +128,7 @@ public class TemplateParser {
                     }
                 });
                 tc.setStyle(style);
+                applyInlineString(tc, v, style);
             } else if (vObj != null) {
                 tc.setRawValue(vObj);
                 tc.setText(String.valueOf(vObj));
@@ -144,6 +145,54 @@ public class TemplateParser {
             st.addCell(tc);
         }
         return st;
+    }
+
+    /**
+     * 富文本格（{@code ct.t = inlineStr}）的文字回填。
+     *
+     * <p>格子里按了 Alt+Enter、或者粘进一段多行文字之后，FortuneSheet **不再往 v / m 里写值**，
+     * 而是把这一格改存成 {@code ct.t=inlineStr} + {@code ct.s}（分段文字，段与段之间的
+     * {@code \r\n} 就是换行本身），并显式 {@code delete curv.v / curv.m}
+     * （见 @fortune-sheet/core 的 updateCell）。上面按 {@code m -> v} 取文字的那两行在这种格子上
+     * 只会取到空串 —— 报障「表格文本里有换行符就渲染不出来」说的就是它：设计器里看得见，
+     * 一预览 / 导出（Excel / PDF / Word 三条路都从渲染结果出发）那一格就是空的。
+     *
+     * <p>拼法与 FortuneSheet 自己的取值口径一致（{@code getCellValue} 对 inlineStr 是
+     * {@code ct.s.reduce((p, c) => p + (c.v ?? ""), "")}）：把各段的 {@code v} 顺次接起来。
+     * 换行统一成 {@code \n}：Excel 单元格里的换行符本来就是 {@code \n}，写 {@code \r\n} 进去
+     * Excel 会多显示一个小方块；PDF / Word 两条路的折行（{@code text.split("\r\n|\r|\n")}）
+     * 两种都认，不受影响。
+     *
+     * <p>带换行的格子顺便补上 {@code tb=2}（自动换行）：FortuneSheet 画富文本格时是不看 {@code tb} 的
+     * ——{@code ct.s} 里有换行就分行，所以设计器里从来不用手动开这个开关；而 Excel 不开
+     * 「自动换行」就不认单元格里的 {@code \n}（挤成一行，行高也不会撑开）。不补的话就是
+     * 「设计器和 PDF / Word 里分了行、导出的 Excel 里没分」。已经设过 {@code tb} 的不动。
+     *
+     * @param v     celldata 里那一格的 v 对象
+     * @param style 已经提取好的样式（{@link #VALUE_KEYS} 之外的那些键）
+     */
+    @SuppressWarnings("unchecked")
+    private void applyInlineString(TemplateCell tc, Map<String, Object> v, Map<String, Object> style) {
+        if (!(v.get("ct") instanceof Map<?, ?> ctMap) || !"inlineStr".equals(ctMap.get("t"))
+                || !(ctMap.get("s") instanceof List<?> segments) || segments.isEmpty()) {
+            return;
+        }
+        StringBuilder sb = new StringBuilder();
+        for (Object seg : segments) {
+            if (seg instanceof Map<?, ?> sm && sm.get("v") != null) {
+                sb.append(sm.get("v"));
+            }
+        }
+        String text = sb.toString().replace("\r\n", "\n").replace('\r', '\n');
+        if (text.isEmpty()) {
+            return;
+        }
+        tc.setRawValue(text);
+        tc.setText(text);
+        tc.setInlineCt((Map<String, Object>) ctMap);
+        if (text.indexOf('\n') >= 0) {
+            style.putIfAbsent("tb", "2");
+        }
     }
 
     /**

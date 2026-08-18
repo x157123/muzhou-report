@@ -207,11 +207,32 @@ export function findCell(sheet, r, c) {
   return null
 }
 
+/**
+ * 富文本格（`ct.t = inlineStr`）的文字，不是这种格子返回 null。
+ *
+ * 格子里按了 Alt+Enter、或者粘进一段多行文字之后，FortuneSheet **不再往 v / m 里写值**，
+ * 而是把这一格改存成 `ct.t=inlineStr` + `ct.s`（分段文字，段间的 `\r\n` 就是换行本身），
+ * 并显式 `delete curv.v / curv.m`（见 `@fortune-sheet/core` 的 `updateCell`）。
+ * 只按「先 m 后 v」读的地方在这种格子上一律读到空串 —— 表现就是「格子里明明有字，
+ * 却被当成空格子」（绑定推断、行高、打印区域都会漏掉它）。
+ *
+ * 拼法与 FortuneSheet 自己的取值口径一致（`getCellValue` 对 inlineStr 是
+ * `ct.s.reduce((p, c) => p + (c.v ?? ""), "")`），换行统一成 `\n`，与后端
+ * `TemplateParser#applyInlineString` 是同一份口径。
+ */
+export function inlineStringText(v) {
+  if (!v || typeof v !== 'object' || !v.ct || v.ct.t !== 'inlineStr') return null
+  const segments = v.ct.s
+  if (!Array.isArray(segments) || segments.length === 0) return null
+  const text = segments.reduce((prev, cur) => prev + (cur && cur.v != null ? cur.v : ''), '')
+  return text === '' ? null : text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+}
+
 /** 单元格值对象 -> 显示文本（与后端 TemplateParser 一样，先 m 后 v） */
 function cellDisplayText(v) {
   if (v === null || v === undefined) return ''
   if (typeof v === 'string' || typeof v === 'number') return String(v)
-  return String(v.m ?? v.v ?? '')
+  return inlineStringText(v) ?? String(v.m ?? v.v ?? '')
 }
 
 /** 读取单元格显示文本 */
@@ -284,7 +305,12 @@ export function isCellEmpty(sheet, r, c) {
   const cell = findCell(sheet, r, c)
   const v = cell?.v
   if (v === null || v === undefined) return true
-  if (typeof v === 'object') return isBlankValue(v.v) && isBlankValue(v.m) && isBlankValue(v.f)
+  if (typeof v === 'object') {
+    // 富文本格的文字只在 ct.s 里（v / m 是被删掉的），不看一眼就会把它当成空格子，
+    // 连带把它的单元格配置一起当「格子已清空、绑定还留着」清掉
+    if (inlineStringText(v) !== null) return false
+    return isBlankValue(v.v) && isBlankValue(v.m) && isBlankValue(v.f)
+  }
   return isBlankValue(v)
 }
 

@@ -56,6 +56,23 @@ npm run build
   由 `ExpandProcessor#applyMergeMarkers` 按结果重建，模板里那份是模板坐标、不能沿用
   （所以 `TemplateParser` 把 `mc` 挡在样式外面）。
 - `aggregate != none` 的单元格**不参与扩展**，在整个数据集上求一个值。
+- **富文本格（`ct.t=inlineStr`）的文字不在 `v` / `m` 里**：格子里按了 Alt+Enter、或者粘进一段
+  多行文字之后，FortuneSheet 把那一格改存成 `ct.t=inlineStr` + `ct.s`（分段文字，段间的 `\r\n`
+  就是换行本身），并**显式 `delete curv.v / curv.m`**（见 core 的 `updateCell`）。只按「先 m 后 v」
+  取文字的地方在这种格子上一律取到空串 —— 报障「表格文本里有换行符就渲染不出来」就是它：
+  设计器画布上看得见（画布走 `ct.s`），一预览/导出那一格就是空的，而三条导出路都从渲染结果
+  出发，所以 Excel / PDF / Word 一起中招。`TemplateParser#applyInlineString` 按 FortuneSheet
+  自己的口径（`getCellValue` 对 inlineStr 是 `ct.s.reduce((p,c) => p + (c.v ?? ""), "")`）把
+  各段接回成文字，换行统一成 `\n`，并给带换行的格子补上 `tb=2` —— **FortuneSheet 画富文本格
+  不看 `tb`，而 Excel 不开「自动换行」就不认单元格里的 `\n`**（挤成一行、行高也不撑开），
+  不补就是「设计器和 PDF / Word 里分了行、导出的 Excel 里没分」。模板那份 `ct` 由
+  `ExpandProcessor#applyInlineCt` 在**内容没被顶掉**时（值与模板文字一字不差、不走前后缀那条路、
+  格式化器判成常规文本）原样带到输出，否则预览里的分行位置只剩按格宽折出来的那些，
+  与设计器里手动断的那几刀对不上；格子里写了 `#{ds.field}` 的不带（那份 `ct.s` 记的还是占位符
+  原文，带出去等于把渲染结果盖回模板）。前端 `utils/sheet.js#inlineStringText` 是同一份口径，
+  `cellDisplayText` / `isCellEmpty` / `print.js#hasValue` / `wrapHeight.js#textOf` 都要过它 ——
+  不过的话富文本格在前端一律被当成空格子（绑定推断读不到占位符、打印区域会漏掉它）。
+  回归测试见 `RenderInlineStringTest`。
 - **图片单元格**（`type=img` 值是地址 / `base64` 值是 base64 / `barcode`、`qrcode` 值是要编成码的
   那串字）的取数与扩展跟 `data` 一模一样，
   所以引擎里判的是 `CellConfigDTO#isDataBound()` 而不是 `"data".equals(type)`；区别只在 `buildCell`：
